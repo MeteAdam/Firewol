@@ -1,21 +1,27 @@
+mod color;
 mod controls;
+mod editors;
 mod form;
+mod frame;
 mod measure;
+mod menu;
+mod tabs;
+mod theme;
 mod workers;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use anyhow::{Context, Result, ensure};
 use firewol_core::explorer::{
-    Cancellation, Filters, Item, ItemId, ItemPage, Operation, PAGE_SIZE, SearchIndex, SearchQuery,
-    Settings, data_dir, display_path, home, page, volume,
+    Cancellation, Filters, FolderKey, FolderStyle, Item, ItemId, ItemPage, Operation, PAGE_SIZE,
+    SearchIndex, SearchQuery, display_path, home, page, volume,
 };
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::{COLOR_3DFACE, HBRUSH, UpdateWindow};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -23,22 +29,39 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 use self::controls::*;
+use self::frame::{Clipboard, Frame, Session};
 use self::measure::Measurement;
 use self::workers::{Event, FileJob, ListJob, QueryJob, Scope, Snapshot, Ticket, WAKE, Workers};
 
-const CLASS: PCWSTR = w!("FirewolExplorer");
+const CLASS: PCWSTR = w!("FirewolPane");
 const EVENT_TIMER: usize = 1;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct History {
     folders: Vec<PathBuf>,
     position: usize,
+}
+
+#[derive(Clone, Default)]
+struct Tab {
+    history: History,
+    key: Option<FolderKey>,
+    start: Option<PathBuf>,
+    draft: SearchDraft,
+}
+
+#[derive(Clone, Default)]
+struct SearchDraft {
+    text: String,
+    filters: Filters,
+    regex: bool,
 }
 
 enum Visit {
     Startup,
     New,
     History(usize),
+    Restore,
     Refresh(Option<String>),
 }
 
@@ -110,6 +133,7 @@ impl Drop for Index {
     }
 }
 
+#[derive(Default)]
 struct Search {
     text: String,
     filters: Filters,
@@ -132,25 +156,45 @@ impl Search {
     }
 }
 
-struct Clipboard {
-    item: ItemId,
-    cut: bool,
-}
-
 struct Model {
     folder: Option<Folder>,
-    history: History,
+    tabs: Vec<Tab>,
+    active: usize,
     navigation: Option<Navigation>,
     search: Search,
-    settings: Settings,
-    save_settings: bool,
-    clipboard: Option<Clipboard>,
-    operating: bool,
-    consume_cut: bool,
     ticket: Ticket,
 }
 
 impl Model {
+    fn tab(&self) -> &Tab {
+        &self.tabs[self.active]
+    }
+
+    fn save_draft(&mut self) {
+        let search = &self.search;
+        let folder_scope = search
+            .index
+            .as_ref()
+            .is_none_or(|index| matches!(index.scope, Scope::Folder(_)));
+        self.tabs[self.active].draft = SearchDraft {
+            text: if folder_scope {
+                search.text.clone()
+            } else {
+                String::new()
+            },
+            filters: search.filters.clone(),
+            regex: search.regex,
+        };
+    }
+
+    fn cancel(&mut self) {
+        if let Some(navigation) = self.navigation.take() {
+            navigation.cancel.cancel();
+        }
+        self.search.cancel_query();
+        self.search.index = None;
+    }
+
     fn ticket(&mut self) -> Ticket {
         self.ticket += 1;
         self.ticket
@@ -164,13 +208,28 @@ impl Model {
     }
 }
 
+enum Drag {
+    Tab { index: usize, start: POINT },
+    Item(ItemId),
+}
+
 struct App {
+    window: Cell<HWND>,
+    frame: HWND,
+    session: Rc<Session>,
     controls: Cell<Option<Controls>>,
     model: RefCell<Model>,
     workers: Workers,
-    data: PathBuf,
     suppress_search: Cell<bool>,
+    deferred_refresh: Cell<bool>,
+    drag: RefCell<Option<Drag>>,
     measurement: Option<Measurement>,
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.model.get_mut().cancel();
+    }
 }
 
 impl App {
@@ -185,11 +244,15 @@ impl App {
     }
 
     fn layout(&self, window: HWND, controls: Controls) {
-        let (pins, searching) = {
-            let model = self.model.borrow();
-            (!model.settings.pins.is_empty(), model.search.active())
-        };
-        controls.layout(window, pins, searching);
+        let searching = self.model.borrow().search.active();
+        let tags = self
+            .session
+            .settings
+            .borrow()
+            .folders
+            .values()
+            .any(|style| !style.tags.is_empty());
+        controls.layout(window, searching, tags);
     }
 
     fn navigate(&self, path: PathBuf, visit: Visit) -> Result<()> {
@@ -226,16 +289,21 @@ impl App {
         let path = snapshot.path;
         let count = snapshot.count;
         let refresh = matches!(visit, Visit::Refresh(_));
-        let changed_settings = {
+        let draft = {
             let mut model = self.model.borrow_mut();
-            let history = &mut model.history;
+            let active = model.active;
+            let tab = &mut model.tabs[active];
+            let history = &mut tab.history;
+            tab.key = snapshot.id.as_ref().map(FolderKey::from);
+            tab.start = None;
+            let draft = matches!(visit, Visit::Restore).then(|| tab.draft.clone());
             let notice = match visit {
                 Visit::History(position) => {
                     history.position = position;
                     None
                 }
                 Visit::Refresh(notice) => notice,
-                Visit::Startup | Visit::New => {
+                Visit::Startup | Visit::New | Visit::Restore => {
                     if history.folders.get(history.position) != Some(&path) {
                         history.folders.truncate(history.position + 1);
                         history.folders.push(path.clone());
@@ -261,16 +329,22 @@ impl App {
                 model.search.text.clear();
                 model.search.offset = 0;
             }
-            let changed = model.settings.last_folder.as_ref() != Some(&path);
-            model.settings.last_folder = Some(path.clone());
-            changed
+            if let Some(draft) = &draft {
+                model.search.regex = draft.regex;
+                model.search.filters = draft.filters.clone();
+            }
+            draft
         };
         set_text(controls.address, display_path(&path));
         if !refresh {
             self.suppress_search.set(true);
-            set_text(controls.search, "");
+            set_text(
+                controls.search,
+                draft.as_ref().map_or("", |draft| draft.text.as_str()),
+            );
             self.suppress_search.set(false);
         }
+        self.update_tab_label(controls);
         self.navigation_buttons(controls);
         self.search_chrome(controls);
         self.layout(window, controls);
@@ -278,7 +352,21 @@ impl App {
             reset_list(controls.list, count);
             self.folder_status();
         }
-        if changed_settings && let Err(error) = self.save() {
+        if draft.is_some_and(|draft| !draft.text.trim().is_empty())
+            && let Err(error) = self.search_input(window, controls)
+        {
+            self.error(&error);
+        }
+        let record = !refresh
+            && Frame::at(self.frame)
+                .and_then(|frame| frame.active())
+                .is_none_or(|pane| pane.window.get() == window)
+            && self.session.settings.borrow().last_folder.as_ref() != Some(&path);
+        if record
+            && let Err(error) = self
+                .session
+                .update(|settings| settings.last_folder = Some(path))
+        {
             self.error(&error);
         }
     }
@@ -295,10 +383,10 @@ impl App {
             let model = self.model.borrow();
             let current = model.folder.as_ref().map(|folder| &folder.path);
             (
-                model.history.position > 0,
-                model.history.position + 1 < model.history.folders.len(),
+                model.tab().history.position > 0,
+                model.tab().history.position + 1 < model.tab().history.folders.len(),
                 current.is_some_and(|path| path.parent().is_some()),
-                current.is_some_and(|path| model.settings.pins.contains(path)),
+                current.is_some_and(|path| self.session.settings.borrow().pins.contains(path)),
             )
         };
         unsafe {
@@ -306,71 +394,20 @@ impl App {
             let _ = EnableWindow(controls.forward, forward);
             let _ = EnableWindow(controls.up, up);
         }
-        set_text(
-            controls.pin,
-            if pinned { "Unpin folder" } else { "Pin folder" },
-        );
+        set_text(controls.pin, if pinned { "Unpin" } else { "Pin" });
     }
 
-    fn save(&self) -> Result<()> {
-        let model = self.model.borrow();
-        if model.save_settings {
-            model.settings.save(&self.data)?;
-        }
-        Ok(())
-    }
-
-    fn pin_current(&self, window: HWND, controls: Controls) -> Result<()> {
-        {
-            let mut model = self.model.borrow_mut();
-            let path = model
-                .folder
-                .as_ref()
-                .context("Open a folder first")?
-                .path
-                .clone();
-            if let Some(position) = model.settings.pins.iter().position(|pin| pin == &path) {
-                model.settings.pins.remove(position);
+    fn pin_current(&self) -> Result<()> {
+        let path = self.current_path()?;
+        self.session.update(|settings| {
+            if let Some(index) = settings.pins.iter().position(|pin| pin == &path) {
+                settings.pins.remove(index);
             } else {
-                model.settings.pins.push(path);
+                settings.pins.push(path);
             }
-        }
-        self.pins(window, controls);
-        self.navigation_buttons(controls);
-        self.save()
-    }
-
-    fn pins(&self, window: HWND, controls: Controls) {
-        let pins = self.model.borrow().settings.pins.clone();
-        send(controls.pins, LB_RESETCONTENT, 0, 0);
-        for pin in pins {
-            let text = wide(&display_path(&pin));
-            send(controls.pins, LB_ADDSTRING, 0, text.as_ptr() as isize);
-        }
-        self.layout(window, controls);
-    }
-
-    fn pin_open(&self, controls: Controls) -> Result<()> {
-        let row = send(controls.pins, LB_GETCURSEL, 0, 0);
-        let path = self.model.borrow().settings.pins.get(row as usize).cloned();
-        if let Some(path) = path {
-            self.navigate(path, Visit::New)?;
-        }
+        })?;
+        self.session.settings_changed();
         Ok(())
-    }
-
-    fn remove_selected_pin(&self, window: HWND, controls: Controls) -> Result<()> {
-        let row = send(controls.pins, LB_GETCURSEL, 0, 0) as usize;
-        {
-            let mut model = self.model.borrow_mut();
-            if row >= model.settings.pins.len() {
-                return Ok(());
-            }
-            model.settings.pins.remove(row);
-        }
-        self.pins(window, controls);
-        self.navigation_buttons(controls);
-        self.save()
     }
 
     fn search_chrome(&self, controls: Controls) {
@@ -389,10 +426,7 @@ impl App {
         };
         set_text(
             controls.volume,
-            drive.map_or_else(
-                || "NTFS search…".into(),
-                |drive| format!("Stop {drive}: search"),
-            ),
+            drive.map_or_else(|| "NTFS search".into(), |drive| format!("Stop {drive}:")),
         );
         cue(
             controls.search,
@@ -426,7 +460,8 @@ impl App {
             Scope::Folder(_) => "Indexing the selected folder…".into(),
             Scope::Volume(drive) => format!("Waiting for UAC and indexing {drive}: …"),
         });
-        self.workers.index(ticket, scope, self.data.clone(), cancel);
+        self.workers
+            .index(ticket, scope, self.session.data.clone(), cancel);
     }
 
     fn search_input(&self, window: HWND, controls: Controls) -> Result<()> {
@@ -438,7 +473,6 @@ impl App {
             model.search.cancel_query();
             let was_active = model.search.active();
             model.search.text = get_text(controls.search).to_string_lossy().into_owned();
-            model.search.regex = send(controls.regex, BM_GETCHECK, 0, 0) == BST_CHECKED.0 as isize;
             model.search.results = None;
             model.search.offset = 0;
             let active = model.search.active();
@@ -567,7 +601,7 @@ impl App {
         )));
         if unsafe {
             MessageBoxW(
-                Some(window),
+                Some(self.frame),
                 PCWSTR(message.as_ptr()),
                 w!("Enable NTFS search"),
                 MB_OKCANCEL | MB_ICONINFORMATION | MB_DEFBUTTON2,
@@ -616,6 +650,11 @@ impl App {
                                 self.error(&error);
                             }
                         }
+                    }
+                    if self.model.borrow().navigation.is_none()
+                        && self.deferred_refresh.replace(false)
+                    {
+                        self.refresh_after_operation(None);
                     }
                 }
                 Event::Count(ticket, count, complete) => {
@@ -768,27 +807,6 @@ impl App {
                         }
                     }
                 }
-                Event::Operation(result) => {
-                    let active = {
-                        let mut model = self.model.borrow_mut();
-                        model.operating = false;
-                        if result.is_ok() && model.consume_cut {
-                            model.clipboard = None;
-                        }
-                        model.consume_cut = false;
-                        model.search.active()
-                    };
-                    match result {
-                        Ok(result) if !active && self.model.borrow().navigation.is_none() => {
-                            self.navigate(
-                                self.current_path()?,
-                                Visit::Refresh(Some(result.message)),
-                            )?;
-                        }
-                        Ok(result) => self.status(result.message),
-                        Err(error) => self.error(&error),
-                    }
-                }
             }
         }
         Ok(())
@@ -827,7 +845,7 @@ impl App {
     fn history(&self, forward: bool) -> Result<()> {
         let target = {
             let model = self.model.borrow();
-            let history = &model.history;
+            let history = &model.tab().history;
             let position = if forward {
                 history.position.checked_add(1)
             } else {
@@ -862,7 +880,7 @@ impl App {
             .cloned()
     }
 
-    fn open_item(&self, window: HWND, item: &Item, parent: bool) -> Result<()> {
+    fn open_item(&self, item: &Item, parent: bool) -> Result<()> {
         let id = item
             .id
             .as_ref()
@@ -881,7 +899,7 @@ impl App {
         let path = wide(&display_path(id.path()));
         let status = unsafe {
             ShellExecuteW(
-                Some(window),
+                Some(self.frame),
                 w!("open"),
                 PCWSTR(path.as_ptr()),
                 None,
@@ -897,13 +915,29 @@ impl App {
         Ok(())
     }
 
+    fn refresh_after_operation(&self, message: Option<String>) {
+        let (pending, searching) = {
+            let model = self.model.borrow();
+            (model.navigation.is_some(), model.search.active())
+        };
+        if pending {
+            self.deferred_refresh.set(true);
+        } else if let Ok(path) = self.current_path()
+            && let Err(error) = self.navigate(path, Visit::Refresh(message.clone()))
+        {
+            self.error(&error);
+            return;
+        }
+        if (pending || searching)
+            && let Some(message) = message
+        {
+            self.status(message);
+        }
+    }
+
     fn submit(&self, job: FileJob, consume_cut: bool) -> Result<()> {
-        let mut model = self.model.borrow_mut();
-        ensure!(!model.operating, "A file operation is already running");
-        self.workers.files.send(job)?;
-        model.operating = true;
-        model.consume_cut = consume_cut;
-        drop(model);
+        self.session
+            .submit(self.frame, self.window.get(), job, consume_cut)?;
         self.status("Working…");
         Ok(())
     }
@@ -937,8 +971,12 @@ impl App {
         if action == PASTE {
             let (operation, cut) = {
                 let model = self.model.borrow();
-                let clipboard = model
-                    .clipboard
+                ensure!(
+                    model.navigation.is_none(),
+                    "Wait for the destination folder to open"
+                );
+                let clipboard = self.session.clipboard.borrow();
+                let clipboard = clipboard
                     .as_ref()
                     .context("Copy or cut an item in Firewol first")?;
                 let into = model
@@ -960,18 +998,19 @@ impl App {
         }
         let item = item.context("Select an item first")?;
         match action {
-            OPEN | CONTAINING => self.open_item(window, &item, action == CONTAINING),
+            OPEN | CONTAINING => self.open_item(&item, action == CONTAINING),
             COPY | CUT => {
                 let id = item
                     .id
                     .context("The selected item's identity is unavailable")?;
-                let mut model = self.model.borrow_mut();
-                ensure!(!model.operating, "Wait for the current operation to finish");
-                model.clipboard = Some(Clipboard {
+                ensure!(
+                    !self.session.busy(),
+                    "Wait for the current operation to finish"
+                );
+                self.session.clipboard.replace(Some(Clipboard {
                     item: id,
                     cut: action == CUT,
-                });
-                drop(model);
+                }));
                 self.status(if action == CUT {
                     "Cut · navigate to a folder and paste"
                 } else {
@@ -984,7 +1023,7 @@ impl App {
                 let id = item
                     .id
                     .context("The selected item's identity is unavailable")?;
-                if let Some(name) = form::rename(window, name)? {
+                if let Some(name) = form::rename(self.frame, name)? {
                     self.submit(FileJob::Run(Operation::Rename { item: id, name }), false)?;
                 }
                 Ok(())
@@ -999,7 +1038,7 @@ impl App {
                     .context("The selected item's identity is unavailable")?;
                 if unsafe {
                     MessageBoxW(
-                        Some(window),
+                        Some(self.frame),
                         PCWSTR(name.as_ptr()),
                         w!("Recycle item"),
                         MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2,
@@ -1025,12 +1064,19 @@ impl App {
                 }
                 Ok(())
             }
-            PIN => self.pin_current(window, controls),
-            PINS if code == LBN_DBLCLK => self.pin_open(controls),
-            REGEX => self.search_input(window, controls),
+            PIN => self.pin_current(),
+            NEW_TAB => self.new_tab(),
+            CLOSE_TAB => self.close_tab(),
+            REGEX => {
+                let mut model = self.model.borrow_mut();
+                model.search.regex = !model.search.regex;
+                drop(model);
+                let _ = unsafe { InvalidateRect(Some(controls.regex), None, false) };
+                self.search_input(window, controls)
+            }
             FILTERS => {
                 let previous = self.model.borrow().search.filters.clone();
-                if let Some(filters) = form::filters(window, &previous)? {
+                if let Some(filters) = form::filters(self.frame, &previous)? {
                     self.model.borrow_mut().search.filters = filters;
                     self.search_input(window, controls)?;
                 }
@@ -1053,106 +1099,6 @@ const RECYCLE: usize = 507;
 const UNDO: usize = 508;
 const REFRESH: usize = 509;
 
-struct Menu(HMENU);
-
-impl Drop for Menu {
-    fn drop(&mut self) {
-        let _ = unsafe { DestroyMenu(self.0) };
-    }
-}
-
-fn context_menu(app: &App, window: HWND, controls: Controls, mouse: bool) -> Result<()> {
-    let mut point = POINT::default();
-    unsafe { GetCursorPos(&mut point)? };
-    let item = if mouse {
-        let mut hit = LVHITTESTINFO {
-            pt: point,
-            ..Default::default()
-        };
-        unsafe {
-            let _ = windows::Win32::Graphics::Gdi::ScreenToClient(controls.list, &mut hit.pt);
-        }
-        let row = send(
-            controls.list,
-            LVM_HITTEST,
-            0,
-            std::ptr::from_mut(&mut hit) as isize,
-        );
-        (row >= 0)
-            .then(|| {
-                app.model
-                    .borrow_mut()
-                    .item(row as u32, &app.workers)
-                    .cloned()
-            })
-            .flatten()
-    } else {
-        let mut rect = RECT::default();
-        unsafe { GetWindowRect(controls.list, &mut rect)? };
-        point = POINT {
-            x: rect.left + 25,
-            y: rect.top + 32,
-        };
-        app.selection(controls)
-    };
-    let (selected, searching, clipboard, idle) = {
-        let model = app.model.borrow();
-        (
-            item.as_ref().is_some_and(|item| item.id.is_some()),
-            model.search.active(),
-            model.clipboard.is_some(),
-            !model.operating,
-        )
-    };
-    let menu = Menu(unsafe { CreatePopupMenu()? });
-    let add = |id, text, enabled| unsafe {
-        AppendMenuW(
-            menu.0,
-            MF_STRING | if enabled { MF_ENABLED } else { MF_GRAYED },
-            id,
-            text,
-        )
-    };
-    let separator = || unsafe { AppendMenuW(menu.0, MF_SEPARATOR, 0, None) };
-    add(OPEN, w!("↵  Open\tEnter"), selected)?;
-    if searching {
-        add(CONTAINING, w!("    Open containing folder"), selected)?;
-    }
-    separator()?;
-    add(COPY, w!("    Copy\tCtrl+C"), selected && idle)?;
-    add(CUT, w!("    Cut\tCtrl+X"), selected && idle)?;
-    add(
-        PASTE,
-        w!("    Paste in current folder\tCtrl+V"),
-        clipboard && idle,
-    )?;
-    add(RENAME, w!("    Rename…\tF2"), selected && idle)?;
-    add(
-        RECYCLE,
-        w!("    Move to Recycle Bin…\tDel"),
-        selected && idle,
-    )?;
-    separator()?;
-    add(UNDO, w!("    Undo\tCtrl+Z"), idle)?;
-    add(REFRESH, w!("    Refresh\tF5"), true)?;
-    let command = unsafe {
-        TrackPopupMenu(
-            menu.0,
-            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-            point.x,
-            point.y,
-            None,
-            window,
-            None,
-        )
-        .0
-    } as usize;
-    if command != 0 {
-        app.action(window, controls, command, item)?;
-    }
-    Ok(())
-}
-
 fn keyboard(app: &App, window: HWND, controls: Controls, message: &MSG) -> Result<bool> {
     if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
         return Ok(false);
@@ -1161,8 +1107,23 @@ fn keyboard(app: &App, window: HWND, controls: Controls, message: &MSG) -> Resul
     let alt = unsafe { GetKeyState(i32::from(VK_MENU.0)) } < 0;
     let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
     let key = VIRTUAL_KEY(message.wParam.0 as u16);
+    if app.drag.borrow().is_some() {
+        if key == VK_ESCAPE {
+            app.drag.replace(None);
+            let _ = unsafe { ReleaseCapture() };
+            app.folder_status();
+        }
+        return Ok(true);
+    }
     let list = message.hwnd == controls.list;
     match (key, control, alt, list) {
+        (VK_T, true, false, _) => app.new_tab()?,
+        (VK_W, true, false, _) => app.close_tab()?,
+        (VK_TAB, true, false, _) => app.cycle_tab(shift)?,
+        (VK_N, true, false, _) if shift => {
+            let active = app.model.borrow().active;
+            app.detach_tab(active, None)?;
+        }
         (VK_L, true, false, _) | (VK_F, true, false, _) => {
             let focus = if key == VK_L {
                 controls.address
@@ -1177,10 +1138,6 @@ fn keyboard(app: &App, window: HWND, controls: Controls, message: &MSG) -> Resul
         (VK_UP, false, true, _) => app.command(window, controls, UP, 0)?,
         (VK_RETURN, false, false, _) if message.hwnd == controls.address => {
             app.open_address(controls)?
-        }
-        (VK_RETURN, false, false, _) if message.hwnd == controls.pins => app.pin_open(controls)?,
-        (VK_DELETE, false, false, _) if message.hwnd == controls.pins => {
-            app.remove_selected_pin(window, controls)?
         }
         (VK_RETURN, false, false, true) => {
             app.action(window, controls, OPEN, app.selection(controls))?
@@ -1199,11 +1156,316 @@ fn keyboard(app: &App, window: HWND, controls: Controls, message: &MSG) -> Resul
         (VK_X, true, false, true) => app.action(window, controls, CUT, app.selection(controls))?,
         (VK_V, true, false, true) => app.action(window, controls, PASTE, None)?,
         (VK_Z, true, false, true) => app.action(window, controls, UNDO, None)?,
-        (VK_APPS, false, false, true) => context_menu(app, window, controls, false)?,
-        (VK_F10, false, false, true) if shift => context_menu(app, window, controls, false)?,
+        (VK_APPS, false, false, true) => menu::popup(app, window, controls, false)?,
+        (VK_F10, false, false, true) if shift => menu::popup(app, window, controls, false)?,
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+impl App {
+    fn open(
+        frame: HWND,
+        session: Rc<Session>,
+        mut tab: Tab,
+        start: PathBuf,
+        visit: Visit,
+        measurement: Option<Measurement>,
+    ) -> Result<Rc<Self>> {
+        if tab.history.folders.is_empty() {
+            tab.start = Some(start.clone());
+        }
+        let app = Rc::new(Self {
+            window: Cell::default(),
+            frame,
+            controls: Cell::default(),
+            model: RefCell::new(Model {
+                tabs: vec![tab],
+                active: 0,
+                folder: None,
+                navigation: None,
+                search: Search::default(),
+                ticket: 0,
+            }),
+            workers: Workers::start(session.threads.clone()),
+            session,
+            suppress_search: Cell::default(),
+            deferred_refresh: Cell::default(),
+            drag: RefCell::default(),
+            measurement,
+        });
+        if let Some(probe) = &app.measurement {
+            probe.mark("workers ready");
+        }
+        app.navigate(start.clone(), visit)?;
+        let instance = app.session.instance;
+        let guard = Window(unsafe {
+            CreateWindowExW(
+                WS_EX_CONTROLPARENT,
+                CLASS,
+                w!("Folder pane"),
+                WS_CHILD | WS_CLIPCHILDREN,
+                0,
+                0,
+                1,
+                1,
+                Some(frame),
+                None,
+                Some(instance),
+                Some(std::ptr::from_ref(app.as_ref()).cast()),
+            )?
+        });
+        let window = guard.0;
+        app.window.set(window);
+        let controls = Controls::create(window, instance)?;
+        if let Some(probe) = &app.measurement {
+            probe.mark("controls created");
+            ensure!(
+                unsafe { SetTimer(Some(window), EVENT_TIMER, 15, None) } != 0,
+                "Start the Firewol measurement timer"
+            );
+        }
+        app.controls.set(Some(controls));
+        app.workers.bind(window);
+        tabs::install(controls.tabs)?;
+        controls.install_theme(window)?;
+        app.sync();
+        set_text(controls.address, display_path(&start));
+        app.search_chrome(controls);
+        app.status("Opening folder…");
+        app.events(window, controls)?;
+        show(window, true);
+        std::mem::forget(guard);
+        Ok(app)
+    }
+
+    fn focus(&self) {
+        if let Some(controls) = self.controls.get() {
+            let _ = unsafe { SetFocus(Some(controls.list)) };
+        }
+    }
+
+    fn keyboard(&self, message: &MSG) -> Result<bool> {
+        self.controls.get().map_or(Ok(false), |controls| {
+            keyboard(self, self.window.get(), controls, message)
+        })
+    }
+
+    fn sync(&self) {
+        if let Some(controls) = self.controls.get() {
+            self.session.theme.borrow().list(controls.list);
+            self.sync_tabs(controls);
+            self.navigation_buttons(controls);
+            self.layout(self.window.get(), controls);
+            let _ = unsafe { InvalidateRect(Some(controls.list), None, true) };
+        }
+    }
+
+    fn transfer(&self, item: ItemId, move_item: bool) -> Result<()> {
+        let target = Frame::at(self.frame)
+            .and_then(|frame| frame.other(self.window.get()))
+            .context("Open split view first")?;
+        let into = {
+            let model = target.model.borrow();
+            ensure!(
+                model.navigation.is_none(),
+                "Wait for the other pane to open its folder"
+            );
+            model
+                .folder
+                .as_ref()
+                .and_then(|folder| folder.id.clone())
+                .context("The other pane's folder identity is unavailable")?
+        };
+        let operation = if move_item {
+            Operation::Move { item, into }
+        } else {
+            Operation::Copy { item, into }
+        };
+        self.submit(FileJob::Run(operation), false)
+    }
+
+    fn customize_folder(&self, item: Option<Item>) -> Result<()> {
+        let id = if let Some(item) = item {
+            ensure!(item.directory, "Select a folder to customize it");
+            item.id
+        } else {
+            self.model
+                .borrow()
+                .folder
+                .as_ref()
+                .and_then(|folder| folder.id.clone())
+        }
+        .context("The folder's identity is unavailable")?;
+        id.verify()?;
+        let key = FolderKey::from(&id);
+        let previous = self
+            .session
+            .settings
+            .borrow()
+            .folders
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(style) = editors::folder(self.frame, &previous)? {
+            id.verify()?;
+            self.session.update(|settings| {
+                if style == FolderStyle::default() {
+                    settings.folders.remove(&key);
+                } else {
+                    settings.folders.insert(key, style);
+                }
+            })?;
+            self.session.settings_changed();
+        }
+        Ok(())
+    }
+
+    fn drop_target(&self, point: POINT) -> bool {
+        let Some(target) = Frame::at(self.frame).and_then(|frame| frame.other(self.window.get()))
+        else {
+            return false;
+        };
+        let Some(controls) = target.controls.get() else {
+            return false;
+        };
+        unsafe {
+            let child = WindowFromPoint(point);
+            child == controls.list || IsChild(controls.list, child).as_bool()
+        }
+    }
+
+    fn row(&self, index: i32) -> Option<Item> {
+        if index < 0 {
+            return None;
+        }
+        self.model
+            .borrow_mut()
+            .item(index as u32, &self.workers)
+            .cloned()
+    }
+
+    fn list_text(&self, info: &mut LVITEMW) {
+        let text_requested =
+            info.mask.contains(LVIF_TEXT) && info.cchTextMax > 0 && !info.pszText.is_null();
+        let icon_requested = info.mask.contains(LVIF_IMAGE) && info.iSubItem == 0;
+        if info.iItem < 0 || !(text_requested || icon_requested) {
+            return;
+        }
+        let mut model = self.model.borrow_mut();
+        let item = model.item(info.iItem as u32, &self.workers);
+        if icon_requested {
+            info.iImage = item.map_or(I_IMAGENONE, |item| i32::from(item.directory));
+        }
+        if !text_requested {
+            return;
+        }
+        let settings = self.session.settings.borrow();
+        let style = folder_style(&settings, item);
+        let buffer =
+            unsafe { std::slice::from_raw_parts_mut(info.pszText.0, info.cchTextMax as usize) };
+        match (info.iSubItem, item) {
+            (0, Some(item)) => write_cell(
+                buffer,
+                style
+                    .filter(|style| !style.alias.is_empty())
+                    .map_or_else(|| item.name(), |style| OsStr::new(&style.alias)),
+            ),
+            (1, Some(item)) => write_cell(
+                buffer,
+                OsStr::new(if item.directory { "Folder" } else { "File" }),
+            ),
+            (2, Some(item)) => write_cell(
+                buffer,
+                &display_path(item.path.parent().unwrap_or(Path::new(""))),
+            ),
+            (3, Some(_)) if style.is_some_and(|style| !style.tags.is_empty()) => {
+                let tags = style
+                    .map(|style| style.tags.join(" · "))
+                    .unwrap_or_default();
+                write_cell(buffer, OsStr::new(&tags));
+            }
+            (0, None) => write_cell(buffer, OsStr::new("Loading…")),
+            _ => write_cell(buffer, OsStr::new("")),
+        }
+    }
+
+    fn list_draw(&self, list: HWND, draw: &mut NMLVCUSTOMDRAW) -> LRESULT {
+        let stage = draw.nmcd.dwDrawStage;
+        if stage == CDDS_PREPAINT {
+            return LRESULT(CDRF_NOTIFYITEMDRAW as isize);
+        }
+        if stage != CDDS_ITEMPREPAINT && stage != CDDS_ITEMPOSTPAINT {
+            return LRESULT(CDRF_DODEFAULT as isize);
+        }
+        let row = draw.nmcd.dwItemSpec;
+        let mut model = self.model.borrow_mut();
+        let item = model.item(row as u32, &self.workers);
+        if !item.is_some_and(|item| item.directory) {
+            return LRESULT(CDRF_DODEFAULT as isize);
+        }
+        let theme = self.session.theme.borrow();
+        if stage == CDDS_ITEMPREPAINT {
+            if !draw.nmcd.uItemState.contains(CDIS_SELECTED) {
+                draw.clrText = theme::colorref(theme.folder_label);
+            }
+            return LRESULT(CDRF_NOTIFYPOSTPAINT as isize);
+        }
+        let mut icon = RECT {
+            left: LVIR_ICON as i32,
+            ..Default::default()
+        };
+        if send(
+            list,
+            LVM_GETITEMRECT,
+            row,
+            std::ptr::from_mut(&mut icon) as isize,
+        ) != 0
+        {
+            let settings = self.session.settings.borrow();
+            theme.folder_icon(draw.nmcd.hdc, icon, folder_style(&settings, item));
+        }
+        LRESULT(CDRF_DODEFAULT as isize)
+    }
+}
+
+fn folder_style<'a>(
+    settings: &'a firewol_core::explorer::Settings,
+    item: Option<&Item>,
+) -> Option<&'a FolderStyle> {
+    let item = item.filter(|item| item.directory)?;
+    settings.folders.get(&FolderKey::from(item.id.as_ref()?))
+}
+
+fn point(lparam: LPARAM) -> POINT {
+    POINT {
+        x: lparam.0 as i16 as i32,
+        y: (lparam.0 >> 16) as i16 as i32,
+    }
+}
+
+fn screen_point(window: HWND, lparam: LPARAM) -> POINT {
+    let mut point = point(lparam);
+    let _ = unsafe { ClientToScreen(window, &mut point) };
+    point
+}
+
+fn set_cursor(cursor: PCWSTR) {
+    if let Ok(cursor) = unsafe { LoadCursorW(None, cursor) } {
+        unsafe { SetCursor(Some(cursor)) };
+    }
+}
+
+// The parent keeps the pane alive until its children have been destroyed.
+fn pane_at(window: HWND) -> Option<Rc<App>> {
+    let data = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *const App;
+    if data.is_null() {
+        return None;
+    }
+    unsafe {
+        Rc::increment_strong_count(data);
+        Some(Rc::from_raw(data))
+    }
 }
 
 unsafe extern "system" fn procedure(
@@ -1216,106 +1478,172 @@ unsafe extern "system" fn procedure(
         let create = unsafe { &*(lparam.0 as *const CREATESTRUCTW) };
         unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, create.lpCreateParams as isize) };
     }
-    let data = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *const App;
-    let Some(app) = (unsafe { data.as_ref() }) else {
+    let Some(app) = pane_at(window) else {
         return unsafe { DefWindowProcW(window, message, wparam, lparam) };
     };
-    match message {
-        WM_GETMINMAXINFO => {
-            let bounds = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
-            bounds.ptMinTrackSize.x = 760;
-            bounds.ptMinTrackSize.y = 400;
-            return LRESULT(0);
-        }
-        WM_CLOSE if app.model.borrow().operating => {
-            app.status("Wait for the current file operation to finish");
-            return LRESULT(0);
-        }
-        WM_DESTROY => {
-            app.workers.bind(HWND::default());
-            unsafe { PostQuitMessage(0) };
-            return LRESULT(0);
-        }
-        _ => {}
+    if message == WM_NCDESTROY {
+        app.workers.bind(HWND::default());
+        unsafe { SetWindowLongPtrW(window, GWLP_USERDATA, 0) };
     }
-    let result = match app.controls.get() {
-        Some(controls) => match message {
-            WM_SIZE => {
-                app.layout(window, controls);
-                Ok(())
+    let Some(controls) = app.controls.get() else {
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    };
+    let result = match message {
+        WM_SIZE => {
+            app.layout(window, controls);
+            Ok(())
+        }
+        WM_ERASEBKGND => {
+            app.session
+                .theme
+                .borrow()
+                .erase(HDC(wparam.0 as *mut _), window);
+            return LRESULT(1);
+        }
+        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
+            let surface = HWND(lparam.0 as *mut _) == controls.address
+                || HWND(lparam.0 as *mut _) == controls.search;
+            return app
+                .session
+                .theme
+                .borrow()
+                .control_color(HDC(wparam.0 as *mut _), surface);
+        }
+        WM_MEASUREITEM if lparam.0 != 0 => {
+            let info = unsafe { &mut *(lparam.0 as *mut MEASUREITEMSTRUCT) };
+            if menu::measure(info) {
+                return LRESULT(1);
             }
-            WAKE => app.events(window, controls),
-            WM_TIMER if wparam.0 == EVENT_TIMER => app.events(window, controls).and_then(|()| {
-                app.measurement
-                    .as_ref()
-                    .map_or(Ok(()), |probe| probe.tick(app, window, controls))
-            }),
-            WM_COMMAND => app.command(window, controls, wparam.0 & 0xffff, (wparam.0 >> 16) as u32),
-            WM_NOTIFY if lparam.0 != 0 => {
-                let header = unsafe { &*(lparam.0 as *const NMHDR) };
-                if header.hwndFrom != controls.list {
-                    return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+            return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+        }
+        WM_DRAWITEM if lparam.0 != 0 => {
+            let info = unsafe { &*(lparam.0 as *const DRAWITEMSTRUCT) };
+            let theme = app.session.theme.borrow();
+            if info.CtlType == ODT_BUTTON {
+                let glyph = match info.CtlID as usize {
+                    BACK => Some("‹"),
+                    FORWARD => Some("›"),
+                    UP => Some("↑"),
+                    NEW_TAB => Some("+"),
+                    CLOSE_TAB => Some("×"),
+                    _ => None,
+                };
+                let selected = info.CtlID as usize == REGEX && app.model.borrow().search.regex;
+                theme.button(info, glyph, selected, false, theme.background);
+            } else if !menu::draw(info, &theme) {
+                return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+            }
+            return LRESULT(1);
+        }
+        WM_MOUSEMOVE if matches!(app.drag.borrow().as_ref(), Some(Drag::Item(_))) => {
+            set_cursor(if app.drop_target(screen_point(window, lparam)) {
+                IDC_SIZEALL
+            } else {
+                IDC_NO
+            });
+            return LRESULT(0);
+        }
+        WM_LBUTTONUP => {
+            let drag = app.drag.take();
+            if let Some(Drag::Item(item)) = drag {
+                let _ = unsafe { ReleaseCapture() };
+                if app.drop_target(screen_point(window, lparam)) {
+                    let move_item = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
+                    app.transfer(item, move_item)
+                } else {
+                    app.folder_status();
+                    Ok(())
                 }
+            } else {
+                return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+            }
+        }
+        WM_CAPTURECHANGED | WM_CANCELMODE => {
+            app.drag.replace(None);
+            return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+        }
+        WAKE => app.events(window, controls),
+        WM_TIMER if wparam.0 == EVENT_TIMER => app.events(window, controls).and_then(|()| {
+            app.measurement
+                .as_ref()
+                .map_or(Ok(()), |probe| probe.tick(&app, window, controls))
+        }),
+        WM_COMMAND => app.command(window, controls, wparam.0 & 0xffff, (wparam.0 >> 16) as u32),
+        WM_NOTIFY if lparam.0 != 0 => {
+            let header = unsafe { &*(lparam.0 as *const NMHDR) };
+            if header.hwndFrom == controls.tabs && header.code == TCN_SELCHANGE {
+                let index = send(controls.tabs, TCM_GETCURSEL, 0, 0);
+                if index >= 0 {
+                    app.select_tab(index as usize)
+                } else {
+                    Ok(())
+                }
+            } else if header.hwndFrom != controls.list {
+                return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+            } else {
                 match header.code {
+                    NM_SETFOCUS => {
+                        if let Some(frame) = Frame::at(app.frame) {
+                            frame.activate(window);
+                        }
+                        Ok(())
+                    }
                     LVN_GETDISPINFOW => {
                         let info = unsafe { &mut *(lparam.0 as *mut NMLVDISPINFOW) };
-                        let info = &mut info.item;
-                        let text_requested = info.mask.contains(LVIF_TEXT)
-                            && info.cchTextMax > 0
-                            && !info.pszText.is_null();
-                        let icon_requested = info.mask.contains(LVIF_IMAGE) && info.iSubItem == 0;
-                        if info.iItem >= 0 && (text_requested || icon_requested) {
-                            let mut model = app.model.borrow_mut();
-                            let item = model.item(info.iItem as u32, &app.workers);
-                            if icon_requested {
-                                info.iImage =
-                                    item.map_or(I_IMAGENONE, |item| i32::from(item.directory));
-                            }
-                            if !text_requested {
-                                return LRESULT(0);
-                            }
-                            let buffer = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    info.pszText.0,
-                                    info.cchTextMax as usize,
-                                )
-                            };
-                            match (info.iSubItem, item) {
-                                (0, Some(item)) => write_cell(buffer, item.name()),
-                                (1, Some(item)) => write_cell(
-                                    buffer,
-                                    OsStr::new(if item.directory { "Folder" } else { "File" }),
-                                ),
-                                (2, Some(item)) => write_cell(
-                                    buffer,
-                                    &display_path(item.path.parent().unwrap_or(Path::new(""))),
-                                ),
-                                (0, None) => write_cell(buffer, OsStr::new("Loading…")),
-                                _ => write_cell(buffer, OsStr::new("")),
-                            }
-                        }
-                        return LRESULT(0);
+                        app.list_text(&mut info.item);
+                        Ok(())
+                    }
+                    NM_CUSTOMDRAW => {
+                        let info = unsafe { &mut *(lparam.0 as *mut NMLVCUSTOMDRAW) };
+                        return app.list_draw(controls.list, info);
                     }
                     NM_DBLCLK => {
                         let activation = unsafe { &*(lparam.0 as *const NMITEMACTIVATE) };
                         if activation.iItem >= 0 {
-                            app.action(window, controls, OPEN, app.selection(controls))
+                            app.action(window, controls, OPEN, app.row(activation.iItem))
                         } else {
                             Ok(())
                         }
                     }
-                    NM_RCLICK => context_menu(app, window, controls, true),
+                    NM_RCLICK => menu::popup(&app, window, controls, true),
+                    LVN_BEGINDRAG => {
+                        let drag = unsafe { &*(lparam.0 as *const NMLISTVIEW) };
+                        if Frame::at(app.frame)
+                            .and_then(|frame| frame.other(window))
+                            .is_some()
+                            && let Some(item) = app.row(drag.iItem).and_then(|item| item.id)
+                        {
+                            app.drag.replace(Some(Drag::Item(item)));
+                            unsafe { SetCapture(window) };
+                            app.status("Drop on the other pane to copy · hold Shift to move");
+                        }
+                        Ok(())
+                    }
                     _ => return unsafe { DefWindowProcW(window, message, wparam, lparam) },
                 }
             }
-            _ => return unsafe { DefWindowProcW(window, message, wparam, lparam) },
-        },
-        None => return unsafe { DefWindowProcW(window, message, wparam, lparam) },
+        }
+        _ => return unsafe { DefWindowProcW(window, message, wparam, lparam) },
     };
     if let Err(error) = result {
         app.error(&error);
     }
     LRESULT(0)
+}
+
+fn register(instance: HINSTANCE) -> Result<()> {
+    let class = WNDCLASSW {
+        hInstance: instance,
+        hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
+        lpfnWndProc: Some(procedure),
+        lpszClassName: CLASS,
+        ..Default::default()
+    };
+    ensure!(
+        unsafe { RegisterClassW(&class) } != 0,
+        "Register Firewol pane class"
+    );
+    Ok(())
 }
 
 struct Window(HWND);
@@ -1327,138 +1655,5 @@ impl Drop for Window {
 }
 
 pub fn run(path: Option<PathBuf>) -> Result<()> {
-    let measurement = Measurement::requested();
-    let data = data_dir()?;
-    let loaded = Settings::load(&data);
-    let (settings, settings_error) = match loaded {
-        Ok(settings) => (settings, None),
-        Err(error) => (Settings::default(), Some(error)),
-    };
-    let (first, visit) = match path {
-        Some(path) => (path, Visit::New),
-        None => (
-            settings.last_folder.clone().unwrap_or(home()?),
-            Visit::Startup,
-        ),
-    };
-    if let Some(probe) = &measurement {
-        probe.mark("settings loaded");
-    }
-    let app = Box::new(App {
-        controls: Cell::new(None),
-        workers: Workers::start(),
-        data,
-        suppress_search: Cell::new(false),
-        measurement,
-        model: RefCell::new(Model {
-            folder: None,
-            history: History::default(),
-            navigation: None,
-            search: Search {
-                text: String::new(),
-                filters: Filters::default(),
-                regex: false,
-                index: None,
-                pending: None,
-                results: None,
-                offset: 0,
-            },
-            settings,
-            save_settings: settings_error.is_none(),
-            clipboard: None,
-            operating: false,
-            consume_cut: false,
-            ticket: 0,
-        }),
-    });
-    if let Some(probe) = &app.measurement {
-        probe.mark("workers ready");
-    }
-    app.navigate(first, visit)?;
-    let common = INITCOMMONCONTROLSEX {
-        dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-        dwICC: ICC_LISTVIEW_CLASSES,
-    };
-    unsafe {
-        ensure!(
-            InitCommonControlsEx(&common).as_bool(),
-            "Initialize Windows ListView"
-        );
-        let instance = HINSTANCE(GetModuleHandleW(None)?.0);
-        form::register(instance)?;
-        let class = WNDCLASSW {
-            hInstance: instance,
-            hCursor: LoadCursorW(None, IDC_ARROW)?,
-            lpfnWndProc: Some(procedure),
-            lpszClassName: CLASS,
-            hbrBackground: HBRUSH((COLOR_3DFACE.0 + 1) as usize as *mut _),
-            ..Default::default()
-        };
-        ensure!(RegisterClassW(&class) != 0, "Register Firewol window class");
-        let window = Window(CreateWindowExW(
-            WS_EX_CONTROLPARENT,
-            CLASS,
-            w!("Firewol"),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            970,
-            665,
-            None,
-            None,
-            Some(instance),
-            Some(std::ptr::from_ref(app.as_ref()).cast()),
-        )?);
-        let controls = Controls::create(window.0, instance)?;
-        if let Some(probe) = &app.measurement {
-            probe.mark("controls created");
-        }
-        app.controls.set(Some(controls));
-        app.workers.bind(window.0);
-        app.pins(window.0, controls);
-        app.navigation_buttons(controls);
-        app.search_chrome(controls);
-        if app.measurement.is_some() {
-            ensure!(
-                SetTimer(Some(window.0), EVENT_TIMER, 15, None) != 0,
-                "Start the Firewol measurement timer"
-            );
-        }
-        app.status("Opening folder…");
-        app.events(window.0, controls)?;
-        show(window.0, true);
-        let _ = UpdateWindow(window.0);
-        if let Some(probe) = &app.measurement {
-            probe.mark("window shown");
-        }
-        if let Some(error) = settings_error {
-            app.error(&error);
-        }
-        let _ = SetFocus(Some(controls.list));
-        let mut message = MSG::default();
-        loop {
-            let next = GetMessageW(&mut message, None, 0, 0).0;
-            ensure!(next >= 0, "Read the Win32 message queue");
-            if next == 0 {
-                break;
-            }
-            match keyboard(&app, window.0, controls, &message) {
-                Ok(false) if !IsDialogMessageW(window.0, &message).as_bool() => {
-                    let _ = TranslateMessage(&message);
-                    DispatchMessageW(&message);
-                }
-                Err(error) => app.error(&error),
-                _ => {}
-            }
-        }
-    }
-    let App { model, workers, .. } = *app;
-    let mut model = model.into_inner();
-    model.search.cancel_query();
-    if let Some(navigation) = &model.navigation {
-        navigation.cancel.cancel();
-    }
-    drop(model);
-    workers.shutdown();
-    Ok(())
+    frame::run(path)
 }

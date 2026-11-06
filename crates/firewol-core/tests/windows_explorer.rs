@@ -1,15 +1,17 @@
 #![cfg(windows)]
 
 use std::fs;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Barrier, mpsc};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Result, ensure};
 use firewol_core::explorer::{
-    Cancellation, Directory, Filters, ItemId, Operation, Operations, SearchIndex, SearchQuery, page,
+    Cancellation, Directory, Filters, FolderKey, FolderStyle, ItemId, Operation, Operations,
+    Preset, Rgb, SearchIndex, SearchQuery, Settings, page,
 };
 
 #[test]
@@ -246,5 +248,69 @@ fn directory_pages_preserve_long_unicode_paths() -> Result<()> {
     assert_eq!(fs::read(&copy)?, b"long path");
     operations.undo()?;
     assert!(!copy.exists());
+    Ok(())
+}
+
+#[test]
+fn legacy_settings_preserve_pins_and_store_folder_styles_by_identity() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let profile = fixture.path().join("profile");
+    let folder = fixture.path().join("İzmir-火");
+    fs::create_dir(&profile)?;
+    fs::create_dir(&folder)?;
+    let units: Vec<_> = folder.as_os_str().encode_wide().collect();
+    fs::write(
+        profile.join("explorer.json"),
+        serde_json::to_vec(&serde_json::json!({"last_folder": units, "pins": [units]}))?,
+    )?;
+
+    let settings = Settings::load(&profile)?;
+    assert_eq!(settings.last_folder.as_deref(), Some(folder.as_path()));
+    assert_eq!(settings.pins.as_slice(), std::slice::from_ref(&folder));
+    assert_eq!(settings.appearance.preset, Preset::LightMorphism);
+    assert!(!settings.menu.is_empty());
+
+    let key = FolderKey::from(&ItemId::at(folder.clone())?);
+    let style = FolderStyle {
+        alias: "Archive".into(),
+        color: Some(Rgb(61, 120, 204)),
+        icon: "A".into(),
+        tags: vec!["work".into()],
+    };
+    Settings::update(&profile, |settings| {
+        settings.folders.insert(key, style.clone());
+    })?;
+    let renamed = fixture.path().join("Renamed");
+    fs::rename(&folder, &renamed)?;
+    let renamed_key = FolderKey::from(&ItemId::at(renamed.clone())?);
+    let settings = Settings::load(&profile)?;
+    assert_eq!(settings.folders.get(&renamed_key), Some(&style));
+    assert!(fs::read_dir(renamed)?.next().is_none());
+    Ok(())
+}
+
+#[test]
+fn concurrent_settings_writes_merge_independent_edits() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let profile = fixture.path();
+    let start = Barrier::new(2);
+    thread::scope(|threads| -> Result<()> {
+        let sidebar = threads.spawn(|| {
+            start.wait();
+            Settings::update(profile, |settings| settings.sidebar = Some(false))
+        });
+        let appearance = threads.spawn(|| {
+            start.wait();
+            Settings::update(profile, |settings| {
+                settings.appearance.preset = Preset::Claymorphism
+            })
+        });
+        sidebar.join().expect("sidebar writer")?;
+        appearance.join().expect("appearance writer")?;
+        Ok(())
+    })?;
+    let settings = Settings::load(profile)?;
+    assert_eq!(settings.sidebar, Some(false));
+    assert_eq!(settings.appearance.preset, Preset::Claymorphism);
     Ok(())
 }

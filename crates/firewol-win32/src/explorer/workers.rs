@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -15,8 +16,28 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 pub(super) const WAKE: u32 = WM_APP + 1;
+pub(super) const FILE_WAKE: u32 = WM_APP + 2;
 
 pub(super) type Ticket = u64;
+pub(super) type Threads = Rc<RefCell<Vec<JoinHandle<()>>>>;
+
+pub(super) fn finish(threads: Threads) {
+    let threads = threads.take();
+    // A network read or a pending Windows consent prompt can outlive the windows.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline && threads.iter().any(|thread| !thread.is_finished()) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    for thread in threads.into_iter().filter(JoinHandle::is_finished) {
+        let _ = thread.join();
+    }
+}
+
+fn track(threads: &Threads, handle: JoinHandle<()>) {
+    let mut threads = threads.borrow_mut();
+    threads.retain(|thread| !thread.is_finished());
+    threads.push(handle);
+}
 
 pub(super) struct Snapshot {
     pub path: PathBuf,
@@ -34,12 +55,12 @@ pub(super) enum Event {
     Indexed(Ticket, SearchIndex, u64),
     IndexError(Ticket, anyhow::Error),
     Results(Ticket, Result<ItemPage>),
-    Operation(Result<OperationResult>),
 }
 
 pub(super) enum ListJob {
     Open(Ticket, PathBuf, Cancellation),
     Page(Ticket, u32),
+    Clear,
 }
 
 pub(super) struct QueryJob(
@@ -63,10 +84,9 @@ pub(super) enum Scope {
 pub(super) struct Workers {
     pub listing: Sender<ListJob>,
     pub search: Sender<QueryJob>,
-    pub files: Sender<FileJob>,
     pub events: Receiver<Event>,
     sender: EventOutput,
-    threads: RefCell<Vec<JoinHandle<()>>>,
+    threads: Threads,
 }
 
 #[derive(Clone)]
@@ -89,7 +109,7 @@ impl EventOutput {
 }
 
 impl Workers {
-    pub fn start() -> Self {
+    pub fn start(threads: Threads) -> Self {
         let (sender, events) = mpsc::channel();
         let sender = EventOutput {
             sender,
@@ -97,7 +117,6 @@ impl Workers {
         };
         let (listing, list_jobs) = mpsc::channel();
         let (search, search_jobs) = mpsc::channel::<QueryJob>();
-        let (files, file_jobs) = mpsc::channel();
         let send = sender.clone();
         let list_thread = thread::spawn(move || list_loop(&list_jobs, &send));
         let send = sender.clone();
@@ -131,27 +150,14 @@ impl Workers {
                 }
             }
         });
-        let send = sender.clone();
-        let file_thread = thread::spawn(move || {
-            let mut operations = None;
-            while let Ok(job) = file_jobs.recv() {
-                let result = match operations.get_or_insert_with(Operations::open) {
-                    Ok(operations) => match job {
-                        FileJob::Run(operation) => operations.submit_operation(operation),
-                        FileJob::Undo => operations.undo(),
-                    },
-                    Err(error) => Err(anyhow::anyhow!("Start the Windows Shell worker: {error:#}")),
-                };
-                send.send(Event::Operation(result));
-            }
-        });
+        track(&threads, list_thread);
+        track(&threads, query_thread);
         Self {
             listing,
             search,
-            files,
             events,
             sender,
-            threads: RefCell::new(vec![list_thread, query_thread, file_thread]),
+            threads,
         }
     }
 
@@ -181,30 +187,49 @@ impl Workers {
                 send.send(Event::IndexError(ticket, error));
             }
         });
-        let mut threads = self.threads.borrow_mut();
-        threads.retain(|thread| !thread.is_finished());
-        threads.push(handle);
+        track(&self.threads, handle);
+    }
+}
+
+pub(super) struct FileWorker {
+    jobs: Sender<(usize, FileJob)>,
+    pub results: Receiver<Result<OperationResult>>,
+}
+
+impl FileWorker {
+    pub fn start(threads: &Threads) -> Self {
+        let (jobs, incoming) = mpsc::channel();
+        let (finished, results) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let mut operations = None;
+            while let Ok((window, job)) = incoming.recv() {
+                let result = match operations.get_or_insert_with(Operations::open) {
+                    Ok(operations) => match job {
+                        FileJob::Run(operation) => operations.submit_operation(operation),
+                        FileJob::Undo => operations.undo(),
+                    },
+                    Err(error) => Err(anyhow::anyhow!("Start the Windows Shell worker: {error:#}")),
+                };
+                if finished.send(result).is_err() {
+                    break;
+                }
+                let _ = unsafe {
+                    PostMessageW(
+                        Some(HWND(window as *mut _)),
+                        FILE_WAKE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                };
+            }
+        });
+        track(threads, handle);
+        Self { jobs, results }
     }
 
-    pub fn shutdown(self) {
-        let Self {
-            listing,
-            search,
-            files,
-            events,
-            sender,
-            threads,
-        } = self;
-        drop((listing, search, files, events, sender));
-        let threads = threads.into_inner();
-        // A network read or a pending Windows consent prompt can outlive the window.
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while Instant::now() < deadline && threads.iter().any(|thread| !thread.is_finished()) {
-            thread::sleep(Duration::from_millis(10));
-        }
-        for thread in threads.into_iter().filter(JoinHandle::is_finished) {
-            let _ = thread.join();
-        }
+    pub fn submit(&self, window: HWND, job: FileJob) -> Result<()> {
+        self.jobs.send((window.0 as usize, job))?;
+        Ok(())
     }
 }
 
@@ -262,6 +287,10 @@ fn list_loop(jobs: &Receiver<ListJob>, send: &EventOutput) {
                         directory.list_dir(page(offset), cancel),
                     ));
                 }
+            }
+            Some(ListJob::Clear) => {
+                active = None;
+                enumerating = false;
             }
             None => {
                 let Some((ticket, cancel, directory)) = &mut active else {

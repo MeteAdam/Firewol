@@ -8,7 +8,10 @@ mod watch;
 pub use directory::Directory;
 pub use operations::{Operation, OperationResult, Operations};
 pub use search::{Filters, SearchIndex, SearchQuery, SearchReader};
-pub use settings::Settings;
+pub use settings::{
+    Appearance, CaptionShape, FolderKey, FolderStyle, MenuAction, MenuEntry, Preset, Rgb, Settings,
+    default_menu,
+};
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};

@@ -16,9 +16,24 @@ Firewol opens your user folder on the first launch and restores the last accessi
 - **Navigation.** Use the address bar, Back, Forward, Up or the folder rows. Ctrl+L focuses the address bar. F5 refreshes the listing.
 - **Search.** Ctrl+F searches the current folder and its subfolders. One- and two-character terms match prefixes. Longer terms match substrings. Use Regex and Filters for extension, size and UTC modification dates. Previous and Next navigate result pages. Folder search refreshes its index after Windows change notifications.
 - **NTFS search.** Choose **NTFS search…** to index the current drive for the current search session. The read-only helper requests UAC and requires an active USN journal. It sends opaque file references through a private local pipe. The regular Firewol process verifies paths and access before indexing and showing results. The index tracks one accessible path per reference and rebuilds after lost journal history.
-- **File operations.** Use the context menu or Ctrl+C, Ctrl+X and Ctrl+V to copy or move an item through the Firewol clipboard. F2 renames. Delete sends the selected item to the Recycle Bin. Ctrl+Z reverses verified operations in the current session when the original path is available. Copies of nonempty folders form an undo boundary. Same-volume moves are supported in M1.
+- **File operations.** Use the context menu or Ctrl+C, Ctrl+X and Ctrl+V to copy or move an item through the Firewol clipboard. F2 renames. Delete sends the selected item to the Recycle Bin. Ctrl+Z reverses verified operations in the current session when the original path is available. Copies of nonempty folders form an undo boundary. Moves use a same-volume destination.
 
-Firewol uses Windows Shell operations for ordinary transfers and extended Win32 paths for long copies and moves. Recycle requires the Shell to resolve the exact item. The M1 toolbar and window background use native system drawing to keep the first paint fast. [Windows Shell file operations](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ifileoperation) · [Extended Windows paths](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)
+Firewol uses Windows Shell operations for ordinary transfers and extended Win32 paths for long copies and moves. Recycle requires the Shell to resolve the exact item. [Windows Shell file operations](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ifileoperation) · [Extended Windows paths](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)
+
+## M2 navigation and appearance
+
+- **Tabs.** Press Ctrl+T to open a tab in the current folder, Ctrl+Tab to switch, and Ctrl+W to close. Drag a tab along the strip to reorder it or outside the window to detach it. Ctrl+Shift+N also detaches the active tab. A session supports four windows with shared clipboard and undo history. A tab restores its folder history and rebuilds any resumed folder search.
+- **Split view.** Open a second pane with its own folder, tabs and search. Drop an item on the other pane to copy it into the displayed folder. Hold Shift to move it on the same volume. The context menu also offers both actions. Returning to a single pane keeps the open tabs.
+- **Sidebar.** Toggle the sidebar from the toolbar. Pin and unpin folders from either pane. The sidebar opens a selected pin in the active pane.
+- **Appearance.** Select a preset, pick colors on the wheel or enter hex values, and set the caption buttons' side, shape, fill and hover color. Glassmorphism uses the Windows acrylic backdrop in the title area where supported. [Windows system backdrop types](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwm_systembackdrop_type)
+- **Folder appearance.** Right-click a folder, or the blank area inside it, and choose **Customize folder…** to set a display name, icon glyph, color and tags. Firewol stores these by folder identity in `explorer.json` and reads them independently of the search index.
+- **In-app menu.** Use **Edit menu…** to reorder or hide actions and change labels, glyphs and icon colors. Add a custom action with an absolute executable path. Firewol passes the verified selected item or current folder as one argument. [Nilesoft menu reference](https://nilesoft.org/images/screenshots/light/goto.png)
+
+### M2 verification
+
+The Windows 11 release run opened four windows and eight panes with 100,000 rows each. It measured 84 ms to the first list, 90 FPS during single-pane scrolling and a 4.0 ms p95 across 30 ready-index queries against the 100,000-item folder. Peak sampled private working set was 91,344,896 bytes across Firewol and a concurrent million-record index build. A 256 MiB copy completed through the split-pane UI.
+
+The release tests cover legacy settings and concurrent writes. Windows UI exercises covered tab reordering and detachment, split-pane transfers and undo, cross-window clipboard, all seven presets, the color wheel, caption controls, folder styles, and custom menu actions.
 
 ## M1 verification
 

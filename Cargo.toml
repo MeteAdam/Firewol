@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/firewol-core", "crates/firewol-win32", "src-tauri"]
+default-members = ["crates/firewol-core", "crates/firewol-win32"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"

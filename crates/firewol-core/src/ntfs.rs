@@ -83,7 +83,7 @@ pub fn probe(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn require_elevated_token() -> Result<()> {
+pub(crate) fn is_elevated() -> Result<bool> {
     let mut token = HANDLE::default();
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)? };
     let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
@@ -98,15 +98,10 @@ fn require_elevated_token() -> Result<()> {
             &mut bytes,
         )?;
     }
-    ensure!(
-        elevation.TokenIsElevated != 0,
-        "The NTFS helper requires an elevated Windows token"
-    );
-    Ok(())
+    Ok(elevation.TokenIsElevated != 0)
 }
 
-pub fn find_reference(drive: char, expected_volume: u32, index: u64) -> Result<()> {
-    require_elevated_token()?;
+pub(crate) fn volume_serial(drive: char) -> Result<u32> {
     ensure!(drive.is_ascii_alphabetic(), "Invalid drive letter");
     let root = wide(OsStr::new(&format!("{drive}:\\")));
     let mut filesystem = [0; 16];
@@ -122,9 +117,20 @@ pub fn find_reference(drive: char, expected_volume: u32, index: u64) -> Result<(
         )?;
     }
     ensure!(
-        serial == expected_volume
-            && filesystem.starts_with(&['N' as u16, 'T' as u16, 'F' as u16, 'S' as u16, 0]),
-        "The probe volume must match the selected NTFS volume"
+        filesystem.starts_with(&['N' as u16, 'T' as u16, 'F' as u16, 'S' as u16, 0]),
+        "The selected volume must use NTFS"
+    );
+    Ok(serial)
+}
+
+pub(crate) fn open_volume(drive: char, expected_volume: u32) -> Result<OwnedHandle> {
+    ensure!(
+        is_elevated()?,
+        "The NTFS helper requires an elevated Windows token"
+    );
+    ensure!(
+        volume_serial(drive)? == expected_volume,
+        "The selected NTFS volume changed"
     );
     let device = wide(OsStr::new(&format!(r"\\.\{drive}:")));
     let handle = unsafe {
@@ -139,15 +145,44 @@ pub fn find_reference(drive: char, expected_volume: u32, index: u64) -> Result<(
         )
     }
     .context("Open NTFS volume for read-only access")?;
-    let volume = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle.0) })
+}
+
+pub fn find_reference(drive: char, expected_volume: u32, index: u64) -> Result<()> {
+    let volume = open_volume(drive, expected_volume)?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut found = false;
+    enumerate(&volume, |records| {
+        ensure!(
+            Instant::now() < deadline,
+            "NTFS enumeration exceeded the probe time budget"
+        );
+        for record in records {
+            if record?.reference == index {
+                found = true;
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })?;
+    ensure!(
+        found,
+        "The fixture file reference was absent from the NTFS enumeration"
+    );
+    Ok(())
+}
+
+pub(crate) fn enumerate(
+    volume: &OwnedHandle,
+    mut receive: impl FnMut(Records<'_>) -> Result<bool>,
+) -> Result<()> {
     let mut input = MFT_ENUM_DATA_V0 {
         StartFileReferenceNumber: 0,
         LowUsn: 0,
         HighUsn: i64::MAX,
     };
     let mut buffer = vec![0u8; 64 * 1024];
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
+    loop {
         let mut bytes = 0;
         let result = unsafe {
             DeviceIoControl(
@@ -164,7 +199,7 @@ pub fn find_reference(drive: char, expected_volume: u32, index: u64) -> Result<(
         match result {
             Ok(()) => {}
             Err(error) if error.code() == ERROR_HANDLE_EOF.to_hresult() => {
-                bail!("The fixture file reference was absent from the NTFS enumeration");
+                return Ok(());
             }
             Err(error) => return Err(error).context("FSCTL_ENUM_USN_DATA"),
         }
@@ -172,7 +207,7 @@ pub fn find_reference(drive: char, expected_volume: u32, index: u64) -> Result<(
             .get(..bytes as usize)
             .context("Invalid NTFS output size")?;
         let (cursor, records) = block.split_at_checked(8).context("Truncated NTFS cursor")?;
-        if contains_reference(records, index)? {
+        if !receive(Records(records))? {
             return Ok(());
         }
         let next = u64::from_le_bytes(cursor.try_into()?);
@@ -182,22 +217,51 @@ pub fn find_reference(drive: char, expected_volume: u32, index: u64) -> Result<(
         );
         input.StartFileReferenceNumber = next;
     }
-    bail!("NTFS enumeration exceeded the probe time budget")
 }
 
-fn contains_reference(mut records: &[u8], index: u64) -> Result<bool> {
-    while !records.is_empty() {
-        let header = records.get(..16).context("Truncated USN record header")?;
-        let length = u32::from_le_bytes(header[..4].try_into()?) as usize;
-        let major = u16::from_le_bytes(header[4..6].try_into()?);
-        ensure!(
-            major == 2 && length >= 60 && length <= records.len() && length.is_multiple_of(8),
-            "Invalid USN v2 record"
-        );
-        if u64::from_le_bytes(header[8..16].try_into()?) == index {
-            return Ok(true);
+pub(crate) struct Records<'a>(pub &'a [u8]);
+
+pub(crate) struct Record {
+    pub reference: u64,
+    pub reason: u32,
+    pub attributes: u32,
+}
+
+impl Iterator for Records<'_> {
+    type Item = Result<Record>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_empty() {
+            return None;
         }
-        records = &records[length..];
+        let result = parse_record(self.0);
+        match result {
+            Ok((record, remaining)) => {
+                self.0 = remaining;
+                Some(Ok(record))
+            }
+            Err(error) => {
+                self.0 = &[];
+                Some(Err(error))
+            }
+        }
     }
-    Ok(false)
+}
+
+fn parse_record(records: &[u8]) -> Result<(Record, &[u8])> {
+    let header = records.get(..60).context("Truncated USN record header")?;
+    let length = u32::from_le_bytes(header[..4].try_into()?) as usize;
+    let major = u16::from_le_bytes(header[4..6].try_into()?);
+    ensure!(
+        major == 2 && length >= 60 && length <= records.len() && length.is_multiple_of(8),
+        "Invalid USN v2 record"
+    );
+    Ok((
+        Record {
+            reference: u64::from_le_bytes(header[8..16].try_into()?),
+            reason: u32::from_le_bytes(header[40..44].try_into()?),
+            attributes: u32::from_le_bytes(header[52..56].try_into()?),
+        },
+        &records[length..],
+    ))
 }

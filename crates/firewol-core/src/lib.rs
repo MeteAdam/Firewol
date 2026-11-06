@@ -9,6 +9,8 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
+pub mod explorer;
+#[cfg(windows)]
 mod file_identity;
 #[cfg(windows)]
 pub mod ntfs;

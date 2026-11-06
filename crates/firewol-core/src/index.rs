@@ -5,7 +5,7 @@ use rusqlite::{Connection, OpenFlags, params};
 
 use crate::{Entry, Page, SearchRequest};
 
-fn configure(db: &Connection) -> Result<()> {
+pub(crate) fn configure(db: &Connection) -> Result<()> {
     db.execute_batch("PRAGMA cache_size = -4096; PRAGMA mmap_size = 0; PRAGMA temp_store = FILE;")?;
     Ok(())
 }

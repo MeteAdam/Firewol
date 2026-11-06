@@ -5,13 +5,13 @@ Build a lightweight, customizable Windows 11 file manager with instant local sea
 
 ## Currently Working State & Constraints
 - PROMPT.md holds the product spec. PLAN.md holds the execution plan and sources.
-- M0 is complete on Windows 11 x64 with MSVC 19.44 and Windows SDK 10.0.26100.0.
-- Win32 owner-data ListView and Direct2D are the default over the shared Rust core. With 100,000 NTFS files and 1 million index records, Tauri peaked at 163.4 MB and Win32 at 30.8 MB.
-- The fixture prototype uses paged SQLite FTS5 search. Win32 returned the first list page in 224–268 ms and search p95 in 12.4–13.1 ms across three release runs.
-- Windows verified exact-identity Recycle Bin restore, destination conflict handling, and a read-only elevated MFT probe for a synthetic file reference.
-- The first usable release includes folder search and opt-in, read-only NTFS volume indexing.
-- Keep the total private working set below 150,000,000 bytes. README.md describes the reproducible M0 workload.
-- Nilesoft screenshots guide the default appearance and in-app menu. Store customization in local app data.
+- M0 selected Win32 after the Tauri prototype exceeded the 150,000,000-byte private working set cap.
+- M1 runs from `target/release/firewol-win32.exe` on Windows 11 x64. It restores the last folder, persists manual pins, and provides virtual directory paging and cancellable folder and NTFS search.
+- The NTFS helper is read-only and opt-in. A disposable volume verified UAC approval, ACL filtering, live USN updates and journal-loss recovery.
+- File operations use verified identities. Windows tests covered Recycle Bin restoration, undo conflicts, interrupted copies, case-only rename and long Unicode paths. Undo is scoped to the current session and verified items.
+- Three release runs with 100,000 rows and a million-file index showed first list in 94–232 ms, search p95 in 85–97 ms, scroll at 79–95 FPS and a folder-workload private peak of 9.93 MB.
+- Copies of nonempty folders form an undo boundary. Extended paths use native copy and move. Recycling requires an exact Windows Shell item.
+- Keep settings under `%LOCALAPPDATA%\Firewol` and the total private working set below 150,000,000 bytes.
 
 ## Next Immediate Step
-Build M1 on the Win32 adapter. Start with real folder navigation and cancellable paging, then connect item-identity operations and opt-in NTFS indexing.
+Exercise the UAC-denial path on a disposable NTFS volume, then start M2 with tabs and split-pane navigation.

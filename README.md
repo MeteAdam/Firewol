@@ -1,18 +1,34 @@
 # Firewol
 
-Firewol is a Windows 11 x64 file manager in development. The M0 prototype displays a virtual list from a synthetic NTFS folder and searches a disk-backed SQLite FTS5 index. The Win32 interface and the Tauri comparison build share the same Rust core. The code is available under the MIT license.
+Firewol is a Windows 11 x64 file manager with a native Win32 virtual list and disk-backed SQLite FTS5 search. The code is available under the MIT license.
 
-## Run the Win32 prototype
+## Run Firewol
 
-Build with Rust for `x86_64-pc-windows-msvc`, the MSVC x64 C++ tools and the Windows SDK. Run the executable from a standard-user session. Run the fixture command once to create the dataset at `%LOCALAPPDATA%\Firewol\M0`. Set `FIREWOL_M0_ROOT` to use another dataset.
+Build with Rust for `x86_64-pc-windows-msvc`, the MSVC x64 C++ tools and the Windows SDK. Run the executable from a standard-user session.
 
 ```powershell
 cargo build --release --locked
-.\target\release\firewol-m0.exe prepare 1200 20000
 .\target\release\firewol-win32.exe
 ```
 
-One- and two-character searches use a prefix. Longer queries match a substring. The native M0 view displays the first 128 matches.
+Firewol opens your user folder on the first launch and restores the last accessible folder on later launches. Use `--open PATH` to choose a starting folder. The sidebar shows folders you pin manually. Select a pin and press Delete to remove it. Settings are stored under `%LOCALAPPDATA%\Firewol`.
+
+- **Navigation.** Use the address bar, Back, Forward, Up or the folder rows. Ctrl+L focuses the address bar. F5 refreshes the listing.
+- **Search.** Ctrl+F searches the current folder and its subfolders. One- and two-character terms match prefixes. Longer terms match substrings. Use Regex and Filters for extension, size and UTC modification dates. Previous and Next navigate result pages. Folder search refreshes its index after Windows change notifications.
+- **NTFS search.** Choose **NTFS search…** to index the current drive for the current search session. The read-only helper requests UAC and requires an active USN journal. It sends opaque file references through a private local pipe. The regular Firewol process verifies paths and access before indexing and showing results. The index tracks one accessible path per reference and rebuilds after lost journal history.
+- **File operations.** Use the context menu or Ctrl+C, Ctrl+X and Ctrl+V to copy or move an item through the Firewol clipboard. F2 renames. Delete sends the selected item to the Recycle Bin. Ctrl+Z reverses verified operations in the current session when the original path is available. Copies of nonempty folders form an undo boundary. Same-volume moves are supported in M1.
+
+Firewol uses Windows Shell operations for ordinary transfers and extended Win32 paths for long copies and moves. Recycle requires the Shell to resolve the exact item. The M1 toolbar and window background use native system drawing to keep the first paint fast. [Windows Shell file operations](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ifileoperation) · [Extended Windows paths](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)
+
+## M1 verification
+
+`cargo test --release --locked` exercises Windows item identity, copy and undo conflicts, long Unicode paths, paged search and external folder changes. The release executable was also tested with a disposable NTFS volume for UAC-approved volume search, ACL visibility, live journal updates and journal loss recovery.
+
+Three release runs on Windows 11 used a 100,000-row NTFS directory and an index of one million synthetic files. First list presentation took 94–232 ms, ready-index search p95 was 85–97 ms, and native scrolling reached 79–95 FPS. The last virtual row was verified in all three runs. Initial folder indexing took 7.8–10.6 seconds. The folder workload peaked at 9,932,800 bytes of sampled private working set. The explicit UAC-denial exercise remains open.
+
+A 256 MiB transfer through the release Rust core also completed while the native window was open. The window and the separate transfer probe peaked at a combined 6,180,864 bytes of sampled private working set.
+
+To record native startup and scrolling, set `FIREWOL_M1_LIST_REPORT` to a new JSON path and start `firewol-win32.exe --open PATH` with a large synthetic folder. Firewol records first presentation, native scroll redraws and the last virtual row.
 
 ## Reproduce the M0 measurement
 

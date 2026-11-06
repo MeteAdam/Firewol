@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, ensure};
+use firewol_core::explorer::elevation::{ElevationMode, executable_id, validate_executable};
 use firewol_core::explorer::{Item, MenuAction, MenuEntry, display_path};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{DT_LEFT, DT_RIGHT, DrawFocusRect, ScreenToClient};
@@ -15,12 +16,13 @@ use super::theme::{Theme, draw_text, fill, mix};
 use super::{App, CONTAINING, COPY, CUT, OPEN, PASTE, RECYCLE, REFRESH, RENAME, UNDO};
 
 const FIRST: usize = 1000;
-pub(super) const MAX_ENTRIES: usize = 32;
+pub(super) const MAX_ENTRIES: usize = 33;
 
 pub(super) fn details(action: &MenuAction) -> (&'static str, &'static str, &'static str, u8) {
     use MenuAction::*;
     match action {
         Open => ("Open", "↵", "Enter", 0),
+        RunAsAdministrator => ("Run as administrator…", "↑", "", 0),
         Containing => ("Open containing folder", "↗", "", 0),
         Copy => ("Copy", "⧉", "Ctrl+C", 1),
         Cut => ("Cut", "✂", "Ctrl+X", 1),
@@ -73,6 +75,33 @@ pub(super) fn popup(app: &App, window: HWND, controls: Controls, mouse: bool) ->
             0,
             std::ptr::from_mut(&mut hit) as isize,
         );
+        if row >= 0
+            && send(
+                controls.list,
+                LVM_GETITEMSTATE,
+                row as usize,
+                LVIS_SELECTED.0 as isize,
+            ) == 0
+        {
+            let flags = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
+            let mut state = LVITEMW {
+                stateMask: flags,
+                ..Default::default()
+            };
+            send(
+                controls.list,
+                LVM_SETITEMSTATE,
+                usize::MAX,
+                std::ptr::from_mut(&mut state) as isize,
+            );
+            state.state = flags;
+            send(
+                controls.list,
+                LVM_SETITEMSTATE,
+                row as usize,
+                std::ptr::from_ref(&state) as isize,
+            );
+        }
         app.row(row as i32)
     } else {
         let mut rect = RECT::default();
@@ -103,11 +132,9 @@ pub(super) fn popup(app: &App, window: HWND, controls: Controls, mouse: bool) ->
     let split = super::Frame::at(app.frame)
         .and_then(|frame| frame.other(window))
         .is_some();
+    let settings = app.session.settings.borrow();
     let mut group = None;
-    let rows: Vec<_> = app
-        .session
-        .settings
-        .borrow()
+    let rows: Vec<_> = settings
         .menu
         .iter()
         .filter(|entry| entry.visible)
@@ -116,13 +143,32 @@ pub(super) fn popup(app: &App, window: HWND, controls: Controls, mouse: bool) ->
             let enabled = match entry.action {
                 Containing if !searching => return None,
                 CopyOther | MoveOther if !split => return None,
+                RunAsAdministrator => {
+                    let id = item
+                        .as_ref()
+                        .filter(|item| !item.directory)
+                        .and_then(|item| item.id.as_ref())?;
+                    if settings.elevation.mode == ElevationMode::Standard
+                        || validate_executable(id.path()).is_err()
+                    {
+                        return None;
+                    }
+                    idle && settings.elevation.allows(id)
+                }
                 Open | Containing => selected,
-                Copy | Cut | Rename | Recycle | CopyOther | MoveOther => selected && idle,
+                Copy | Cut | CopyOther | MoveOther => selected && idle,
+                Rename | Recycle => {
+                    selected && idle && send(controls.list, LVM_GETSELECTEDCOUNT, 0, 0) <= 1
+                }
                 Paste => current && clipboard && idle,
                 FolderStyle => can_style,
                 Undo => idle,
                 Refresh => current,
-                Custom { .. } => item.as_ref().map_or(current, |_| selected),
+                Custom { administrator, .. } => {
+                    item.as_ref().map_or(current, |_| selected)
+                        && (!administrator
+                            || (idle && settings.elevation.mode != ElevationMode::Standard))
+                }
             };
             let next_group = details(&entry.action).3;
             let divider = group
@@ -136,6 +182,7 @@ pub(super) fn popup(app: &App, window: HWND, controls: Controls, mouse: bool) ->
         })
         .take(MAX_ENTRIES)
         .collect();
+    drop(settings);
     ensure!(
         !rows.is_empty(),
         "No actions are visible. Use Edit menu to show them."
@@ -191,6 +238,13 @@ fn invoke(
     use MenuAction::*;
     let command = match action {
         Open => OPEN,
+        RunAsAdministrator => {
+            let item = item
+                .and_then(|item| item.id)
+                .context("Select an executable")?;
+            item.verify()?;
+            return elevate(app, item, None);
+        }
         Containing => CONTAINING,
         Copy => COPY,
         Cut => CUT,
@@ -201,12 +255,12 @@ fn invoke(
         Refresh => REFRESH,
         FolderStyle => return app.customize_folder(item),
         CopyOther | MoveOther => {
-            let item = item
-                .and_then(|item| item.id)
-                .context("Select an item with a verified identity")?;
-            return app.transfer(item, *action == MoveOther);
+            return app.transfer(app.transfer_selection(controls)?, *action == MoveOther);
         }
-        Custom { executable } => {
+        Custom {
+            executable,
+            administrator,
+        } => {
             let (id, directory) = if let Some(item) = item {
                 (item.id, item.directory)
             } else {
@@ -223,6 +277,9 @@ fn invoke(
             id.verify()?;
             let executable = Path::new(executable);
             validate_executable(executable)?;
+            if *administrator {
+                return elevate(app, executable_id(executable)?, Some(id));
+            }
             let folder = if directory {
                 id.path()
             } else {
@@ -239,15 +296,24 @@ fn invoke(
     app.action(window, controls, command, item)
 }
 
-pub(super) fn validate_executable(executable: &Path) -> Result<()> {
+fn elevate(
+    app: &App,
+    program: firewol_core::explorer::ItemId,
+    argument: Option<firewol_core::explorer::ItemId>,
+) -> Result<()> {
+    let policy = app.session.settings.borrow().elevation.clone();
     ensure!(
-        executable.is_absolute()
-            && executable
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe")),
-        "Enter an absolute path to an .exe file"
+        policy.allows(&program),
+        "Elevation for this executable is disabled in Admin settings"
     );
-    Ok(())
+    app.submit(
+        super::FileJob::Elevate {
+            policy,
+            program,
+            argument,
+        },
+        false,
+    )
 }
 
 fn row_data(item_type: DRAWITEMSTRUCT_CTL_TYPE, id: u32, data: usize) -> Option<*const Row> {

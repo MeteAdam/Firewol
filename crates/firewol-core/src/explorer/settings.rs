@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::ItemId;
+use super::elevation::ElevationPolicy;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -106,6 +107,7 @@ pub struct FolderStyle {
 #[serde(rename_all = "snake_case")]
 pub enum MenuAction {
     Open,
+    RunAsAdministrator,
     Containing,
     Copy,
     Cut,
@@ -117,7 +119,11 @@ pub enum MenuAction {
     FolderStyle,
     Undo,
     Refresh,
-    Custom { executable: String },
+    Custom {
+        executable: String,
+        #[serde(default)]
+        administrator: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +158,7 @@ pub fn default_menu() -> Vec<MenuEntry> {
     use MenuAction::*;
     [
         Open,
+        RunAsAdministrator,
         Containing,
         Copy,
         Cut,
@@ -174,6 +181,7 @@ pub struct Settings {
     pub pins: Vec<PathBuf>,
     pub sidebar: Option<bool>,
     pub appearance: Appearance,
+    pub elevation: ElevationPolicy,
     pub menu: Vec<MenuEntry>,
     pub folders: BTreeMap<FolderKey, FolderStyle>,
 }
@@ -185,6 +193,7 @@ impl Default for Settings {
             pins: Vec::new(),
             sidebar: None,
             appearance: Appearance::default(),
+            elevation: ElevationPolicy::default(),
             menu: default_menu(),
             folders: BTreeMap::new(),
         }
@@ -200,6 +209,8 @@ struct Stored {
     sidebar: Option<bool>,
     #[serde(default)]
     appearance: Appearance,
+    #[serde(default)]
+    elevation: ElevationPolicy,
     #[serde(default = "default_menu")]
     menu: Vec<MenuEntry>,
     #[serde(default)]
@@ -213,13 +224,28 @@ impl Settings {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => return Err(error.into()),
         };
-        let stored: Stored = serde_json::from_reader(file).context("Read Firewol settings")?;
+        let mut stored: Stored = serde_json::from_reader(file).context("Read Firewol settings")?;
+        if !stored
+            .menu
+            .iter()
+            .any(|entry| entry.action == MenuAction::RunAsAdministrator)
+        {
+            let index = stored
+                .menu
+                .iter()
+                .position(|entry| entry.action == MenuAction::Open)
+                .map_or(0, |index| index + 1);
+            stored
+                .menu
+                .insert(index, MenuEntry::new(MenuAction::RunAsAdministrator));
+        }
         let path = |units: Vec<u16>| PathBuf::from(std::ffi::OsString::from_wide(&units));
         Ok(Self {
             last_folder: stored.last_folder.map(path),
             pins: stored.pins.into_iter().map(path).collect(),
             sidebar: stored.sidebar,
             appearance: stored.appearance,
+            elevation: stored.elevation,
             menu: stored.menu,
             folders: stored.folders.into_iter().collect(),
         })
@@ -248,6 +274,7 @@ impl Settings {
             pins: self.pins.iter().map(units).collect(),
             sidebar: self.sidebar,
             appearance: self.appearance,
+            elevation: self.elevation.clone(),
             menu: self.menu.clone(),
             folders: self
                 .folders

@@ -90,11 +90,7 @@ impl Controls {
                 w!(""),
                 WS_TABSTOP
                     | WINDOW_STYLE(
-                        LVS_REPORT
-                            | LVS_OWNERDATA
-                            | LVS_SINGLESEL
-                            | LVS_NOSORTHEADER
-                            | LVS_SHOWSELALWAYS,
+                        LVS_REPORT | LVS_OWNERDATA | LVS_NOSORTHEADER | LVS_SHOWSELALWAYS,
                     ),
                 WS_EX_CLIENTEDGE,
             )?,

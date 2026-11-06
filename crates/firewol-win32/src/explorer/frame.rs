@@ -17,6 +17,7 @@ use windows::core::{PCWSTR, w};
 use super::controls::*;
 use super::measure::Measurement;
 use super::theme::{self, Theme, draw_text, fill};
+use super::transfer_view::{self, TransferView};
 use super::workers::{FILE_WAKE, FileJob, FileWorker, Threads, finish};
 use super::{App, Tab, Visit, editors, form};
 
@@ -30,11 +31,22 @@ const PINS: usize = 205;
 const MINIMIZE: usize = 206;
 const MAXIMIZE: usize = 207;
 const CLOSE: usize = 208;
+const TRANSFERS: usize = 209;
+const ADMIN: usize = 210;
+const TRANSFER_TIMER: usize = 2;
 const MAX_WINDOWS: usize = 4;
 
 pub(super) struct Clipboard {
-    pub item: ItemId,
+    pub items: Vec<ItemId>,
     pub cut: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Pending {
+    pane: HWND,
+    consume_cut: bool,
+    transfer: bool,
+    elevation: bool,
 }
 
 pub(super) struct Session {
@@ -46,7 +58,8 @@ pub(super) struct Session {
     pub threads: Threads,
     windows: RefCell<Vec<HWND>>,
     files: FileWorker,
-    pending: Cell<Option<(HWND, bool)>>,
+    pending: Cell<Option<Pending>>,
+    transfer: RefCell<Option<TransferView>>,
     writable: bool,
 }
 
@@ -82,8 +95,30 @@ impl Session {
 
     pub fn submit(&self, frame: HWND, pane: HWND, job: FileJob, consume_cut: bool) -> Result<()> {
         ensure!(!self.busy(), "A file operation is already running");
+        let transfer = match &job {
+            FileJob::Transfer(request, control) => {
+                Some(TransferView::new(control.clone(), request.items.len()))
+            }
+            FileJob::Undo(control) => Some(TransferView::new(control.clone(), 1)),
+            _ => None,
+        };
+        let elevation = matches!(job, FileJob::Elevate { .. });
         self.files.submit(frame, job)?;
-        self.pending.set(Some((pane, consume_cut)));
+        self.pending.set(Some(Pending {
+            pane,
+            consume_cut,
+            transfer: transfer.is_some(),
+            elevation,
+        }));
+        if let Some(transfer) = transfer {
+            self.transfer.replace(Some(transfer));
+            unsafe { SetTimer(Some(frame), TRANSFER_TIMER, transfer_view::TICK_MS, None) };
+            if let Some(frame) = Frame::at(frame)
+                && let Some(toolbar) = frame.toolbar.get()
+            {
+                set_text(toolbar.transfers, "Transferring…");
+            }
+        }
         Ok(())
     }
 
@@ -91,34 +126,54 @@ impl Session {
         let Ok(result) = self.files.results.try_recv() else {
             return;
         };
-        let Some((origin, consume_cut)) = self.pending.take() else {
+        let Some(pending) = self.pending.take() else {
             return;
         };
-        if result.is_ok() && consume_cut {
-            self.clipboard.replace(None);
+        if pending.transfer {
+            let _ = unsafe { KillTimer(Some(frame.window.get()), TRANSFER_TIMER) };
+            if let Some(view) = self.transfer.borrow_mut().as_mut() {
+                view.finish(match &result {
+                    Ok(result) => result.message.clone(),
+                    Err(error) => format!("{error:#}"),
+                });
+            }
+            if let Some(toolbar) = frame.toolbar.get() {
+                set_text(toolbar.transfers, "Transfers…");
+            }
+        }
+        if pending.consume_cut
+            && let Ok(result) = &result
+        {
+            let mut clipboard = self.clipboard.borrow_mut();
+            if let Some(cut) = clipboard.as_mut() {
+                cut.items.retain(|item| !result.transferred.contains(item));
+                if cut.items.is_empty() {
+                    *clipboard = None;
+                }
+            }
         }
         let origin = frame
             .panes()
             .into_iter()
-            .find(|pane| pane.window.get() == origin)
+            .find(|pane| pane.window.get() == pending.pane)
             .or_else(|| frame.active());
-        match result {
-            Ok(result) => {
-                for frame in self.frames() {
-                    for pane in frame.panes() {
-                        let message = origin
-                            .as_ref()
-                            .filter(|origin| Rc::ptr_eq(origin, &pane))
-                            .map(|_| result.message.clone());
-                        pane.refresh_after_operation(message);
-                    }
+        let refresh = !pending.elevation && (result.is_ok() || pending.transfer);
+        let message = match result {
+            Ok(result) => result.message,
+            Err(error) => format!("{error:#}"),
+        };
+        if refresh {
+            for frame in self.frames() {
+                for pane in frame.panes() {
+                    let notice = origin
+                        .as_ref()
+                        .filter(|origin| Rc::ptr_eq(origin, &pane))
+                        .map(|_| message.clone());
+                    pane.refresh_after_operation(notice);
                 }
             }
-            Err(error) => {
-                if let Some(pane) = origin {
-                    pane.error(&error);
-                }
-            }
+        } else if let Some(pane) = origin {
+            pane.status(message);
         }
     }
 }
@@ -129,6 +184,8 @@ struct Toolbar {
     split: HWND,
     appearance: HWND,
     menu: HWND,
+    transfers: HWND,
+    admin: HWND,
     pins: HWND,
     caption: [HWND; 3],
 }
@@ -221,6 +278,8 @@ impl Frame {
             split: button(SPLIT, w!("Split view"))?,
             appearance: button(APPEARANCE, w!("Appearance…"))?,
             menu: button(MENU, w!("Edit menu…"))?,
+            transfers: button(TRANSFERS, w!("Transfers…"))?,
+            admin: button(ADMIN, w!("Admin…"))?,
             pins: child(
                 window,
                 instance,
@@ -361,11 +420,13 @@ impl Frame {
             let i = if caption_left { 2 - i } else { i };
             place(*button, caption_x + i as i32 * 36, 8, 34, 29);
         }
-        let actions_x = width - if caption_left { 345 } else { 453 };
+        let actions_x = width - if caption_left { 522 } else { 630 };
         place(toolbar.sidebar, actions_x, 7, 68, 29);
         place(toolbar.split, actions_x + 73, 7, 75, 29);
         place(toolbar.appearance, actions_x + 153, 7, 95, 29);
         place(toolbar.menu, actions_x + 253, 7, 79, 29);
+        place(toolbar.transfers, actions_x + 337, 7, 101, 29);
+        place(toolbar.admin, actions_x + 443, 7, 68, 29);
         let sidebar = self.sidebar_visible();
         let sidebar_width = if sidebar { 164 } else { 0 };
         place(
@@ -479,6 +540,14 @@ impl Frame {
                 if let Some(menu) = editors::menu(window, previous)? {
                     self.session.update(|settings| settings.menu = menu)?;
                     self.session.settings_changed();
+                }
+            }
+            TRANSFERS => transfer_view::show(window, &self.session.transfer)?,
+            ADMIN => {
+                let previous = self.session.settings.borrow().elevation.clone();
+                if let Some(policy) = editors::elevation(window, &previous)? {
+                    self.session
+                        .update(|settings| settings.elevation = policy)?;
                 }
             }
             PINS if code == LBN_DBLCLK => self.open_pin()?,
@@ -861,6 +930,12 @@ unsafe extern "system" fn procedure(
             frame.session.file_finished(&frame);
             return LRESULT(0);
         }
+        WM_TIMER if wparam.0 == TRANSFER_TIMER => {
+            if let Some(view) = frame.session.transfer.borrow_mut().as_mut() {
+                view.sample();
+            }
+            return LRESULT(0);
+        }
         _ => {}
     }
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
@@ -917,6 +992,7 @@ pub(super) fn run(path: Option<PathBuf>) -> Result<()> {
         windows: RefCell::default(),
         clipboard: RefCell::default(),
         pending: Cell::default(),
+        transfer: RefCell::default(),
         files: FileWorker::start(&threads),
         threads: threads.clone(),
     });

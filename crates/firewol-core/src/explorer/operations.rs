@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::os::windows::ffi::OsStrExt;
@@ -27,6 +27,12 @@ use crate::recycle::{
     Apartment, RecycledItem, filesystem_path, recycle, require_vacant, shell_item,
 };
 
+#[path = "transfer.rs"]
+mod transfer;
+pub use transfer::{
+    MAX_TRANSFER_ITEMS, TransferControl, TransferProgress, TransferRequest, TransferState,
+};
+
 pub enum Operation {
     Copy { item: ItemId, into: ItemId },
     Move { item: ItemId, into: ItemId },
@@ -36,6 +42,7 @@ pub enum Operation {
 
 pub struct OperationResult {
     pub message: String,
+    pub transferred: Vec<ItemId>,
 }
 
 pub struct Operations {
@@ -44,7 +51,17 @@ pub struct Operations {
 }
 
 enum Undo {
+    Transfer(TransferUndo),
+    Recycle { item: RecycledItem, parent: ItemId },
+}
+
+enum TransferUndo {
     Move {
+        item: ItemId,
+        parent: ItemId,
+        name: OsString,
+    },
+    CrossVolumeMove {
         item: ItemId,
         parent: ItemId,
         name: OsString,
@@ -52,10 +69,6 @@ enum Undo {
     Copy {
         item: ItemId,
         stamp: Stamp,
-    },
-    Recycle {
-        item: RecycledItem,
-        parent: ItemId,
     },
     FolderCopy,
 }
@@ -95,19 +108,15 @@ impl Operations {
 
     pub fn submit_operation(&mut self, operation: Operation) -> Result<OperationResult> {
         let (record, message) = match operation {
-            Operation::Copy { item, into } => self.copy(&item, &into)?,
+            Operation::Copy { item, into } => {
+                let (undo, message) =
+                    Self::transfer_one(&item, &into, false, &TransferControl::default())?;
+                (Undo::Transfer(undo), message)
+            }
             Operation::Move { item, into } => {
-                let name = name_of(item.path())?;
-                let parent = parent_of(&item)?;
-                let placed = move_item(&item, &into, &name)?;
-                (
-                    Undo::Move {
-                        item: placed,
-                        parent,
-                        name,
-                    },
-                    "Moved item",
-                )
+                let (undo, message) =
+                    Self::transfer_one(&item, &into, true, &TransferControl::default())?;
+                (Undo::Transfer(undo), message)
             }
             Operation::Rename { item, name } => {
                 validate_name(&name)?;
@@ -115,11 +124,11 @@ impl Operations {
                 let parent = parent_of(&item)?;
                 let placed = move_item(&item, &parent, &name)?;
                 (
-                    Undo::Move {
+                    Undo::Transfer(TransferUndo::Move {
                         item: placed,
                         parent,
                         name: old_name,
-                    },
+                    }),
                     "Renamed item",
                 )
             }
@@ -136,26 +145,163 @@ impl Operations {
                 )
             }
         };
-        self.history.push_back(record);
-        if self.history.len() > 32 {
-            self.history.pop_front();
-        }
+        self.record(record);
         Ok(OperationResult {
             message: message.into(),
+            transferred: Vec::new(),
         })
     }
 
+    pub fn transfer(
+        &mut self,
+        request: TransferRequest,
+        control: &TransferControl,
+    ) -> Result<OperationResult> {
+        let TransferRequest {
+            items,
+            into,
+            move_items,
+        } = request;
+        ensure!(
+            (1..=MAX_TRANSFER_ITEMS).contains(&items.len()),
+            "Select between 1 and {MAX_TRANSFER_ITEMS} items"
+        );
+        let names: HashSet<_> = items.iter().map(|item| item.path()).collect();
+        ensure!(
+            names.len() == items.len(),
+            "A transfer contains the same path twice"
+        );
+        let execute = |item: &ItemId| {
+            let result = control
+                .checkpoint()
+                .and_then(|()| Self::transfer_one(item, &into, move_items, control));
+            control.finish_item();
+            result
+        };
+        let parallel = items.len() > 1
+            && items.iter().all(|item| {
+                (!move_items || item.identity.volume != into.identity.volume)
+                    && transfer::regular(item, &into).unwrap_or(false)
+            });
+        let results = if parallel {
+            // Each lane handles at most one CopyFile2 request and one checksum buffer at a time.
+            let (left, right) = items.split_at(items.len().div_ceil(2));
+            std::thread::scope(|scope| {
+                let lane = scope.spawn(|| right.iter().map(execute).collect::<Vec<_>>());
+                let mut results = left.iter().map(execute).collect::<Vec<_>>();
+                results.extend(lane.join().expect("Transfer lane panicked"));
+                results
+            })
+        } else {
+            items.iter().map(execute).collect()
+        };
+        let mut transferred = Vec::new();
+        let mut first_error = None;
+        let mut last_message = "";
+        let total = items.len();
+        for (item, result) in items.into_iter().zip(results) {
+            match result {
+                Ok((record, message)) => {
+                    self.record(Undo::Transfer(record));
+                    transferred.push(item);
+                    last_message = message;
+                }
+                Err(error) if first_error.is_none() => {
+                    first_error = Some(error.context(format!("{}", item.path().display())));
+                }
+                Err(_) => {}
+            }
+        }
+        let count = transferred.len();
+        let message = match first_error {
+            Some(error) if count == 0 => return Err(error),
+            Some(error) => {
+                format!("Completed {count}/{total} items. First unfinished item: {error:#}")
+            }
+            None if total == 1 => last_message.into(),
+            None => format!(
+                "{} {count} items. Undo applies one item at a time.",
+                if move_items { "Moved" } else { "Copied" }
+            ),
+        };
+        Ok(OperationResult {
+            message,
+            transferred,
+        })
+    }
+
+    fn record(&mut self, record: Undo) {
+        self.history.push_back(record);
+        if self.history.len() > MAX_TRANSFER_ITEMS {
+            self.history.pop_front();
+        }
+    }
+
+    fn transfer_one(
+        item: &ItemId,
+        into: &ItemId,
+        moving: bool,
+        control: &TransferControl,
+    ) -> Result<(TransferUndo, &'static str)> {
+        if moving {
+            let name = name_of(item.path())?;
+            let parent = parent_of(item)?;
+            if item.identity.volume == into.identity.volume {
+                let placed = move_item(item, into, &name)?;
+                return Ok((
+                    TransferUndo::Move {
+                        item: placed,
+                        parent,
+                        name,
+                    },
+                    "Moved item",
+                ));
+            }
+            ensure!(
+                transfer::regular(item, into)?,
+                "Cross-volume moves require a regular file on fixed local drives"
+            );
+            let (placed, _) = transfer::place(item, into, &name, true, control)?;
+            return Ok((
+                TransferUndo::CrossVolumeMove {
+                    item: placed,
+                    parent,
+                    name,
+                },
+                "Verified and moved file",
+            ));
+        }
+        if transfer::regular(item, into)? {
+            let (item, stamp) =
+                transfer::place(item, into, &name_of(item.path())?, false, control)?;
+            return Ok((
+                TransferUndo::Copy { item, stamp },
+                "Copied and verified file",
+            ));
+        }
+        Self::copy(item, into)
+    }
+
     pub fn undo(&mut self) -> Result<OperationResult> {
+        self.undo_with_control(&TransferControl::default())
+    }
+
+    pub fn undo_with_control(&mut self, control: &TransferControl) -> Result<OperationResult> {
+        control.checkpoint()?;
         let record = self
             .history
             .back()
             .context("There is no operation to undo")?;
         let message = match record {
-            Undo::Move { item, parent, name } => {
+            Undo::Transfer(TransferUndo::Move { item, parent, name }) => {
                 move_item(item, parent, name)?;
                 "Restored the original location"
             }
-            Undo::Copy { item, stamp } => {
+            Undo::Transfer(TransferUndo::CrossVolumeMove { item, parent, name }) => {
+                transfer::place(item, parent, name, true, control)?;
+                "Verified and restored the original location"
+            }
+            Undo::Transfer(TransferUndo::Copy { item, stamp }) => {
                 ensure!(
                     &Stamp::read(&item.verify()?)? == stamp,
                     "The copied item has changed"
@@ -174,15 +320,18 @@ impl Operations {
                 item.restore()?;
                 "Restored the exact item from Recycle Bin"
             }
-            Undo::FolderCopy => bail!("A copy of a nonempty folder cannot be safely undone"),
+            Undo::Transfer(TransferUndo::FolderCopy) => {
+                bail!("A copy of a nonempty folder cannot be safely undone")
+            }
         };
         self.history.pop_back();
         Ok(OperationResult {
             message: message.into(),
+            transferred: Vec::new(),
         })
     }
 
-    fn copy(&self, item: &ItemId, into: &ItemId) -> Result<(Undo, &'static str)> {
+    fn copy(item: &ItemId, into: &ItemId) -> Result<(TransferUndo, &'static str)> {
         let name = name_of(item.path())?;
         let destination = destination(item, into, &name)?;
         // A partial Shell copy lives in a private staging directory until the final name can be claimed.
@@ -214,12 +363,12 @@ impl Operations {
         );
         if nonempty {
             Ok((
-                Undo::FolderCopy,
+                TransferUndo::FolderCopy,
                 "Copied folder. Undo is available for files and empty folders.",
             ))
         } else {
             Ok((
-                Undo::Copy {
+                TransferUndo::Copy {
                     item: copied,
                     stamp,
                 },
@@ -232,7 +381,7 @@ impl Operations {
 fn move_item(item: &ItemId, into: &ItemId, name: &OsStr) -> Result<ItemId> {
     ensure!(
         item.identity.volume == into.identity.volume,
-        "Moving between volumes requires a verified transfer. Copy the item to the other volume first."
+        "This move must stay on the same volume"
     );
     let same_folder = item.path().parent() == Some(into.path());
     let proposed = into.path().join(name);

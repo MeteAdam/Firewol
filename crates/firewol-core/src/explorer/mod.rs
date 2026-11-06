@@ -1,4 +1,5 @@
 mod directory;
+pub mod elevation;
 mod operations;
 mod search;
 mod settings;
@@ -6,7 +7,10 @@ pub mod volume;
 mod watch;
 
 pub use directory::Directory;
-pub use operations::{Operation, OperationResult, Operations};
+pub use operations::{
+    MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations, TransferControl, TransferProgress,
+    TransferRequest, TransferState,
+};
 pub use search::{Filters, SearchIndex, SearchQuery, SearchReader};
 pub use settings::{
     Appearance, CaptionShape, FolderKey, FolderStyle, MenuAction, MenuEntry, Preset, Rgb, Settings,

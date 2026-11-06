@@ -7,18 +7,21 @@ mod measure;
 mod menu;
 mod tabs;
 mod theme;
+mod transfer_view;
 mod workers;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::rc::Rc;
 
 use anyhow::{Context, Result, ensure};
 use firewol_core::explorer::{
-    Cancellation, Filters, FolderKey, FolderStyle, Item, ItemId, ItemPage, Operation, PAGE_SIZE,
-    SearchIndex, SearchQuery, display_path, home, page, volume,
+    Cancellation, Filters, FolderKey, FolderStyle, Item, ItemId, ItemPage, MAX_TRANSFER_ITEMS,
+    Operation, PAGE_SIZE, SearchIndex, SearchQuery, TransferControl, TransferRequest, display_path,
+    home, page, volume,
 };
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -210,7 +213,7 @@ impl Model {
 
 enum Drag {
     Tab { index: usize, start: POINT },
-    Item(ItemId),
+    Item(Vec<ItemId>),
 }
 
 struct App {
@@ -880,6 +883,32 @@ impl App {
             .cloned()
     }
 
+    fn transfer_selection(&self, controls: Controls) -> Result<Vec<ItemId>> {
+        let count = send(controls.list, LVM_GETSELECTEDCOUNT, 0, 0) as usize;
+        ensure!(
+            (1..=MAX_TRANSFER_ITEMS).contains(&count),
+            "Select between 1 and {MAX_TRANSFER_ITEMS} items to transfer"
+        );
+        let mut row = -1;
+        let mut items = Vec::with_capacity(count);
+        for _ in 0..count {
+            row = send(
+                controls.list,
+                LVM_GETNEXTITEM,
+                row as usize,
+                LVNI_SELECTED as isize,
+            );
+            let item = self
+                .row(row as i32)
+                .context("Wait for the selected rows to load and try again")?;
+            items.push(
+                item.id
+                    .context("A selected item's identity is unavailable")?,
+            );
+        }
+        Ok(items)
+    }
+
     fn open_item(&self, item: &Item, parent: bool) -> Result<()> {
         let id = item
             .id
@@ -895,6 +924,17 @@ impl App {
                 id.path()
             };
             return self.navigate(path.to_owned(), Visit::New);
+        }
+        if firewol_core::explorer::elevation::validate_executable(id.path()).is_ok() {
+            Command::new(id.path())
+                .current_dir(
+                    id.path()
+                        .parent()
+                        .context("The executable has no parent folder")?,
+                )
+                .spawn()
+                .context("Start the executable with standard permissions")?;
+            return Ok(());
         }
         let path = wide(&display_path(id.path()));
         let status = unsafe {
@@ -936,9 +976,14 @@ impl App {
     }
 
     fn submit(&self, job: FileJob, consume_cut: bool) -> Result<()> {
+        let transfer = matches!(job, FileJob::Transfer(..));
         self.session
             .submit(self.frame, self.window.get(), job, consume_cut)?;
-        self.status("Working…");
+        self.status(if transfer {
+            "Transferring… open Transfers to view progress"
+        } else {
+            "Working…"
+        });
         Ok(())
     }
 
@@ -950,7 +995,7 @@ impl App {
         item: Option<Item>,
     ) -> Result<()> {
         if action == UNDO {
-            return self.submit(FileJob::Undo, false);
+            return self.submit(FileJob::Undo(TransferControl::default()), false);
         }
         if action == REFRESH {
             if self.model.borrow().search.active() {
@@ -968,8 +1013,25 @@ impl App {
             }
             return self.navigate(self.current_path()?, Visit::Refresh(None));
         }
+        if action == COPY || action == CUT {
+            ensure!(
+                !self.session.busy(),
+                "Wait for the current operation to finish"
+            );
+            let items = self.transfer_selection(controls)?;
+            let count = items.len();
+            let cut = action == CUT;
+            self.session
+                .clipboard
+                .replace(Some(Clipboard { items, cut }));
+            self.status(format!(
+                "{} {count} item(s) · navigate to a folder and paste",
+                if cut { "Cut" } else { "Copied" }
+            ));
+            return Ok(());
+        }
         if action == PASTE {
-            let (operation, cut) = {
+            let (request, cut) = {
                 let model = self.model.borrow();
                 ensure!(
                     model.navigation.is_none(),
@@ -984,40 +1046,26 @@ impl App {
                     .as_ref()
                     .and_then(|folder| folder.id.clone())
                     .context("The current folder's identity is unavailable")?;
-                let item = clipboard.item.clone();
                 (
-                    if clipboard.cut {
-                        Operation::Move { item, into }
-                    } else {
-                        Operation::Copy { item, into }
+                    TransferRequest {
+                        items: clipboard.items.clone(),
+                        into,
+                        move_items: clipboard.cut,
                     },
                     clipboard.cut,
                 )
             };
-            return self.submit(FileJob::Run(operation), cut);
+            return self.submit(FileJob::Transfer(request, TransferControl::default()), cut);
         }
         let item = item.context("Select an item first")?;
+        if matches!(action, RENAME | RECYCLE) {
+            ensure!(
+                send(controls.list, LVM_GETSELECTEDCOUNT, 0, 0) <= 1,
+                "Select one item for this action"
+            );
+        }
         match action {
             OPEN | CONTAINING => self.open_item(&item, action == CONTAINING),
-            COPY | CUT => {
-                let id = item
-                    .id
-                    .context("The selected item's identity is unavailable")?;
-                ensure!(
-                    !self.session.busy(),
-                    "Wait for the current operation to finish"
-                );
-                self.session.clipboard.replace(Some(Clipboard {
-                    item: id,
-                    cut: action == CUT,
-                }));
-                self.status(if action == CUT {
-                    "Cut · navigate to a folder and paste"
-                } else {
-                    "Copied to Firewol clipboard · navigate to a folder and paste"
-                });
-                Ok(())
-            }
             RENAME => {
                 let name = item.name().to_owned();
                 let id = item
@@ -1261,7 +1309,7 @@ impl App {
         }
     }
 
-    fn transfer(&self, item: ItemId, move_item: bool) -> Result<()> {
+    fn transfer(&self, items: Vec<ItemId>, move_items: bool) -> Result<()> {
         let target = Frame::at(self.frame)
             .and_then(|frame| frame.other(self.window.get()))
             .context("Open split view first")?;
@@ -1277,12 +1325,17 @@ impl App {
                 .and_then(|folder| folder.id.clone())
                 .context("The other pane's folder identity is unavailable")?
         };
-        let operation = if move_item {
-            Operation::Move { item, into }
-        } else {
-            Operation::Copy { item, into }
-        };
-        self.submit(FileJob::Run(operation), false)
+        self.submit(
+            FileJob::Transfer(
+                TransferRequest {
+                    items,
+                    into,
+                    move_items,
+                },
+                TransferControl::default(),
+            ),
+            false,
+        )
     }
 
     fn customize_folder(&self, item: Option<Item>) -> Result<()> {
@@ -1607,17 +1660,18 @@ unsafe extern "system" fn procedure(
                     }
                     NM_RCLICK => menu::popup(&app, window, controls, true),
                     LVN_BEGINDRAG => {
-                        let drag = unsafe { &*(lparam.0 as *const NMLISTVIEW) };
                         if Frame::at(app.frame)
                             .and_then(|frame| frame.other(window))
                             .is_some()
-                            && let Some(item) = app.row(drag.iItem).and_then(|item| item.id)
                         {
-                            app.drag.replace(Some(Drag::Item(item)));
-                            unsafe { SetCapture(window) };
-                            app.status("Drop on the other pane to copy · hold Shift to move");
+                            app.transfer_selection(controls).map(|items| {
+                                app.drag.replace(Some(Drag::Item(items)));
+                                unsafe { SetCapture(window) };
+                                app.status("Drop on the other pane to copy · hold Shift to move");
+                            })
+                        } else {
+                            Ok(())
                         }
-                        Ok(())
                     }
                     _ => return unsafe { DefWindowProcW(window, message, wparam, lparam) },
                 }

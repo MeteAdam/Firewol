@@ -8,9 +8,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use firewol_core::explorer::elevation::{self, ElevationPolicy};
 use firewol_core::explorer::{
     Cancellation, Directory, ItemId, ItemPage, Operation, OperationResult, Operations, PAGE_SIZE,
-    SearchIndex, SearchQuery, SearchReader, page,
+    SearchIndex, SearchQuery, SearchReader, TransferControl, TransferRequest, page,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
@@ -72,7 +73,13 @@ pub(super) struct QueryJob(
 
 pub(super) enum FileJob {
     Run(Operation),
-    Undo,
+    Transfer(TransferRequest, TransferControl),
+    Elevate {
+        policy: ElevationPolicy,
+        program: ItemId,
+        argument: Option<ItemId>,
+    },
+    Undo(TransferControl),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -206,7 +213,24 @@ impl FileWorker {
                 let result = match operations.get_or_insert_with(Operations::open) {
                     Ok(operations) => match job {
                         FileJob::Run(operation) => operations.submit_operation(operation),
-                        FileJob::Undo => operations.undo(),
+                        FileJob::Transfer(request, control) => {
+                            operations.transfer(request, &control)
+                        }
+                        FileJob::Elevate {
+                            policy,
+                            program,
+                            argument,
+                        } => elevation::launch(
+                            &policy,
+                            &program,
+                            argument.as_ref(),
+                            HWND(window as *mut _),
+                        )
+                        .map(|()| OperationResult {
+                            message: "Launched with administrator consent".into(),
+                            transferred: Vec::new(),
+                        }),
+                        FileJob::Undo(control) => operations.undo_with_control(&control),
                     },
                     Err(error) => Err(anyhow::anyhow!("Start the Windows Shell worker: {error:#}")),
                 };

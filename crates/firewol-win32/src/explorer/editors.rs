@@ -1,3 +1,5 @@
+use firewol_core::explorer::display_path;
+use firewol_core::explorer::elevation::{ElevationMode, ElevationPolicy, validate_executable};
 use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::Path;
@@ -130,11 +132,20 @@ fn menu_entry(owner: HWND, mut previous: MenuEntry) -> Result<Option<MenuEntry>>
             usize::from(!previous.visible),
         ),
     ];
-    let custom = if let MenuAction::Custom { executable } = &previous.action {
+    let custom = if let MenuAction::Custom {
+        executable,
+        administrator,
+    } = &previous.action
+    {
         rows.push(Field::Text(
             "Executable path",
             executable.clone().into(),
             32767,
+        ));
+        rows.push(Field::Choice(
+            "Run with",
+            &["Standard permissions", "Administrator consent"],
+            usize::from(*administrator),
         ));
         true
     } else {
@@ -157,8 +168,8 @@ fn menu_entry(owner: HWND, mut previous: MenuEntry) -> Result<Option<MenuEntry>>
             let executable = if custom {
                 ensure!(!label.is_empty(), "Give the action a label");
                 let executable = value(&values[4])?;
-                menu::validate_executable(Path::new(executable))?;
-                Some(executable.to_owned())
+                validate_executable(Path::new(executable))?;
+                Some((executable.to_owned(), values[5] == "Administrator consent"))
             } else {
                 None
             };
@@ -172,8 +183,11 @@ fn menu_entry(owner: HWND, mut previous: MenuEntry) -> Result<Option<MenuEntry>>
     previous.icon = icon;
     previous.color = color;
     previous.visible = visible;
-    if let Some(executable) = executable {
-        previous.action = MenuAction::Custom { executable };
+    if let Some((executable, administrator)) = executable {
+        previous.action = MenuAction::Custom {
+            executable,
+            administrator,
+        };
     }
     Ok(Some(previous))
 }
@@ -263,6 +277,7 @@ pub(super) fn menu(owner: HWND, previous: Vec<MenuEntry>) -> Result<Option<Vec<M
                     );
                     let entry = MenuEntry::new(MenuAction::Custom {
                         executable: String::new(),
+                        administrator: false,
                     });
                     if let Some(entry) = menu_entry(window, entry)? {
                         select = count;
@@ -293,4 +308,66 @@ pub(super) fn menu(owner: HWND, previous: Vec<MenuEntry>) -> Result<Option<Vec<M
         }
         Some(LRESULT(0))
     })
+}
+
+pub(super) fn elevation(
+    owner: HWND,
+    previous: &ElevationPolicy,
+) -> Result<Option<ElevationPolicy>> {
+    let choices = [
+        "Standard permissions",
+        "Allowlisted executables",
+        "Any executable (higher risk)",
+    ];
+    let mode = match previous.mode {
+        ElevationMode::Standard => 0,
+        ElevationMode::Allowlist => 1,
+        ElevationMode::AllExecutables => 2,
+    };
+    let paths = previous
+        .paths()
+        .map(|path| display_path(path).to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let changed = fields(
+        owner,
+        w!("Administrator actions"),
+        &[
+            Field::Choice("Elevation policy", &choices, mode),
+            Field::Text("Allowlisted .exe paths", paths.into(), 32_767),
+        ],
+        "Separate absolute .exe paths with |. Windows asks for consent.",
+        |values| {
+            let mode = match value(&values[0])? {
+                "Allowlisted executables" => ElevationMode::Allowlist,
+                "Any executable (higher risk)" => ElevationMode::AllExecutables,
+                _ => ElevationMode::Standard,
+            };
+            let paths = value(&values[1])?
+                .split('|')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>();
+            ElevationPolicy::new(mode, &paths)
+        },
+    )?;
+    if changed
+        .as_ref()
+        .is_some_and(|policy| policy.mode == ElevationMode::AllExecutables)
+        && previous.mode != ElevationMode::AllExecutables
+        && unsafe {
+            MessageBoxW(
+                Some(owner),
+                w!(
+                    "Any executable or configured administrator action can request elevation. An approved program can change system settings and access protected data. Enable this policy?"
+                ),
+                w!("Allow any executable to request elevation"),
+                MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2,
+            )
+        } != IDOK
+    {
+        return Ok(None);
+    }
+    Ok(changed)
 }

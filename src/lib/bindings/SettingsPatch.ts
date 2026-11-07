@@ -3,4 +3,8 @@ import type { AppearanceView } from "./AppearanceView";
 import type { ElevationView } from "./ElevationView";
 import type { MenuEntryView } from "./MenuEntryView";
 
-export type SettingsPatch = { appearance?: AppearanceView, sidebar?: boolean, menu?: Array<MenuEntryView>, elevation?: ElevationView, allow_all_confirmed?: boolean, migrate_appearance?: boolean, };
+export type SettingsPatch = { appearance?: AppearanceView, sidebar?: boolean, grid?: boolean, 
+/**
+ * 96, 128 or 160.
+ */
+tile?: number, menu?: Array<MenuEntryView>, elevation?: ElevationView, allow_all_confirmed?: boolean, migrate_appearance?: boolean, };

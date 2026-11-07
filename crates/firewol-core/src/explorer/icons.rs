@@ -11,6 +11,7 @@ use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::{DI_NORMAL, DestroyIcon, DrawIconEx, HICON};
 use windows_core::{HSTRING, PCWSTR};
@@ -195,38 +196,30 @@ fn extract(key: &str, size: u32) -> Result<Vec<u8>> {
     } else {
         let extension = key.strip_prefix("ext:").unwrap_or_default();
         let name = HSTRING::from(format!("file.{extension}"));
-        let mut info = SHFILEINFOW::default();
-        let flags = SHGFI_ICON
-            | SHGFI_USEFILEATTRIBUTES
-            | if size <= 16 {
+        // Up to 32 px the association icon itself is sharp; tiles draw from the system image
+        // list (48 px, or 256 px above 48) so a large tile is not an enlarged 32 px icon.
+        if size <= 32 {
+            let flags = if size <= 16 {
                 SHGFI_SMALLICON
             } else {
                 SHGFI_LARGEICON
             };
-        let found = unsafe {
-            SHGetFileInfoW(
-                PCWSTR(name.as_ptr()),
-                FILE_ATTRIBUTE_NORMAL,
-                Some(&mut info),
-                size_of::<SHFILEINFOW>() as u32,
-                flags,
-            )
-        };
-        ensure!(found != 0, "Read Shell association icon");
-        let icon = Icon(info.hIcon);
-        // Two backgrounds recover the alpha mask for older non-ARGB Shell icons too.
-        let black = draw(&dc, &icon, size, 0)?;
-        let white = draw(&dc, &icon, size, 255)?;
-        black
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(white.as_chunks::<4>().0)
-            .flat_map(|(b, w)| {
-                let alpha = 255 - w[0].saturating_sub(b[0]);
-                [b[0], b[1], b[2], alpha]
-            })
-            .collect()
+            unmask(&dc, &association(&name, SHGFI_ICON | flags)?, size)?
+        } else {
+            let index = system_index(&name)?;
+            let large = size > 48;
+            let pixels = unmask(
+                &dc,
+                &listed(index, if large { SHIL_JUMBO } else { SHIL_EXTRALARGE })?,
+                size,
+            )?;
+            // Many types have no 256 px image; the jumbo list then centres a small icon.
+            if large && content_width(&pixels, size) * 2 < size {
+                unmask(&dc, &listed(index, SHIL_EXTRALARGE)?, size)?
+            } else {
+                pixels
+            }
+        }
     };
     // Shell bitmaps are premultiplied BGRA; PNG uses straight RGBA.
     for pixel in pixels.as_chunks_mut::<4>().0 {
@@ -247,6 +240,70 @@ fn extract(key: &str, size: u32) -> Result<Vec<u8>> {
         encoder.write_header()?.write_image_data(&pixels)?;
     }
     Ok(png)
+}
+
+fn association(name: &HSTRING, flags: SHGFI_FLAGS) -> Result<Icon> {
+    let mut info = SHFILEINFOW::default();
+    let found = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(name.as_ptr()),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            flags | SHGFI_USEFILEATTRIBUTES,
+        )
+    };
+    ensure!(found != 0, "Read Shell association icon");
+    Ok(Icon(info.hIcon))
+}
+
+fn system_index(name: &HSTRING) -> Result<i32> {
+    let mut info = SHFILEINFOW::default();
+    let found = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(name.as_ptr()),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut info),
+            size_of::<SHFILEINFOW>() as u32,
+            SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES,
+        )
+    };
+    ensure!(found != 0, "Read Shell association icon index");
+    Ok(info.iIcon)
+}
+
+fn listed(index: i32, list: u32) -> Result<Icon> {
+    let images: IImageList = unsafe { SHGetImageList(list as i32)? };
+    Ok(Icon(unsafe { images.GetIcon(index, ILD_TRANSPARENT.0)? }))
+}
+
+/// Draws `icon` on black and on white, which recovers the alpha mask of older icons too.
+fn unmask(dc: &Dc, icon: &Icon, size: u32) -> Result<Vec<u8>> {
+    let black = draw(dc, icon, size, 0)?;
+    let white = draw(dc, icon, size, 255)?;
+    Ok(black
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(white.as_chunks::<4>().0)
+        .flat_map(|(b, w)| {
+            let alpha = 255 - w[0].saturating_sub(b[0]);
+            [b[0], b[1], b[2], alpha]
+        })
+        .collect())
+}
+
+/// Width of the columns that hold any visible pixel.
+fn content_width(pixels: &[u8], size: u32) -> u32 {
+    let size = size as usize;
+    let visible = |x: usize| (0..size).any(|y| pixels[(y * size + x) * 4 + 3] > 16);
+    match (
+        (0..size).find(|&x| visible(x)),
+        (0..size).rev().find(|&x| visible(x)),
+    ) {
+        (Some(left), Some(right)) => (right - left + 1) as u32,
+        _ => 0,
+    }
 }
 
 fn draw(dc: &Dc, icon: &Icon, size: u32, background: u8) -> Result<Vec<u8>> {
@@ -301,6 +358,12 @@ mod tests {
             let decoder = png::Decoder::new(std::io::Cursor::new(data.as_slice())).read_info()?;
             assert_eq!((decoder.info().width, decoder.info().height), (size, size));
         }
+        // A tile icon is drawn from a large image, not a small one in an empty frame.
+        let tile = fetch("ext:txt", 96);
+        let mut reader = png::Decoder::new(std::io::Cursor::new(tile.as_slice())).read_info()?;
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap_or_default()];
+        reader.next_frame(&mut rgba)?;
+        assert!(content_width(&rgba, 96) * 2 >= 96);
         let program = key(&std::env::current_exe()?);
         for size in [16, 32, 96, 160] {
             let data = fetch(&program, size);

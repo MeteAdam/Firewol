@@ -11,11 +11,16 @@
   const ROW = 32;
   const HEADER = 32;
   const OVERSCAN = 6;
+  // Grid view: tiles sit in lines of `columns`, with this gap and top padding.
+  const GAP = 8;
+  const PAD = 8;
 
   let {
     pane,
     id,
     marked,
+    grid: tiles = false,
+    tile = 128,
     onactivate,
     onopen,
     onmenu,
@@ -25,6 +30,9 @@
     pane: Pane;
     id: string;
     marked: boolean;
+    /** Shows tiles of `tile` pixels instead of the details table. */
+    grid?: boolean;
+    tile?: number;
     onactivate: () => void;
     onopen: (entry: Entry, newWindow: boolean) => void;
     /** `onRow` is false for the empty area, which acts on the current folder. */
@@ -36,12 +44,22 @@
   // The grid is its own scroll container so assistive technology gets a scrollable table.
   let grid: HTMLDivElement;
   let height = $state(0);
+  let width = $state(0);
   let scroll = $state(0);
   const rows = $derived(pane.rows);
-  const top = $derived(Math.floor(scroll / ROW));
-  const first = $derived(Math.max(0, top - OVERSCAN));
-  const end = $derived(Math.min(rows, top + Math.ceil(height / ROW) + OVERSCAN));
+  // Details view is the one-column case: a line is a row.
+  const columns = $derived(tiles ? Math.max(1, Math.floor((width - 12 - 2 * PAD + GAP) / (tile + GAP))) : 1);
+  const line = $derived(tiles ? tile + GAP : ROW);
+  const head = $derived(tiles ? PAD : HEADER);
+  const lines = $derived(Math.ceil(rows / columns));
+  const top = $derived(Math.floor(Math.max(0, scroll - head) / line));
+  const firstLine = $derived(Math.max(0, top - (tiles ? 2 : OVERSCAN)));
+  const endLine = $derived(Math.min(lines, top + Math.ceil(height / line) + (tiles ? 2 : OVERSCAN)));
+  const first = $derived(firstLine * columns);
+  const end = $derived(Math.min(rows, endLine * columns));
   const visible = $derived(Array.from({ length: Math.max(0, end - first) }, (_, index) => first + index));
+  const visibleLines = $derived(Array.from({ length: Math.max(0, endLine - firstLine) }, (_, index) => firstLine + index));
+  const iconSize = $derived(Math.round(tile / 2));
   const tagged = $derived(pane.tagged);
   const shownName = (entry: Entry) => entry.style?.alias || entry.name;
   const activeRow = $derived(
@@ -71,9 +89,9 @@
   });
 
   function reveal(row: number) {
-    const position = HEADER + row * ROW;
-    if (position < grid.scrollTop + HEADER) grid.scrollTop = position - HEADER;
-    else if (position + ROW > grid.scrollTop + height) grid.scrollTop = position + ROW - height;
+    const position = head + Math.floor(row / columns) * line;
+    if (position < grid.scrollTop + head) grid.scrollTop = position - head;
+    else if (position + line > grid.scrollTop + height) grid.scrollTop = position + line - height;
   }
 
   async function move(row: number, extend: boolean) {
@@ -83,10 +101,12 @@
 
   function keydown(event: KeyboardEvent) {
     if (event.target instanceof HTMLInputElement) return;
-    const step = Math.max(1, Math.floor((height - HEADER) / ROW) - 1);
-    const moves: Record<string, number> = { ArrowDown: 1, ArrowUp: -1, PageDown: step, PageUp: -step };
+    const step = Math.max(1, Math.floor((height - head) / line) - 1) * columns;
+    const moves: Record<string, number> = { ArrowDown: columns, ArrowUp: -columns, PageDown: step, PageUp: -step };
+    if (tiles) Object.assign(moves, { ArrowRight: 1, ArrowLeft: -1 });
     const entry = pane.focusedEntry;
-    if (event.key in moves && !event.altKey) move(pane.selected + moves[event.key], event.shiftKey);
+    // Up and down from a partial last line stay in their column, or stop at the last item.
+    if (event.key in moves && !event.altKey) move(Math.max(0, Math.min(rows - 1, pane.selected + moves[event.key])), event.shiftKey);
     else if (event.key === "Home") move(0, event.shiftKey);
     else if (event.key === "End") move(rows - 1, event.shiftKey);
     else if (event.key === "Enter" && entry) onopen(entry, event.ctrlKey);
@@ -95,7 +115,8 @@
     else if (event.key === "Delete" && entry?.id) onrecycle();
     else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       const bounds = grid.getBoundingClientRect();
-      onmenu(bounds.left + 48, bounds.top + HEADER + (pane.selected + 1) * ROW - grid.scrollTop, entry !== undefined);
+      const column = pane.selected % columns;
+      onmenu(bounds.left + PAD + column * (tile + GAP) + (tiles ? tile / 2 : 48), bounds.top + head + (Math.floor(pane.selected / columns) + 1) * line - grid.scrollTop, entry !== undefined);
     } else return;
     event.preventDefault();
   }
@@ -166,24 +187,81 @@
   }
 </script>
 
-<section class="list" class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"}>
+{#snippet renameInput(entry: Entry)}
+  <input
+    class="rename"
+    aria-label="New name"
+    value={entry.name}
+    spellcheck="false"
+    use:renameField={entry.directory}
+    onmousedown={(event) => event.stopPropagation()}
+    onkeydown={(event) => {
+      if (event.key === "Enter") finishRename(entry, event.currentTarget.value);
+      else if (event.key === "Escape") finishRename(entry, null);
+      else return;
+      event.preventDefault();
+    }}
+    onblur={(event) => finishRename(entry, event.currentTarget.value)}
+  />
+{/snippet}
+
+<section class="list" class:tiles class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"}>
   <div
     class="grid"
     role="grid"
     tabindex="0"
     aria-multiselectable="true"
-    aria-rowcount={rows + 1}
-    aria-colcount={tagged ? 5 : 4}
+    aria-rowcount={tiles ? lines : rows + 1}
+    aria-colcount={tiles ? columns : tagged ? 5 : 4}
     aria-activedescendant={activeRow}
     aria-label={pane.searching ? "Search results" : "Files"}
     bind:this={grid}
     bind:clientHeight={height}
+    bind:clientWidth={width}
     onscroll={() => { scroll = grid.scrollTop; pane.scroll = scroll; }}
     onkeydown={keydown}
     onfocusin={onactivate}
     onmousedown={onactivate}
     oncontextmenu={areaMenu}
   >
+    {#if tiles}
+    <div class="spacer" role="rowgroup" style:height={`${lines * line + PAD}px`}>
+      <div class="lines" style:transform={`translateY(${PAD + firstLine * line}px)`}>
+        <!-- Lines are keyed like rows, so scrolling only adds and removes edge lines. -->
+        {#each visibleLines as index (index)}
+          <div class="line" role="row" aria-rowindex={index + 1} style:height={`${line}px`} style:gap={`${GAP}px`}>
+            {#each visible.slice((index - firstLine) * columns, (index - firstLine + 1) * columns) as row (row)}
+              {@const entry = pane.entry(row)}
+              <!-- svelte-ignore a11y_interactive_supports_focus -->
+              <div
+                class="tile"
+                class:sel={pane.isSelected(row)}
+                class:focus={row === pane.selected}
+                class:hidden={entry?.hidden}
+                role="gridcell"
+                id={`${id}-row-${row}`}
+                aria-colindex={(row % columns) + 1}
+                aria-selected={pane.isSelected(row)}
+                title={entry ? (pane.searching ? location(entry) : entry.style?.alias ? entry.name : undefined) : undefined}
+                style:width={`${tile}px`}
+                style:height={`${tile}px`}
+                onmousedown={(event) => press(event, row)}
+                ondblclick={() => entry && onopen(entry, false)}
+                oncontextmenu={(event) => rowMenu(event, row)}
+              >
+                {#if entry}
+                  <span class="art">{#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} size={iconSize} />{:else}<FileIcon icon={entry.icon} size={iconSize} />{/if}</span>
+                  {#if row === pane.renaming}{@render renameInput(entry)}{:else}<span class="nm">{shownName(entry)}</span>{/if}
+                {:else}
+                  <span class="placeholder"></span>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/each}
+      </div>
+    </div>
+    {:else}
     <div class="cols hdr" role="row" aria-rowindex="1">
       <div role="columnheader" aria-sort={pane.sort.column === "name" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("name")}>Name {#if pane.sort.column === "name"}<span class:descending={pane.sort.descending}><Icon name="sortUp" size={12} weight={2} /></span>{/if}</button></div>
       {#if pane.searching}<div role="columnheader">Location</div>{/if}
@@ -216,21 +294,7 @@
               <div role="gridcell" class="name">
                 {#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} />{:else}<FileIcon icon={entry.icon} />{/if}
                 {#if row === pane.renaming}
-                  <input
-                    class="rename"
-                    aria-label="New name"
-                    value={entry.name}
-                    spellcheck="false"
-                    use:renameField={entry.directory}
-                    onmousedown={(event) => event.stopPropagation()}
-                    onkeydown={(event) => {
-                      if (event.key === "Enter") finishRename(entry, event.currentTarget.value);
-                      else if (event.key === "Escape") finishRename(entry, null);
-                      else return;
-                      event.preventDefault();
-                    }}
-                    onblur={(event) => finishRename(entry, event.currentTarget.value)}
-                  />
+                  {@render renameInput(entry)}
                 {:else}
                   <span class="nm" title={entry.style?.alias ? entry.name : undefined}>{shownName(entry)}</span>
                 {/if}
@@ -247,6 +311,7 @@
         {/each}
       </div>
     </div>
+    {/if}
     {#if rows === 0}
       <p class="empty">
         {#if pane.searching && pane.searchError}{pane.searchError}
@@ -330,6 +395,17 @@
     outline: none;
     user-select: text;
   }
+  .lines { display: flex; flex-direction: column; padding: 0 8px; }
+  .line { display: flex; flex: none; }
+  .tile { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: none; padding: 8px; border-radius: var(--radius-s); text-align: center; font-size: 12px; }
+  .tile:hover { background: var(--hover); }
+  .tile.sel { background: var(--sel); color: var(--sel-text); box-shadow: var(--sel-shadow); }
+  .tile.hidden .art { opacity: .6; }
+  .grid:focus-visible .tile.focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .art { display: flex; flex: none; }
+  .tile .nm { display: -webkit-box; max-width: 100%; overflow: hidden; line-height: 16px; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+  .tile .rename { flex: none; width: 100%; margin: 0; text-align: center; }
+  .tile .placeholder { width: 60%; }
   .placeholder { height: 8px; width: 40%; border-radius: 4px; background: var(--sep); }
   .empty { position: absolute; inset: 56px 24px auto 24px; margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

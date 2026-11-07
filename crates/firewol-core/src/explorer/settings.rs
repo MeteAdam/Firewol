@@ -238,6 +238,10 @@ pub struct Settings {
     pub last_folder: Option<PathBuf>,
     pub pins: Vec<PathBuf>,
     pub sidebar: Option<bool>,
+    /// Folder tabs show tiles instead of details.
+    pub grid: Option<bool>,
+    /// Grid tile edge in pixels: 96, 128 or 160.
+    pub tile: Option<u32>,
     pub appearance: Appearance,
     pub elevation: ElevationPolicy,
     pub menu: Vec<MenuEntry>,
@@ -252,6 +256,8 @@ impl Default for Settings {
             last_folder: None,
             pins: Vec::new(),
             sidebar: None,
+            grid: None,
+            tile: None,
             appearance: Appearance::default(),
             elevation: ElevationPolicy::default(),
             menu: default_menu(),
@@ -271,6 +277,10 @@ struct Stored {
     pins: Vec<Vec<u16>>,
     #[serde(default)]
     sidebar: Option<bool>,
+    #[serde(default)]
+    grid: Option<bool>,
+    #[serde(default)]
+    tile: Option<u32>,
     #[serde(default)]
     appearance: Appearance,
     #[serde(default)]
@@ -314,6 +324,8 @@ impl Settings {
             last_folder: stored.last_folder.map(path),
             pins: stored.pins.into_iter().map(path).collect(),
             sidebar: stored.sidebar,
+            grid: stored.grid,
+            tile: stored.tile,
             appearance: stored.appearance,
             elevation: stored.elevation,
             menu: stored.menu,
@@ -345,6 +357,8 @@ impl Settings {
             last_folder: self.last_folder.as_ref().map(units),
             pins: self.pins.iter().map(units).collect(),
             sidebar: self.sidebar,
+            grid: self.grid,
+            tile: self.tile,
             appearance: self.appearance,
             elevation: self.elevation.clone(),
             menu: self.menu.clone(),

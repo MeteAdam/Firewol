@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use crate::contract::{ElevationView, FolderStyleView, SettingsPatch, SettingsView, StyledFolder};
 
+pub const TILES: [u32; 3] = [96, 128, 160];
+
 fn mirror<T: Serialize, U: DeserializeOwned>(value: T) -> Result<U> {
     Ok(serde_json::from_value(serde_json::to_value(value)?)?)
 }
@@ -17,6 +19,11 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
         version: settings.version,
         theme_migrated: settings.theme_migrated,
         sidebar: settings.sidebar.unwrap_or(true),
+        grid: settings.grid.unwrap_or(false),
+        tile: settings
+            .tile
+            .filter(|tile| TILES.contains(tile))
+            .unwrap_or(128),
         appearance: mirror(settings.appearance)?,
         menu: mirror(&settings.menu)?,
         folders: settings
@@ -71,6 +78,10 @@ pub fn set_folder_style(
 pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
     let appearance = patch.appearance.map(mirror::<_, Appearance>).transpose()?;
     let menu = patch.menu.map(mirror::<_, Vec<MenuEntry>>).transpose()?;
+    ensure!(
+        patch.tile.is_none_or(|tile| TILES.contains(&tile)),
+        "Grid tiles are 96, 128 or 160 pixels"
+    );
     if let Some(menu) = &menu {
         ensure!(menu.len() <= 64, "Use up to 64 menu entries");
         for entry in menu {
@@ -110,6 +121,12 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
         }
         if let Some(sidebar) = patch.sidebar {
             settings.sidebar = Some(sidebar);
+        }
+        if let Some(grid) = patch.grid {
+            settings.grid = Some(grid);
+        }
+        if let Some(tile) = patch.tile {
+            settings.tile = Some(tile);
         }
         if let Some(menu) = menu {
             settings.menu = menu;

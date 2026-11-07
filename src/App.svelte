@@ -58,6 +58,9 @@
   let settings = $state.raw<SettingsView>();
   const windowsDark = new MediaQuery("(prefers-color-scheme: dark)");
   const sidebar = $derived(settings?.sidebar ?? true);
+  const gridView = $derived(settings?.grid ?? false);
+  const tile = $derived(settings?.tile ?? 128);
+  const TILES = [[160, "Large tiles", "Ctrl+Shift+2"], [128, "Medium tiles", "Ctrl+Shift+3"], [96, "Small tiles", "Ctrl+Shift+4"]] as const;
   const preset = $derived(presetClass(settings?.appearance.preset ?? "light_morphism"));
   const dark = $derived((preset === "light" || preset === "neu") && (settings?.appearance.follow_windows ? windowsDark.current : settings?.appearance.dark));
   let closeWarning = $state(false);
@@ -159,6 +162,25 @@
   }
 
   function toggleSidebar() { void saveSettings({ sidebar: !sidebar }); }
+  /** Details, or tiles of `size` pixels; saved for every folder tab and window. */
+  function setView(grid: boolean, size = tile) {
+    menu = undefined;
+    if (grid !== gridView || size !== tile) void saveSettings({ grid, tile: size });
+  }
+  /** Ctrl+wheel must cancel WebView2's page zoom, which needs a non-passive listener. */
+  function nonPassiveWheel(node: HTMLElement, handler: (event: WheelEvent) => void) {
+    node.addEventListener("wheel", handler, { passive: false });
+    return { destroy: () => node.removeEventListener("wheel", handler) };
+  }
+
+  /** Ctrl+wheel steps through the tile sizes in grid view. */
+  function zoomTiles(event: WheelEvent) {
+    if (!event.ctrlKey || !gridView) return;
+    event.preventDefault();
+    const sizes = TILES.map(([size]) => size as number).reverse();
+    const next = sizes[Math.max(0, Math.min(sizes.length - 1, sizes.indexOf(tile) + (event.deltaY < 0 ? 1 : -1)))];
+    setView(true, next);
+  }
 
   async function loadSettings() {
     settings = await api.getSettings();
@@ -485,6 +507,8 @@
     else if (event.ctrlKey && event.key === ",") openSettings();
     else if (event.ctrlKey && event.key === "\\") void toggleSplit();
     else if (event.ctrlKey && key === "b") toggleSidebar();
+    else if (event.ctrlKey && event.shiftKey && event.code === "Digit6") setView(false);
+    else if (event.ctrlKey && event.shiftKey && ["Digit2", "Digit3", "Digit4"].includes(event.code)) setView(true, TILES[Number(event.code.at(-1)) - 2][0]);
     else if (event.altKey && event.key === "ArrowLeft") void active?.back();
     else if (event.altKey && event.key === "ArrowRight") void active?.forward();
     else if (event.altKey && event.key === "ArrowUp") void active?.up();
@@ -861,6 +885,39 @@
     check("the result can be dismissed", !pill() && transfer === null);
   }
 
+  /** M4.3-g: grid view through its shortcuts, 2D keys, large Shell icons and Ctrl+wheel. */
+  async function gridSteps(source: Pane, check: Check) {
+    const key = (code: string) => window.dispatchEvent(new KeyboardEvent("keydown", { key: code.at(-1)!, code, ctrlKey: true, shiftKey: true, cancelable: true }));
+    const list = () => document.querySelector<HTMLElement>(`#pane-${activeIndex}-row-0`)?.closest<HTMLElement>(".list");
+    key("Digit3");
+    await waitFor(() => gridView && tile === 128 && !!list()?.classList.contains("tiles"), 5000, "Ctrl+Shift+3");
+    const table = () => list()!.querySelector<HTMLElement>('[role="grid"]')!;
+    const columns = Number(table().getAttribute("aria-colcount"));
+    const tiles = () => [...list()!.querySelectorAll<HTMLElement>(".tile")];
+    check("Ctrl+Shift+3 shows medium tiles in columns from the width", tiles().length === source.rows && columns >= 2 && tiles()[0].offsetWidth === 128, `${tiles().length} tiles, ${columns} columns`);
+    await waitFor(() => tiles().some((item) => { const image = item.querySelector("img"); return !!image?.complete && image.naturalWidth >= 64; }), 5000, "a 64 px Shell icon");
+    check("tiles request large Shell icons", true);
+    await source.select(0);
+    table().focus();
+    const arrow = (key: string) => table().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    arrow("ArrowRight");
+    await waitFor(() => source.selected === 1, 2000, "ArrowRight");
+    arrow("ArrowDown");
+    await waitFor(() => source.selected === source.rows - 1, 2000, "ArrowDown");
+    const current = document.getElementById(`pane-${activeIndex}-row-${source.selected}`);
+    check("arrow keys move across and down the tiles", current?.getAttribute("aria-selected") === "true" && current.getAttribute("aria-colindex") === String((source.selected % columns) + 1) && table().getAttribute("aria-activedescendant") === current.id);
+    key("Digit2");
+    await waitFor(() => tile === 160 && tiles()[0]?.offsetWidth === 160, 5000, "Ctrl+Shift+2");
+    const wheel = new WheelEvent("wheel", { deltaY: 120, ctrlKey: true, bubbles: true, cancelable: true });
+    tiles()[0].dispatchEvent(wheel);
+    await waitFor(() => tile === 128, 5000, "Ctrl+wheel");
+    check("Ctrl+wheel resizes tiles instead of zooming the page", wheel.defaultPrevented);
+    check("the view persists through the core", (await api.getSettings()).grid && (await api.getSettings()).tile === 128);
+    key("Digit6");
+    await waitFor(() => !gridView && !list()?.classList.contains("tiles"), 5000, "Ctrl+Shift+6");
+    check("Ctrl+Shift+6 returns to details", !(await api.getSettings()).grid);
+  }
+
   async function selfTest(info: Startup) {
     const steps: { step: string; ok: boolean; detail?: string }[] = [];
     const check = (step: string, ok: boolean, detail?: string) => {
@@ -953,6 +1010,7 @@
       await source.refresh();
       check("sort and refresh preserve selected identity", source.selected !== oldRow && source.selectedRefs()[0]?.index === identity.index && source.selectedRefs()[0]?.path === identity.path);
       await searchSteps(source, check);
+      await gridSteps(source, check);
       const slot = slots[0];
       const originalTab = slot.active;
       source.query = "file";
@@ -1130,8 +1188,8 @@
         <div class="search-gap"></div>
       {/if}
       <div class="seg" role="group" aria-label="View">
-        <button class="ib on" aria-pressed="true" aria-label="Details view" title="Details view"><Icon name="list" /></button>
-        <button class="ib" aria-pressed="false" aria-label="Grid view (not in this build)" title="Grid view (not in this build)" disabled><Icon name="grid" /></button>
+        <button class="ib" class:on={!gridView} aria-pressed={!gridView} aria-label="Details view (Ctrl+Shift+6)" title="Details view (Ctrl+Shift+6)" onclick={() => setView(false)}><Icon name="list" /></button>
+        <button class="ib" class:on={gridView} aria-pressed={gridView} aria-label="Grid view (Ctrl+Shift+3)" title="Grid view (Ctrl+Shift+3, Ctrl+wheel resizes)" onclick={() => setView(true)}><Icon name="grid" /></button>
       </div>
       <button class="ib" class:on={slots.length > 1} aria-pressed={slots.length > 1} aria-label="Split view (Ctrl+\)" title="Split view (Ctrl+\)" onclick={toggleSplit}><Icon name="split" /></button>
       <button class="ib" aria-label="More" title="More" aria-haspopup="menu" onmousedown={(event) => event.stopPropagation()} onclick={(event) => showMenu("more", event.clientX - 220, event.clientY + 16)}><Icon name="more" /></button>
@@ -1162,7 +1220,7 @@
           {/each}
         </nav>
       {/if}
-      <div class="panes">
+      <div class="panes" use:nonPassiveWheel={zoomTiles}>
         {#each slots as slot, index (slot)}
           <div class="pane-slot">
           {#if slots.length > 1}
@@ -1186,6 +1244,8 @@
             pane={slot.active.pane}
             id={`pane-${index}`}
             marked={slots.length > 1 && index === activeIndex}
+            grid={gridView}
+            {tile}
             onactivate={() => (activeIndex = index)}
             onopen={open}
             onmenu={(x, y, onRow) => showMenu(onRow ? "item" : "area", x, y)}
@@ -1262,6 +1322,12 @@
         <button class="mi" role="menuitem" onclick={() => openSettings("menu")}><Icon name="settings" /><span class="label">Edit menu…</span></button>
       {:else}
         <button class="mi" role="menuitem" onclick={() => openSettings()}><Icon name="settings" /><span class="label">Settings</span><span class="sc">Ctrl+,</span></button>
+        <div class="sep"></div>
+        <div class="menu-title">View</div>
+        <button class="mi" class:on={!gridView} role="menuitemradio" aria-checked={!gridView} onclick={() => setView(false)}><Icon name="list" /><span class="label">Details</span><span class="sc">Ctrl+Shift+6</span></button>
+        {#each TILES as [size, name, keys] (size)}
+          <button class="mi" class:on={gridView && tile === size} role="menuitemradio" aria-checked={gridView && tile === size} onclick={() => setView(true, size)}><Icon name="grid" /><span class="label">{name}</span><span class="sc">{keys}</span></button>
+        {/each}
         <div class="sep"></div>
         <div class="menu-title">Theme</div>
         {#each PRESETS as [value, css, name] (value)}

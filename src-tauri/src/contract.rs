@@ -135,6 +135,8 @@ pub struct SettingsView {
     pub version: u32,
     pub theme_migrated: bool,
     pub sidebar: bool,
+    pub grid: bool,
+    pub tile: u32,
     pub appearance: AppearanceView,
     pub menu: Vec<MenuEntryView>,
     pub folders: Vec<StyledFolder>,
@@ -150,6 +152,11 @@ pub struct SettingsPatch {
     pub appearance: Option<AppearanceView>,
     #[ts(optional)]
     pub sidebar: Option<bool>,
+    #[ts(optional)]
+    pub grid: Option<bool>,
+    /// 96, 128 or 160.
+    #[ts(optional)]
+    pub tile: Option<u32>,
     #[ts(optional)]
     pub menu: Option<Vec<MenuEntryView>>,
     #[ts(optional)]

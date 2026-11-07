@@ -4,7 +4,9 @@ $ErrorActionPreference = 'Stop'
 $appPath = (Resolve-Path -LiteralPath $App).Path
 $run = New-Item -ItemType Directory -Path (Join-Path $PSScriptRoot ('../target/interface-' + [guid]::NewGuid().ToString('N')))
 $source = New-Item -ItemType Directory -Path (Join-Path $run.FullName 'source')
-$null = New-Item -ItemType Directory -Path (Join-Path $run.FullName 'dest')
+$dest = New-Item -ItemType Directory -Path (Join-Path $run.FullName 'dest')
+# Transfer steps pause, resume and cancel a copy of this 512 MiB file (zero-filled, not written).
+$big = [IO.File]::Create((Join-Path $dest.FullName 'big.bin')); $big.SetLength(512MB); $big.Dispose()
 $reports = New-Item -ItemType Directory -Path (Join-Path $run.FullName 'reports')
 Set-Content -LiteralPath (Join-Path $source.FullName 'note.txt') -Value 'Firewol disposable interface fixture.'
 Set-Content -LiteralPath (Join-Path $source.FullName 'file2.txt') -Value 'two'

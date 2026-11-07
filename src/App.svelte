@@ -8,6 +8,7 @@
     FOLDER_PROGRESS,
     INDEX_STATE,
     VOLUME_STATE,
+    TRANSFER_PROGRESS,
     OPERATION_DONE,
     SESSION_CHANGED,
     SETTINGS_CHANGED,
@@ -38,6 +39,7 @@
   import Settings from "./lib/Settings.svelte";
   import { styleKey, styleMap, tint } from "./lib/styles";
   import TabBar from "./lib/TabBar.svelte";
+  import TransferPill from "./lib/TransferPill.svelte";
   import { volumes } from "./lib/volumes.svelte";
   import { PaneSlot, folderTab, restore, snapshot, type Tab } from "./lib/tabs.svelte";
 
@@ -65,7 +67,9 @@
   let address = $state("");
   let menu = $state<{ kind: "item" | "area" | "more"; x: number; y: number }>();
   let toast = $state<{ message: string; undo: boolean; error: boolean }>();
+  /** The running transfer, or the last result until dismissed; sent by the core every 250 ms. */
   let transfer = $state.raw<TransferStatus | null>(null);
+  const transferRunning = $derived(!!transfer && transfer.phase !== "finished");
   let fatal = $state("");
   let searchBox: SearchBox | undefined = $state();
   /** The NTFS drive waiting for in-window confirmation before Windows asks for approval. */
@@ -74,7 +78,6 @@
   let folderSheet = $state<{ item: ItemRef; name: string; path: string }>();
   let addressField: HTMLInputElement | undefined = $state();
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
-  let transferTimer: ReturnType<typeof setInterval> | undefined;
 
   const activeTab = $derived(slots[activeIndex]?.active);
   const active = $derived(activeTab?.kind === "folder" ? activeTab.pane : undefined);
@@ -205,27 +208,13 @@
   }
 
   /** Runs a command that starts a file operation; failures to start show at once. */
-  async function start(action: Promise<void>, transfers = false) {
+  async function start(action: Promise<void>) {
     menu = undefined;
     try {
       await action;
-      if (transfers) watchTransfer();
     } catch (reason) {
       notify(String(reason), { error: true });
     }
-  }
-
-  function watchTransfer() {
-    clearInterval(transferTimer);
-    transferTimer = setInterval(async () => {
-      transfer = await api.transferStatus().catch(() => null);
-    }, 300);
-  }
-
-  function stopTransferWatch() {
-    clearInterval(transferTimer);
-    transferTimer = undefined;
-    transfer = null;
   }
 
   let doneWaiters: ((done: OperationDone) => void)[] = [];
@@ -246,7 +235,6 @@
     const waiters = doneWaiters;
     doneWaiters = [];
     waiters.forEach((resolve) => resolve(done));
-    stopTransferWatch();
     if (done.refresh) for (const pane of panes) void pane.refresh();
     notify(done.message, { undo: done.succeeded, error: !done.succeeded });
     void api.session().then((state) => (session = state));
@@ -273,13 +261,13 @@
 
   function paste() {
     const into = active?.folder?.item;
-    if (into && session.clipboard) void start(api.paste(into), true);
+    if (into && session.clipboard) void start(api.paste(into));
   }
 
   function toOtherPane(moveItems: boolean) {
     const into = other?.folder?.item;
     const items = active?.selectedRefs() ?? [];
-    if (into && items.length > 0) void start(api.transfer(items, into, moveItems), true);
+    if (into && items.length > 0) void start(api.transfer(items, into, moveItems));
   }
 
   function rename(entry: Entry, name: string) {
@@ -297,7 +285,7 @@
 
   function undo() {
     toast = undefined;
-    void start(api.undo(), true);
+    void start(api.undo());
   }
 
   function menuContext(onItem: boolean): MenuContext {
@@ -307,7 +295,7 @@
       searching: !!active?.searching,
       current: !!active?.folder?.item,
       clipboard: !!session.clipboard,
-      idle: !transfer,
+      idle: !transferRunning,
       split: !!other?.folder?.item,
       elevation: settings?.elevation ?? { mode: "standard", executables: [] },
     };
@@ -844,6 +832,35 @@
     check("clearing the search returns to the listing", source.rows === source.count && !!source.entry(0));
   }
 
+  /** M4.3-g: core progress events, the pill's pause, the speed popover and cancel. */
+  async function transferSteps(source: Pane, target: Pane, check: Check) {
+    check("the last transfer or undo keeps its result for the popover", transfer?.phase === "finished" && transfer.succeeded === true && !!transfer.message, JSON.stringify(transfer));
+    const big = target.pages[0]?.find((entry) => entry.name === "big.bin");
+    const into = source.pages[0]?.find((entry) => entry.name === "z-folder");
+    check("the 512 MiB fixture is listed", !!big?.id && !!into?.id);
+    const done = nextDone();
+    await start(api.transfer([big!.id!], into!.id!, false));
+    await api.pauseTransfer();
+    await waitFor(() => transfer?.phase === "paused" && transfer.samples.length > 0, 5000, "a paused transfer event");
+    check("progress events report the planned size", transfer!.totalBytes === 512 * 1024 ** 2 && transfer!.totalItems === 1 && transfer!.bytes < transfer!.totalBytes, JSON.stringify({ ...transfer, samples: transfer?.samples.length }));
+    await tick();
+    const pill = () => document.querySelector<HTMLButtonElement>('.status button[title="Transfer details"]');
+    check("the status bar shows a Transfers button with Resume", !!pill() && pill()!.textContent!.includes("Paused") && !!document.querySelector('.status button[aria-label="Resume transfer"]'));
+    pill()!.click();
+    await tick();
+    const popover = document.querySelector('.status [role="dialog"][aria-label="Transfer details"]');
+    check("the popover shows the speed graph and totals", !!popover?.querySelector("svg") && /of 512 MB/.test(popover.textContent ?? "") && /Resume/.test(popover.textContent ?? ""), popover?.textContent ?? "");
+    [...popover!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Cancel")!.click();
+    const result = await done;
+    check("Cancel stops a paused transfer", !result.succeeded && /cancel/i.test(result.message), result.message);
+    await waitFor(() => transfer?.phase === "finished", 5000, "the cancelled result");
+    check("the popover keeps the cancelled result", transfer!.succeeded === false && !!document.querySelector('.status [role="dialog"] .result.failed'));
+    pill()!.click();
+    document.querySelector<HTMLButtonElement>('.status button[aria-label="Dismiss transfer result"]')!.click();
+    await tick();
+    check("the result can be dismissed", !pill() && transfer === null);
+  }
+
   async function selfTest(info: Startup) {
     const steps: { step: string; ok: boolean; detail?: string }[] = [];
     const check = (step: string, ok: boolean, detail?: string) => {
@@ -915,6 +932,7 @@
       undo();
       result = await settle(target, done);
       check("undo recycle", result.succeeded && names(target).includes("note.txt"), result.message);
+      await transferSteps(source, target, check);
       await togglePin(destPath);
       check("pin", session.pins.some((pin) => pin.path === destPath));
       await togglePin(destPath);
@@ -1024,6 +1042,7 @@
       listen<FolderProgress>(FOLDER_PROGRESS, (event) => panes.forEach((pane) => pane.progress(event.payload))),
       listen<IndexState>(INDEX_STATE, (event) => panes.forEach((pane) => pane.indexed(event.payload))),
       listen<VolumeState>(VOLUME_STATE, (event) => volumeChanged(event.payload)),
+      listen<TransferStatus>(TRANSFER_PROGRESS, (event) => (transfer = event.payload)),
       listen<OperationDone>(OPERATION_DONE, (event) => finished(event.payload)),
       listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
       listen<SettingsView>(SETTINGS_CHANGED, (event) => (settings = withPending(event.payload))),
@@ -1037,7 +1056,7 @@
     ];
     void (async () => {
       const info = await api.startup();
-      await Promise.all([loadSettings(), volumes.load()]);
+      await Promise.all([loadSettings(), volumes.load(), api.transferStatus().then((status) => (transfer = status))]);
       const start = performance.now();
       useLocale(info.locale);
       startup = info;
@@ -1062,7 +1081,6 @@
       }
     })().catch((reason) => (fatal = String(reason)));
     return () => {
-      clearInterval(transferTimer);
       unlisten.forEach((promise) => void promise.then((stop) => stop()));
     };
   });
@@ -1183,7 +1201,7 @@
       </div>
     </div>
 
-    <footer class="status" role="status" class:collapsed={settingsOnly && !transfer && !fatal}>
+    <footer class="status" role="status" class:collapsed={settingsOnly && !transferRunning && !fatal}>
       {#if fatal || active?.error}
         <span class="error">{fatal || active?.error}</span>
       {:else if active}
@@ -1194,12 +1212,7 @@
       {/if}
       <span class="grow"></span>
       {#if transfer}
-        <span class="pill">
-          <span class="accent icon"><Icon name="transfer" size={14} /></span>
-          <span>{transfer.phase === "paused" ? "Paused" : transfer.phase === "cancelled" ? "Cancelling" : "Transferring"} · {formatSize(transfer.bytes)} · {transfer.finished} done</span>
-          <button class="ib xs" aria-label={transfer.phase === "paused" ? "Resume transfer" : "Pause transfer"} onclick={() => api.pauseTransfer()}><Icon name={transfer.phase === "paused" ? "play" : "pause"} size={12} /></button>
-          <button class="ib xs" aria-label="Cancel transfer" onclick={() => api.cancelTransfer()}><Icon name="close" size={12} /></button>
-        </span>
+        <TransferPill status={transfer} ondismiss={() => (transfer = null)} />
       {/if}
       {#if active?.volume}
         {@const volume = volumes.states[active.volume]}
@@ -1279,7 +1292,7 @@
     <Sheet title="A file operation is running" onclose={() => (closeWarning = false)}>
       <p>Keep Firewol open until this operation finishes. You can continue browsing while it runs.</p>
       <div class="actions">
-        <button class="action" onclick={() => { closeWhenFinished = true; closeWarning = false; if (!transfer) void appWindow.close(); }}>Close when finished</button>
+        <button class="action" onclick={() => { closeWhenFinished = true; closeWarning = false; if (!transferRunning) void appWindow.close(); }}>Close when finished</button>
         <button class="action primary" onclick={() => (closeWarning = false)}>Keep open</button>
       </div>
     </Sheet>
@@ -1330,7 +1343,6 @@
   .status { display: flex; align-items: center; gap: 12px; flex: none; height: 36px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
   .grow { flex-grow: 1; }
   .error { color: var(--text); }
-  .pill { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 4px 0 10px; border: var(--border-w) solid var(--border); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-s); backdrop-filter: var(--blur); color: var(--text); }
   :global(.ib.xs) { width: 22px; height: 22px; border-radius: 999px; }
   .toast { position: fixed; left: 50%; bottom: 52px; z-index: 30; display: flex; align-items: center; gap: 12px; max-width: min(640px, calc(100% - 32px)); padding: 8px 8px 8px 16px; transform: translateX(-50%); border: var(--border-w) solid var(--border); border-radius: var(--radius); background: var(--surface-2); box-shadow: var(--shadow-pop); backdrop-filter: var(--blur); font-size: 13px; }
   .toast.error { border-color: #c42b1c; }

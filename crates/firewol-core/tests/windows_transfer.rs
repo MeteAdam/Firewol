@@ -116,6 +116,11 @@ fn pauses_resumes_and_cancels_an_in_flight_copy() -> Result<()> {
             let task = scope.spawn(|| Operations::open()?.transfer(transfer, &control));
             let check = (|| {
                 wait_for(|| control.progress().bytes > 0 || task.is_finished())?;
+                let planned = control.progress();
+                ensure!(
+                    planned.total_bytes == length && planned.total_items == 1,
+                    "The transfer did not plan its size"
+                );
                 ensure!(
                     !task.is_finished(),
                     "Copy completed before requesting a pause"

@@ -8,6 +8,7 @@ use ts_rs::TS;
 pub const FOLDER_PROGRESS: &str = "folder-progress";
 pub const INDEX_STATE: &str = "index-state";
 pub const VOLUME_STATE: &str = "volume-state";
+pub const TRANSFER_PROGRESS: &str = "transfer-progress";
 pub const OPERATION_DONE: &str = "operation-done";
 pub const SESSION_CHANGED: &str = "session-changed";
 pub const SETTINGS_CHANGED: &str = "settings-changed";
@@ -358,24 +359,41 @@ pub struct SessionState {
     pub clipboard: Option<ClipboardState>,
 }
 
-#[derive(Serialize, TS)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum TransferPhase {
     Running,
     Paused,
     Cancelled,
+    /// The job ended; `message` and `succeeded` hold its result until the next transfer.
+    Finished,
 }
 
-#[derive(Serialize, TS)]
+/// Emitted as `transfer-progress` to every window every 250 ms while a transfer or undo runs,
+/// and once more with its result.
+#[derive(Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct TransferStatus {
     pub phase: TransferPhase,
     #[ts(type = "number")]
     pub bytes: u64,
+    /// Bytes the file copies will write; 0 when nothing reports bytes (folders, renames).
+    #[ts(type = "number")]
+    pub total_bytes: u64,
     pub finished: u32,
+    /// Items in the job, or 0 when unknown.
+    pub total_items: u32,
     pub verifying: u32,
+    /// Bytes per second over the last second.
+    pub speed: f64,
+    /// Bytes per second for each 250 ms tick, oldest first, at most 60.
+    pub samples: Vec<f64>,
+    #[ts(type = "number")]
+    pub elapsed_ms: u64,
+    pub message: Option<String>,
+    pub succeeded: Option<bool>,
 }
 
 #[derive(Serialize, TS)]

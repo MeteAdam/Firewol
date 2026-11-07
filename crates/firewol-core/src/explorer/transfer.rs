@@ -48,6 +48,8 @@ struct Control {
     finished: AtomicUsize,
     verifying: AtomicUsize,
     restarts: AtomicUsize,
+    total_bytes: AtomicU64,
+    total_items: AtomicUsize,
 }
 
 pub struct TransferProgress {
@@ -56,6 +58,10 @@ pub struct TransferProgress {
     pub finished: usize,
     pub verifying: usize,
     pub paused_copies: usize,
+    /// Bytes the planned file copies will write; folders and same-volume moves add none.
+    pub total_bytes: u64,
+    /// Items the job handles, or 0 when unknown (undo).
+    pub total_items: usize,
 }
 
 impl TransferControl {
@@ -66,7 +72,14 @@ impl TransferControl {
             finished: self.0.finished.load(Relaxed),
             verifying: self.0.verifying.load(Relaxed),
             paused_copies: self.0.restarts.load(Relaxed),
+            total_bytes: self.0.total_bytes.load(Relaxed),
+            total_items: self.0.total_items.load(Relaxed),
         }
+    }
+
+    pub(super) fn plan(&self, items: usize, bytes: u64) {
+        self.0.total_items.store(items, Relaxed);
+        self.0.total_bytes.store(bytes, Relaxed);
     }
 
     pub fn toggle_pause(&self) {

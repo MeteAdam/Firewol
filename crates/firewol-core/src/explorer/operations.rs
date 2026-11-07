@@ -171,6 +171,15 @@ impl Operations {
             names.len() == items.len(),
             "A transfer contains the same path twice"
         );
+        // Only CopyFile2 transfers report bytes: copies and cross-volume moves of regular files.
+        let planned_bytes = items
+            .iter()
+            .filter(|item| !(move_items && item.identity.volume == into.identity.volume))
+            .filter(|item| transfer::regular(item, &into).unwrap_or(false))
+            .filter_map(|item| std::fs::metadata(item.path()).ok())
+            .map(|meta| meta.len())
+            .sum();
+        control.plan(items.len(), planned_bytes);
         let execute = |item: &ItemId| {
             let result = control
                 .checkpoint()

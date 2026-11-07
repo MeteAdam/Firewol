@@ -35,5 +35,6 @@ export type { VolumeState } from "./bindings/VolumeState";
 export const FOLDER_PROGRESS = "folder-progress";
 export const INDEX_STATE = "index-state";
 export const VOLUME_STATE = "volume-state";
+export const TRANSFER_PROGRESS = "transfer-progress";
 export const OPERATION_DONE = "operation-done";
 export const SESSION_CHANGED = "session-changed";

@@ -4,6 +4,7 @@ mod contract;
 mod folders;
 mod icons;
 mod settings;
+mod transfers;
 mod volumes;
 
 use std::collections::HashMap;
@@ -16,17 +17,16 @@ use std::time::Instant;
 use anyhow::Context as _;
 use contract::{
     ClipboardState, FolderStyleView, IndexState, ItemRef, Navigation, OperationDone, Page, Pin,
-    SearchCount, SearchRequest, SessionState, SettingsView, Startup, Step, TransferPhase,
-    TransferStatus, VolumeState,
+    SearchCount, SearchRequest, SessionState, SettingsView, Startup, Step, TransferStatus,
+    VolumeState,
 };
-use firewol_core::explorer::{
-    ItemId, MenuAction, Operation, Session, TransferState, actions, data_dir, home,
-};
+use firewol_core::explorer::{ItemId, MenuAction, Operation, Session, actions, data_dir, home};
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::{
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
     WindowEvent,
 };
+use transfers::Transfers;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
     ICoreWebView2_19,
@@ -298,28 +298,58 @@ async fn set_clipboard(
 }
 
 #[tauri::command]
-fn paste(files: State<'_, Files>, into: ItemRef) -> Result<(), String> {
-    files
-        .0
-        .paste(item_id(&into).map_err(message)?)
-        .map(drop)
-        .map_err(message)
+fn paste(
+    app: AppHandle,
+    files: State<'_, Files>,
+    transfers: State<'_, Arc<Transfers>>,
+    into: ItemRef,
+) -> Result<(), String> {
+    let into = item_id(&into).map_err(message)?;
+    watched(&app, &files, &transfers, |session| session.paste(into))
+}
+
+/// Submits a transfer or undo with its progress view prepared first.
+fn watched(
+    app: &AppHandle,
+    files: &Files,
+    transfers: &Arc<Transfers>,
+    submit: impl FnOnce(&Session) -> anyhow::Result<firewol_core::explorer::TransferControl>,
+) -> Result<(), String> {
+    let generation = transfers.prepare();
+    match submit(&files.0) {
+        Ok(control) => {
+            transfers.attach(generation, control, files.0.clone(), transfer_emitter(app));
+            Ok(())
+        }
+        Err(error) => {
+            transfers.abandon(generation);
+            Err(message(error))
+        }
+    }
+}
+
+fn transfer_emitter(app: &AppHandle) -> transfers::Emit {
+    let app = app.clone();
+    Arc::new(move |status| {
+        let _ = app.emit(contract::TRANSFER_PROGRESS, status);
+    })
 }
 
 #[tauri::command]
 fn transfer(
+    app: AppHandle,
     files: State<'_, Files>,
+    transfers: State<'_, Arc<Transfers>>,
     items: Vec<ItemRef>,
     into: ItemRef,
     move_items: bool,
 ) -> Result<(), String> {
     let items = items.iter().map(item_id).collect::<anyhow::Result<_>>();
     let into = item_id(&into).map_err(message)?;
-    files
-        .0
-        .transfer(items.map_err(message)?, into, move_items)
-        .map(drop)
-        .map_err(message)
+    let items = items.map_err(message)?;
+    watched(&app, &files, &transfers, |session| {
+        session.transfer(items, into, move_items)
+    })
 }
 
 #[tauri::command]
@@ -341,22 +371,18 @@ fn recycle(files: State<'_, Files>, item: ItemRef) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn undo(files: State<'_, Files>) -> Result<(), String> {
-    files.0.undo().map(drop).map_err(message)
+fn undo(
+    app: AppHandle,
+    files: State<'_, Files>,
+    transfers: State<'_, Arc<Transfers>>,
+) -> Result<(), String> {
+    watched(&app, &files, &transfers, Session::undo)
 }
 
+/// The running transfer, or the last one's result.
 #[tauri::command]
-fn transfer_status(files: State<'_, Files>) -> Option<TransferStatus> {
-    files.0.progress().map(|progress| TransferStatus {
-        phase: match progress.state {
-            TransferState::Running => TransferPhase::Running,
-            TransferState::Paused => TransferPhase::Paused,
-            TransferState::Cancelled => TransferPhase::Cancelled,
-        },
-        bytes: progress.bytes,
-        finished: progress.finished as u32,
-        verifying: progress.verifying as u32,
-    })
+fn transfer_status(transfers: State<'_, Arc<Transfers>>) -> Option<TransferStatus> {
+    transfers.current()
 }
 
 #[tauri::command]
@@ -735,7 +761,12 @@ fn main() {
             let data = data_dir()?;
             std::thread::spawn(move || firewol_core::explorer::remove_stale_indexes(&data));
             let handle = app.handle().clone();
+            let transfers = Arc::new(Transfers::default());
+            app.manage(transfers.clone());
             let session = Session::open(data_dir()?, move |done| {
+                if let Some(status) = transfers.finish(&done.message, done.succeeded) {
+                    let _ = handle.emit(contract::TRANSFER_PROGRESS, status);
+                }
                 let _ = handle.emit(
                     contract::OPERATION_DONE,
                     OperationDone {

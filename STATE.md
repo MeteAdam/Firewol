@@ -13,9 +13,10 @@ Build a lightweight, customizable Windows 11 file manager with instant local sea
 - Admin settings gate explicit administrator launches and elevated custom actions. Settings stay in local app data and Windows handles UAC consent.
 - On 2026-11-07, nine standard Windows release tests and the extended native pause/resume/cancel test passed. Rust formatting, Clippy and Svelte checks were clean; cross-volume tests were not rerun.
 - Interactive two-lane 4 GiB copies, pause, resume, cancellation, staging cleanup and recycle/restore were verified on synthetic NTFS files with isolated settings.
+- User-denied administrator launch was verified in the real M3 UI: Windows elevation was cancelled, no fixture process remained, and folder search still returned its expected result. NTFS-helper-specific denial remains unverified.
 - A 100,000-row list initially presented in 103 ms at 88 FPS, but later stalled with UI Automation active and reached 555,610,112 bytes of private working set in one window. Stacks point into Windows accessibility code; the root cause is not yet isolated.
 - The four-window M3 run is not accepted. Prior M2 and M3 memory measurements do not cover this failing scenario. Session sampling is reproducible with scripts/Measure-Session.ps1.
 - The M3 executable is `target/release/firewol-win32.exe`.
 
 ## Next Immediate Step
-Isolate and fix the large-directory stall with UI Automation active, then repeat four-window/eight-pane M3 transfer and million-record indexing measurements. Complete explicit user-driven UAC denial before release; do not restart M0.
+Isolate and fix the large-directory stall with UI Automation active, then repeat four-window/eight-pane M3 transfer and million-record indexing measurements. Verify NTFS-helper-specific UAC denial separately before release; do not restart M0.

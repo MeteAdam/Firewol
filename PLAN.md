@@ -32,5 +32,5 @@ The original planning handoff requested saving this plan in English and creating
 - M1–M3 implemented browsing, search, identity-checked operations, undo, tabs, split panes, appearance, verified parallel transfers and elevation policies.
 - Interactive transfer pause, resume, cancellation and staged-file cleanup were verified on Windows on 2026-11-07. Recycle/restore was also rechecked.
 - A 100,000-row list became unresponsive with UI Automation active and reached 555,610,112 bytes of private working set in one window. Stacks point into Windows accessibility code; the root cause needs isolation before accepting a four-window M3 run.
-- Explicit UAC cancellation and the four-window transfer/indexing measurement remain pre-release requirements.
+- User-denied administrator launch was verified in the real M3 UI: the cancellation was reported and ordinary folder search remained usable. The separate NTFS-helper denial path and the four-window transfer/indexing measurement remain pre-release requirements.
 - Keep current findings and the next immediate step in `STATE.md` (at most 25 lines). See `README.md` for reproduction commands and completed measurements.

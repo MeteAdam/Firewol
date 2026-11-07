@@ -4,6 +4,7 @@ mod contract;
 mod folders;
 mod icons;
 mod settings;
+mod volumes;
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -15,7 +16,8 @@ use std::time::Instant;
 use anyhow::Context as _;
 use contract::{
     ClipboardState, FolderStyleView, IndexState, ItemRef, Navigation, OperationDone, Page, Pin,
-    SessionState, SettingsView, Startup, Step, TransferPhase, TransferStatus,
+    SearchCount, SearchRequest, SessionState, SettingsView, Startup, Step, TransferPhase,
+    TransferStatus, VolumeState,
 };
 use firewol_core::explorer::{
     ItemId, MenuAction, Operation, Session, TransferState, actions, data_dir, home,
@@ -203,9 +205,69 @@ async fn start_index(app: AppHandle, state: State<'_, App>, id: u64) -> Result<I
 }
 
 #[tauri::command]
-async fn search(state: State<'_, App>, id: u64, text: String, offset: u32) -> Result<Page, String> {
+async fn search(state: State<'_, App>, request: SearchRequest) -> Result<Page, String> {
     let folders = state.folders.clone();
-    blocking(move || folders.search(id, text, offset)).await
+    blocking(move || folders.search(request)).await
+}
+
+#[tauri::command]
+async fn search_count(
+    state: State<'_, App>,
+    request: SearchRequest,
+) -> Result<SearchCount, String> {
+    let folders = state.folders.clone();
+    blocking(move || folders.search_count(request)).await
+}
+
+/// The drive letter of `path` when volume search can index it (a local NTFS volume).
+#[tauri::command]
+async fn ntfs_drive(path: String) -> Result<Option<String>, String> {
+    blocking(move || {
+        Ok(firewol_core::explorer::volume::ntfs_drive(Path::new(&path)).map(String::from))
+    })
+    .await
+}
+
+#[tauri::command]
+fn volume_states(state: State<'_, App>) -> Vec<VolumeState> {
+    state.folders.volumes.states()
+}
+
+/// Starts the NTFS index for `drive`; Windows asks for administrator approval for the helper.
+#[tauri::command]
+async fn start_volume_index(
+    app: AppHandle,
+    state: State<'_, App>,
+    drive: String,
+) -> Result<VolumeState, String> {
+    let volumes = state.folders.volumes.clone();
+    let notify: volumes::VolumeNotify = Arc::new(move |volume| {
+        let _ = app.emit(contract::VOLUME_STATE, volume);
+    });
+    blocking(move || {
+        let drive = volumes::drive(&drive)?;
+        let state = volumes.start(drive, notify.clone())?;
+        notify(state.clone());
+        Ok(state)
+    })
+    .await
+}
+
+#[tauri::command]
+fn stop_volume_index(app: AppHandle, state: State<'_, App>, drive: String) -> Result<(), String> {
+    let letter = volumes::drive(&drive).map_err(message)?;
+    state.folders.volumes.stop(letter);
+    let _ = app.emit(
+        contract::VOLUME_STATE,
+        VolumeState {
+            drive: letter.to_string(),
+            ready: false,
+            running: false,
+            count: 0,
+            error: None,
+        },
+    );
+    Ok(())
 }
 
 // Session state opens each pin to learn its identity, so these commands stay off the main thread.
@@ -621,7 +683,37 @@ fn message(error: impl std::fmt::Display) -> String {
     format!("{error:#}")
 }
 
+/// Runs the elevated read-only NTFS helper when Firewol started itself for volume search.
+/// It must return before Tauri starts, so the elevated process never opens a window.
+fn ntfs_helper() -> Option<i32> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|arg| arg != "--ntfs-helper") {
+        return None;
+    }
+    let result = (|| -> anyhow::Result<()> {
+        let [_, drive, serial, pipe, parent] = args.as_slice() else {
+            anyhow::bail!("Usage: --ntfs-helper DRIVE SERIAL PIPE PARENT");
+        };
+        firewol_core::explorer::volume::run_helper(
+            drive.to_string_lossy().parse()?,
+            serial.to_string_lossy().parse()?,
+            &pipe.to_string_lossy(),
+            parent.to_string_lossy().parse()?,
+        )
+    })();
+    Some(match result {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("{error:#}");
+            1
+        }
+    })
+}
+
 fn main() {
+    if let Some(code) = ntfs_helper() {
+        std::process::exit(code);
+    }
     STARTED.get_or_init(Instant::now);
     let folders = Arc::new(Folders::default());
     let closing = folders.clone();
@@ -640,6 +732,8 @@ fn main() {
                 .map(PathBuf::from),
         })
         .setup(|app| {
+            let data = data_dir()?;
+            std::thread::spawn(move || firewol_core::explorer::remove_stale_indexes(&data));
             let handle = app.handle().clone();
             let session = Session::open(data_dir()?, move |done| {
                 let _ = handle.emit(
@@ -681,6 +775,11 @@ fn main() {
             locate_selection,
             start_index,
             search,
+            search_count,
+            ntfs_drive,
+            volume_states,
+            start_volume_index,
+            stop_volume_index,
             session,
             set_clipboard,
             paste,

@@ -7,6 +7,7 @@ use ts_rs::TS;
 
 pub const FOLDER_PROGRESS: &str = "folder-progress";
 pub const INDEX_STATE: &str = "index-state";
+pub const VOLUME_STATE: &str = "volume-state";
 pub const OPERATION_DONE: &str = "operation-done";
 pub const SESSION_CHANGED: &str = "session-changed";
 pub const SETTINGS_CHANGED: &str = "settings-changed";
@@ -259,6 +260,65 @@ pub struct IndexState {
     #[ts(type = "number")]
     pub id: u64,
     pub ready: bool,
+    #[ts(type = "number")]
+    pub count: u64,
+    pub error: Option<String>,
+}
+
+/// Search filters; an absent field does not filter. Dates are Unix seconds, inclusive.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SearchFilters {
+    pub extension: Option<String>,
+    #[ts(type = "number | null")]
+    pub min_bytes: Option<u64>,
+    #[ts(type = "number | null")]
+    pub max_bytes: Option<u64>,
+    #[ts(type = "number | null")]
+    pub modified_after: Option<i64>,
+    #[ts(type = "number | null")]
+    pub modified_before: Option<i64>,
+}
+
+/// Where a search looks: the open folder and its subfolders, or a whole NTFS volume.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export)]
+pub enum SearchScope {
+    Folder,
+    Volume { drive: String },
+}
+
+#[derive(Clone, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SearchRequest {
+    /// The open folder the searching tab shows.
+    #[ts(type = "number")]
+    pub id: u64,
+    pub text: String,
+    pub regex: bool,
+    pub filters: SearchFilters,
+    pub scope: SearchScope,
+    pub offset: u32,
+}
+
+/// Matches counted up to `SEARCH_COUNT_CAP`; `more` means there are more than `count`.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct SearchCount {
+    pub count: u32,
+    pub more: bool,
+}
+
+/// Emitted as `volume-state` to every window while an NTFS volume index starts, updates or stops.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct VolumeState {
+    pub drive: String,
+    pub ready: bool,
+    pub running: bool,
     #[ts(type = "number")]
     pub count: u64,
     pub error: Option<String>,

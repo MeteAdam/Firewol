@@ -9,7 +9,11 @@ $reports = New-Item -ItemType Directory -Path (Join-Path $run.FullName 'reports'
 Set-Content -LiteralPath (Join-Path $source.FullName 'note.txt') -Value 'Firewol disposable interface fixture.'
 Set-Content -LiteralPath (Join-Path $source.FullName 'file2.txt') -Value 'two'
 Set-Content -LiteralPath (Join-Path $source.FullName 'file10.txt') -Value 'ten'
-$null = New-Item -ItemType Directory -Path (Join-Path $source.FullName 'z-folder')
+$folder = New-Item -ItemType Directory -Path (Join-Path $source.FullName 'z-folder')
+# Search steps: a nested 4 KB log, and enough nested matches for more than two result pages.
+[IO.File]::WriteAllText((Join-Path $folder.FullName 'report-2026.log'), ('x' * 4096))
+$many = New-Item -ItemType Directory -Path (Join-Path $folder.FullName 'many')
+0..299 | ForEach-Object { [IO.File]::WriteAllText((Join-Path $many.FullName ('item-{0:000}.txt' -f $_)), '') }
 $variables = @{
     LOCALAPPDATA = Join-Path $run.FullName 'local'
     WEBVIEW2_USER_DATA_FOLDER = Join-Path $run.FullName 'webview'
@@ -24,6 +28,12 @@ try {
         $saved[$name] = [Environment]::GetEnvironmentVariable($name)
         [Environment]::SetEnvironmentVariable($name, $variables[$name])
     }
+    # The elevated NTFS helper must exit before Tauri starts: no window and no WebView2 profile.
+    $helper = Start-Process -FilePath $appPath -ArgumentList '--ntfs-helper', 'C', '1', 'not-a-firewol-pipe', "$PID" -WindowStyle Hidden -PassThru
+    if (-not $helper.WaitForExit(10000)) { $helper.Kill($true); throw '--ntfs-helper started the interface instead of exiting' }
+    if ($helper.ExitCode -eq 0) { throw '--ntfs-helper reported success without its pipe' }
+    if (Test-Path -LiteralPath $variables.WEBVIEW2_USER_DATA_FOLDER) { throw '--ntfs-helper created a WebView2 profile' }
+    Write-Output "--ntfs-helper exited with code $($helper.ExitCode) before the interface started"
     $process = Start-Process -FilePath $appPath -WindowStyle Hidden -PassThru
     $report = Join-Path $reports.FullName 'main.json'
     $timer = [Diagnostics.Stopwatch]::StartNew()

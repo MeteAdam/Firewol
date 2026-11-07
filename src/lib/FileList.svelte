@@ -50,7 +50,9 @@
 
   $effect(() => {
     void pane.pageVersion;
-    if (pane.searching) return;
+    void pane.searchVersion;
+    void pane.searching;
+    void pane.searchReady;
     const start = Math.floor(first / PAGE) * PAGE;
     const stop = end;
     untrack(() => {
@@ -61,7 +63,7 @@
   // A new folder or new results start at the top; reloading the same folder keeps the position.
   $effect(() => {
     void pane.folder?.path;
-    void pane.results;
+    void pane.searchVersion;
     untrack(() => {
       grid.scrollTop = pane.scroll;
       scroll = pane.scroll;
@@ -247,7 +249,8 @@
     </div>
     {#if rows === 0}
       <p class="empty">
-        {#if pane.searching && pane.index !== "ready"}Indexing this folder…
+        {#if pane.searching && pane.searchError}{pane.searchError}
+        {:else if pane.searching && !pane.searchReady}{pane.volume ? `Indexing ${pane.volume}: — results appear when the first pass finishes.` : "Indexing this folder…"}
         {:else if pane.searching}No matching items.
         {:else if pane.complete}This folder is empty.
         {:else}Reading folder…{/if}
@@ -328,5 +331,5 @@
     user-select: text;
   }
   .placeholder { height: 8px; width: 40%; border-radius: 4px; background: var(--sep); }
-  .empty { position: absolute; inset: 56px auto auto 24px; margin: 0; color: var(--muted); }
+  .empty { position: absolute; inset: 56px 24px auto 24px; margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

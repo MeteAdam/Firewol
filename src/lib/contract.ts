@@ -25,9 +25,15 @@ export const SETTINGS_CHANGED = "settings-changed";
 export type { SortView } from "./bindings/SortView";
 export type { SortColumn } from "./bindings/SortColumn";
 export type { TabSnapshot } from "./bindings/TabSnapshot";
+export type { SearchFilters } from "./bindings/SearchFilters";
+export type { SearchScope } from "./bindings/SearchScope";
+export type { SearchRequest } from "./bindings/SearchRequest";
+export type { SearchCount } from "./bindings/SearchCount";
+export type { VolumeState } from "./bindings/VolumeState";
 
 // Event names mirror the constants in contract.rs.
 export const FOLDER_PROGRESS = "folder-progress";
 export const INDEX_STATE = "index-state";
+export const VOLUME_STATE = "volume-state";
 export const OPERATION_DONE = "operation-done";
 export const SESSION_CHANGED = "session-changed";

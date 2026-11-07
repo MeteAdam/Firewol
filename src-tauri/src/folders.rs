@@ -13,9 +13,13 @@ use firewol_core::explorer::{
 };
 
 use crate::contract::{
-    Entry, FolderProgress, FolderView, IndexState, ItemRef, Navigation, Page, Segment, SortView,
-    Step,
+    Entry, FolderProgress, FolderView, IndexState, ItemRef, Navigation, Page, SearchCount,
+    SearchFilters, SearchRequest, SearchScope, Segment, SortView, Step,
 };
+use crate::volumes::{self, Volumes};
+
+/// Result counts stop here; the interface shows "more than" beyond it.
+pub const SEARCH_COUNT_CAP: u32 = 100_000;
 
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 
@@ -35,6 +39,7 @@ pub struct Folders {
     open: Mutex<HashMap<u64, Arc<Folder>>>,
     panes: Mutex<HashMap<String, Pane>>,
     styles: OnceLock<StyleSource>,
+    pub volumes: Arc<Volumes>,
 }
 
 struct Folder {
@@ -44,7 +49,16 @@ struct Folder {
     directory: Mutex<Directory>,
     sort: Mutex<Sort>,
     search: Mutex<Search>,
-    query: Mutex<Option<Cancellation>>,
+    /// The latest search and its cancellation; pages of the same search share it.
+    query: Mutex<Option<(QueryKey, Cancellation)>>,
+}
+
+#[derive(PartialEq)]
+struct QueryKey {
+    text: String,
+    regex: bool,
+    filters: SearchFilters,
+    scope: SearchScope,
 }
 
 #[derive(Default)]
@@ -307,11 +321,68 @@ impl Folders {
         })
     }
 
-    pub fn search(&self, id: u64, text: String, offset: u32) -> Result<Page> {
-        let folder = self.get(id)?;
-        let cancel = Cancellation::default();
-        if let Some(previous) = lock(&folder.query).replace(cancel.clone()) {
-            previous.cancel();
+    pub fn search(&self, request: SearchRequest) -> Result<Page> {
+        let page = page(request.offset);
+        let items = self.read_search(&request, |reader, query, cancel| {
+            reader.search(&SearchQuery { page, ..query }, cancel)
+        })?;
+        Ok(convert(items, &self.styles()))
+    }
+
+    pub fn search_count(&self, request: SearchRequest) -> Result<SearchCount> {
+        let count = self.read_search(&request, |reader, query, cancel| {
+            reader.count(&query, SEARCH_COUNT_CAP, cancel)
+        })?;
+        Ok(SearchCount {
+            count: count.min(u64::from(SEARCH_COUNT_CAP)) as u32,
+            more: count > u64::from(SEARCH_COUNT_CAP),
+        })
+    }
+
+    /// Cancels the folder's previous search when this one differs, then runs `read` with
+    /// the reader of the requested scope.
+    fn read_search<T>(
+        &self,
+        request: &SearchRequest,
+        read: impl FnOnce(&mut SearchReader, SearchQuery, &Cancellation) -> Result<T>,
+    ) -> Result<T> {
+        let folder = self.get(request.id)?;
+        let key = QueryKey {
+            text: request.text.clone(),
+            regex: request.regex,
+            filters: request.filters.clone(),
+            scope: request.scope.clone(),
+        };
+        let cancel = {
+            let mut current = lock(&folder.query);
+            match &*current {
+                Some((previous, cancel)) if *previous == key => cancel.clone(),
+                _ => {
+                    let cancel = Cancellation::default();
+                    if let Some((_, previous)) = current.replace((key, cancel.clone())) {
+                        previous.cancel();
+                    }
+                    cancel
+                }
+            }
+        };
+        let filters = &request.filters;
+        let query = SearchQuery {
+            text: request.text.clone(),
+            regex: request.regex,
+            filters: Filters {
+                extension: filters.extension.clone(),
+                min_bytes: filters.min_bytes,
+                max_bytes: filters.max_bytes,
+                modified_after: filters.modified_after,
+                modified_before: filters.modified_before,
+            },
+            page: page(0),
+        };
+        if let SearchScope::Volume { drive } = &request.scope {
+            return self.volumes.read(volumes::drive(drive)?, |reader| {
+                read(reader, query, &cancel)
+            });
         }
         let mut search = lock(&folder.search);
         let Search {
@@ -326,22 +397,17 @@ impl Folders {
         if !reader.as_ref().is_some_and(|current| current.reads(index)) {
             *reader = Some(index.reader()?);
         }
-        let reader = reader.as_mut().context("Open the folder index")?;
-        let query = SearchQuery {
-            text,
-            regex: false,
-            filters: Filters::default(),
-            page: page(offset),
-        };
-        let items = reader.search(&query, &cancel)?;
-        drop(search);
-        Ok(convert(items, &self.styles()))
+        read(
+            reader.as_mut().context("Open the folder index")?,
+            query,
+            &cancel,
+        )
     }
 
     fn close(&self, id: u64) {
         if let Some(folder) = lock(&self.open).remove(&id) {
             folder.cancel.cancel();
-            if let Some(query) = lock(&folder.query).take() {
+            if let Some((_, query)) = lock(&folder.query).take() {
                 query.cancel();
             }
         }

@@ -20,7 +20,7 @@
   const SECTIONS = [
     { id: "appearance", name: "Appearance", icon: "palette", keys: "theme preset light dark follow windows colours colors wheel background surface text accent folder label window controls caption buttons side shape fill hover" },
     { id: "menu", name: "Context menu", icon: "menu", keys: "context menu right click actions hide show reorder custom action executable reset" },
-    { id: "search", name: "Search", icon: "search", keys: "search find folder shortcut" },
+    { id: "search", name: "Search", icon: "search", keys: "search find folder shortcut regex regular expression filters extension size date ntfs volume drive scope index" },
     { id: "transfers", name: "Transfers", icon: "transfer", keys: "transfers copy move verify pause resume cancel" },
     { id: "admin", name: "Administrator", icon: "shield", keys: "administrator admin elevation uac run as allowlist executable any" },
     { id: "about", name: "About", icon: "info", keys: "about version data settings file license" },
@@ -194,8 +194,9 @@
         </div>
       {:else if section === "search"}
         <h2>Search</h2>
-        <p class="muted">Type in the search field (Ctrl+F) to search the open folder and its subfolders. Results appear while you type and keep their own selection.</p>
-        <p class="muted">Each tab keeps its own search text when you switch away and back.</p>
+        <p class="muted">Type in the search field (Ctrl+F) to search the open folder and its subfolders. Results appear when you pause typing and keep their own selection. Esc clears the search.</p>
+        <p class="muted">While the field is in use, the <strong>.*</strong> button switches to regular expressions and <strong>Filters</strong> narrows results by extension, size and date modified. Each tab keeps its own search text, filters and scope.</p>
+        <p class="muted">The scope chip can search a whole local NTFS drive instead of the folder. Firewol asks first, then Windows asks for administrator approval for a read-only helper that reads the drive's change journal. The drive index lasts for the session and is shared by every window; stop it from the scope chip.</p>
       {:else if section === "transfers"}
         <h2>Transfers</h2>
         <p class="muted">Copies are verified against the source before they count as done. Pause, resume or cancel the active transfer from the status bar.</p>

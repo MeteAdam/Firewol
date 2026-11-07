@@ -47,6 +47,12 @@ pub fn drive_of(path: &Path) -> Option<char> {
     }
 }
 
+/// The drive letter of `path` when it lies on a local NTFS volume that volume search can index.
+pub fn ntfs_drive(path: &Path) -> Option<char> {
+    let drive = drive_of(path)?;
+    (ntfs::is_local(drive) && ntfs::volume_serial(drive).is_ok()).then_some(drive)
+}
+
 impl SearchIndex {
     pub fn watch_volume(
         &self,

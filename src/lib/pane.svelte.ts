@@ -7,17 +7,33 @@ import type {
   ItemRef,
   Navigation,
   Page,
+  SearchCount,
+  SearchFilters,
+  SearchRequest,
   Step,
   SortView,
   SortColumn,
+  VolumeState,
 } from "./contract";
 import { hasTags } from "./styles";
+import { volumes } from "./volumes.svelte";
 
 export const PAGE = 128;
 export const itemKey = (item: ItemRef) => `${item.volume}:${item.index}:${item.path}`;
 // Pages farther than this from the newest page are dropped to bound memory.
 const KEEP = PAGE * 6;
+// Typing waits this long before searching, so a burst of keys runs one query.
+const DEBOUNCE_MS = 150;
 const tagged = (items: Entry[]) => items.some((entry) => hasTags(entry.style));
+const prune = (pages: Record<number, Entry[]>, offset: number) => {
+  for (const key of Object.keys(pages).map(Number)) {
+    if (Math.abs(key - offset) > KEEP) delete pages[key];
+  }
+  return pages;
+};
+
+export const NO_FILTERS: SearchFilters = { extension: null, minBytes: null, maxBytes: null, modifiedAfter: null, modifiedBefore: null };
+export const filterCount = (filters: SearchFilters) => Object.values(filters).filter((value) => value !== null).length;
 
 /** One folder view. Navigation history lives in the core; this keeps what the list renders. */
 export class Pane {
@@ -42,7 +58,17 @@ export class Pane {
   pageVersion = $state(0);
   renaming = $state<number | null>(null);
   query = $state("");
-  results = $state.raw<Page>();
+  regex = $state(false);
+  filters = $state.raw<SearchFilters>(NO_FILTERS);
+  /** The drive letter while this tab searches a whole NTFS volume; null searches the folder. */
+  volume = $state<string | null>(null);
+  /** Result pages by offset; the rows grow while pages report more and settle at the count. */
+  resultPages = $state.raw<Record<number, Entry[]>>({});
+  resultRows = $state(0);
+  resultCount = $state.raw<SearchCount | null>(null);
+  /** Bumped when a new search replaces the results, so the list returns to the top. */
+  searchVersion = $state(0);
+  searchError = $state("");
   index = $state<"none" | "building" | "ready">("none");
   indexCount = $state(0);
   error = $state("");
@@ -55,6 +81,8 @@ export class Pane {
   #selecting = 0;
   #navigation = 0;
   #search = 0;
+  #resultPending = new Set<number>();
+  #timer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(id: string) {
     this.id = id;
@@ -64,17 +92,26 @@ export class Pane {
     return this.query.trim().length > 0;
   }
 
+  /** Whether the index the current scope searches has finished its first pass. */
+  get searchReady() {
+    return this.volume ? !!volumes.states[this.volume]?.ready : this.index === "ready";
+  }
+
   get tagged() {
-    return this.searching ? tagged(this.results?.items ?? []) : this.#tagged;
+    return this.searching ? Object.values(this.resultPages).some(tagged) : this.#tagged;
   }
 
   get rows() {
-    return this.searching ? (this.results?.items.length ?? 0) : this.count;
+    return this.searching ? this.resultRows : this.count;
   }
 
   entry(row: number): Entry | undefined {
-    if (this.searching) return this.results?.items[row];
-    return this.pages[Math.floor(row / PAGE) * PAGE]?.[row % PAGE];
+    const pages = this.searching ? this.resultPages : this.pages;
+    return pages[Math.floor(row / PAGE) * PAGE]?.[row % PAGE];
+  }
+
+  #loaded(offset: number) {
+    return !!(this.searching ? this.resultPages : this.pages)[offset];
   }
 
   /** Loaded entries in the selection, in row order. */
@@ -113,7 +150,7 @@ export class Pane {
       const [from, to] = this.#anchor < row ? [this.#anchor, row] : [row, this.#anchor];
       const next = new Map<string, Entry>();
       for (let offset = Math.floor(from / PAGE) * PAGE; offset <= to; offset += PAGE) {
-        if (!this.pages[offset]) await this.loadPage(offset);
+        if (!this.#loaded(offset)) await this.loadPage(offset);
         if (selecting !== this.#selecting || revision !== this.#revision) return;
         for (let index = Math.max(from, offset); index <= Math.min(to, offset + PAGE - 1); index++) {
           const item = this.entry(index);
@@ -181,8 +218,10 @@ export class Pane {
     this.error = "";
     if (!reload) {
       this.scroll = 0;
+      clearTimeout(this.#timer);
+      this.#search++;
       this.query = "";
-      this.results = undefined;
+      this.#clearResults();
     }
     this.index = "none";
     this.indexCount = 0;
@@ -236,6 +275,7 @@ export class Pane {
   }
 
   async loadPage(offset: number) {
+    if (this.searching) return this.#loadResults(offset);
     const folder = this.folder;
     if (!folder || this.pages[offset] || this.#pending.has(offset)) return;
     const revision = this.#revision;
@@ -251,11 +291,7 @@ export class Pane {
       // A short page that is still growing is fetched again after the next progress event.
       if (page.items.length < PAGE && page.hasMore) return;
       if (tagged(page.items)) this.#tagged = true;
-      const next = { ...this.pages, [offset]: page.items };
-      for (const key of Object.keys(next).map(Number)) {
-        if (Math.abs(key - offset) > KEEP) delete next[key];
-      }
-      this.pages = next;
+      this.pages = prune({ ...this.pages, [offset]: page.items }, offset);
     } catch (reason) {
       this.error = String(reason);
     } finally {
@@ -269,9 +305,16 @@ export class Pane {
     if (!folder) return;
     if (this.searching) {
       const search = this.#search;
-      if (this.index !== "ready") return;
-      const page = await api.search(folder.id, this.query, 0).catch(() => undefined);
-      if (page && search === this.#search && this.folder?.id === folder.id) this.results = page;
+      if (!this.searchReady) return;
+      const offsets = Object.keys(this.resultPages).map(Number);
+      const pages = await Promise.all(offsets.map((offset) => {
+        const request = this.#request(offset);
+        return request ? api.search(request).catch(() => undefined) : undefined;
+      }));
+      if (search !== this.#search) return;
+      const next = { ...this.resultPages };
+      offsets.forEach((offset, index) => { const page = pages[index]; if (page) next[offset] = page.items; });
+      this.resultPages = next;
       return;
     }
     const revision = this.#revision;
@@ -312,34 +355,138 @@ export class Pane {
       const first = this.index !== "ready";
       this.index = "ready";
       this.indexCount = state.count;
-      if (first && this.searching) void this.search(this.query);
+      if (first && this.searching && !this.volume) void this.search(this.query);
     }
   }
 
-  async search(text: string, offset = 0) {
+  /** Follows the shared NTFS index this tab searches: shows results once it is ready and
+   *  returns to folder search when it stops or Windows refuses the helper. */
+  volumeChanged(state: VolumeState) {
+    if (state.drive !== this.volume) return;
+    if (!state.running) {
+      this.volume = null;
+      if (this.searching) void this.search(this.query);
+    } else if (state.ready && this.searching && this.resultRows === 0) {
+      void this.search(this.query);
+    }
+  }
+
+  /** Typing: updates the draft now and searches once the keys pause. */
+  input(text: string) {
+    this.query = text;
+    clearTimeout(this.#timer);
+    this.#timer = setTimeout(() => void this.search(this.query), DEBOUNCE_MS);
+  }
+
+  setRegex(regex: boolean) {
+    this.regex = regex;
+    this.#again();
+  }
+
+  setFilters(filters: SearchFilters) {
+    this.filters = filters;
+    this.#again();
+  }
+
+  setVolume(drive: string | null) {
+    this.volume = drive;
+    this.#again();
+  }
+
+  #again() {
+    if (this.searching) this.input(this.query);
+  }
+
+  #request(offset: number): SearchRequest | undefined {
+    const folder = this.folder;
+    if (!folder) return undefined;
+    return {
+      id: folder.id,
+      text: this.query,
+      regex: this.regex,
+      filters: this.filters,
+      scope: this.volume ? { kind: "volume", drive: this.volume } : { kind: "folder" },
+      offset,
+    };
+  }
+
+  #clearResults() {
+    this.resultPages = {};
+    this.resultRows = 0;
+    this.resultCount = null;
+    this.searchError = "";
+    this.#resultPending.clear();
+  }
+
+  /** New results (or the listing again) start at the top. */
+  #toTop() {
+    this.scroll = 0;
+    this.searchVersion++;
+  }
+
+  /** Grows the rows past the loaded pages while the count is unknown or capped. */
+  #grow(offset: number, page: Page) {
+    if (this.resultCount && !this.resultCount.more) return;
+    this.resultRows = Math.max(this.resultRows, offset + page.items.length + (page.hasMore ? PAGE : 0));
+  }
+
+  /** Searches now (the field debounces through `input`) and shows the first page. */
+  async search(text: string) {
+    clearTimeout(this.#timer);
     const id = ++this.#search;
     this.query = text;
     this.selected = -1;
     this.selection = new Map();
     if (!text.trim()) {
-      this.results = undefined;
-      if (this.count > 0) this.select(0);
+      this.#clearResults();
+      this.#toTop();
+      if (this.count > 0) void this.select(0);
       return;
     }
-    if (this.index === "none") void this.startIndex();
-    const folder = this.folder;
-    if (!folder || this.index !== "ready") {
-      this.results = undefined;
+    if (!this.volume && this.index === "none") void this.startIndex();
+    const request = this.#request(0);
+    if (!request || !this.searchReady) {
+      this.#clearResults();
       return;
     }
     try {
-      const page = await api.search(folder.id, text, offset);
-      if (id === this.#search) {
-        this.results = page;
-        if (page.items.length > 0) this.select(0);
+      const page = await api.search(request);
+      if (id !== this.#search) return;
+      this.#clearResults();
+      this.#toTop();
+      this.resultPages = { 0: page.items };
+      this.#grow(0, page);
+      if (!page.hasMore) this.resultCount = { count: page.items.length, more: false };
+      if (page.items.length > 0) void this.select(0);
+      if (page.hasMore) {
+        void api.searchCount(request).then((count) => {
+          if (id !== this.#search) return;
+          this.resultCount = count;
+          this.resultRows = count.more ? Math.max(this.resultRows, count.count) : count.count;
+        }, () => {});
       }
     } catch (reason) {
-      if (id === this.#search) this.error = String(reason);
+      if (id !== this.#search) return;
+      this.#clearResults();
+      this.searchError = String(reason);
+    }
+  }
+
+  async #loadResults(offset: number) {
+    if (this.resultPages[offset] || this.#resultPending.has(offset)) return;
+    const id = this.#search;
+    const request = this.#request(offset);
+    if (!request || !this.searchReady) return;
+    this.#resultPending.add(offset);
+    try {
+      const page = await api.search(request);
+      if (id !== this.#search) return;
+      this.resultPages = prune({ ...this.resultPages, [offset]: page.items }, offset);
+      this.#grow(offset, page);
+    } catch (reason) {
+      if (id === this.#search) this.searchError = String(reason);
+    } finally {
+      if (id === this.#search) this.#resultPending.delete(offset);
     }
   }
 
@@ -349,11 +496,12 @@ export class Pane {
   }
 
   release() {
+    clearTimeout(this.#timer);
     this.#navigation++;
     this.#search++;
     this.#revision++;
     this.pages = {};
-    this.results = undefined;
+    this.#clearResults();
     this.folder = undefined;
     this.#pending.clear();
     this.index = "none";

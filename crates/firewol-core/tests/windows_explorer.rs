@@ -229,6 +229,19 @@ fn folder_search_pages_filters_and_observes_external_changes() -> Result<()> {
             ..Filters::default()
         };
         assert_eq!(reader.search(&regex, &cancel)?.items[0].path, original);
+        assert_eq!(reader.count(&regex, 100, &cancel)?, 1);
+        assert_eq!(reader.count(&search("record", 0), 1000, &cancel)?, 140);
+        assert_eq!(reader.count(&search("record", 0), 100, &cancel)?, 101);
+        let mut reversed = search("record", 0);
+        reversed.filters.min_bytes = Some(5);
+        reversed.filters.max_bytes = Some(1);
+        assert!(reader.search(&reversed, &cancel).is_err());
+        let mut wildcard = search("record", 0);
+        wildcard.filters.extension = Some("*.txt".into());
+        assert!(reader.count(&wildcard, 10, &cancel).is_err());
+        let mut invalid = search("(", 0);
+        invalid.regex = true;
+        assert!(reader.search(&invalid, &cancel).is_err());
 
         let changed = original.with_file_name("external-change.txt");
         fs::rename(&original, &changed)?;
@@ -398,5 +411,25 @@ fn concurrent_settings_writes_merge_independent_edits() -> Result<()> {
     let settings = Settings::load(profile)?;
     assert_eq!(settings.sidebar, Some(false));
     assert_eq!(settings.appearance.preset, Preset::Claymorphism);
+    Ok(())
+}
+
+#[test]
+fn stale_search_indexes_are_removed_but_live_ones_stay() -> anyhow::Result<()> {
+    use firewol_core::explorer::{SearchIndex, remove_stale_indexes};
+    let data = tempfile::tempdir()?;
+    let live = SearchIndex::create(data.path())?;
+    let _reader = live.reader()?;
+    for name in ["search-4294967280-abc", "search-legacy", "unrelated"] {
+        std::fs::create_dir(data.path().join(name))?;
+    }
+    remove_stale_indexes(data.path());
+    let mut left: Vec<_> = std::fs::read_dir(data.path())?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    left.sort();
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(left[0].starts_with(&format!("search-{}-", std::process::id())));
+    assert_eq!(left[1], "unrelated");
     Ok(())
 }

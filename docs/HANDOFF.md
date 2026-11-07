@@ -5,20 +5,22 @@ Details that do not fit in the 25-line `STATE.md`. Read `STATE.md` first; this f
 ## Where the work stopped
 
 - Branch `m4-interface` (local repository, no remote). `main` still ends at the M3 commit `f8a5659`; the M4 branch fast-forwards onto it.
-- Commits: `4c2cdb0` (M4 plan, NTFS-helper UAC verification, design, M4.1 spike and gate), `a9840cb` (M4.2 session layer, contract, file operations).
-- M4.2 is done except shell file icons. M4.3 (feature parity) and M4.4 (acceptance and Win32 retirement) have not started.
+- Commits: `4c2cdb0` (M4 plan, NTFS-helper UAC verification, design, M4.1 spike and gate), `a9840cb` (M4.2 session layer, contract, file operations), then one commit per slice (`git log --oneline`).
+- M4.2 and M4.3-a to M4.3-f are done (settings, sorting, tabs, Settings tab, folder styles, search). Next: M4.3-g (drag and drop, grid view, Transfers popover), M4.3-h, then M4.4. The slice plan is `nce-kalan-ad-mlar-i-in-cuddly-harbor.md` in the project root (untracked).
 - The Win32 build (`target/release/firewol-win32.exe`, built 2026-11-06 from M3) still has every M3 feature and stays the reference until M4.4. It does not include the M4 core changes until it is rebuilt.
 
 ## Try the new interface
 
-The release build at `target/release/firewol-tauri.exe` is current with `a9840cb`. It needs the WebView2 Runtime, which Windows 11 includes. It opens your user folder unless `FIREWOL_OPEN` names another one.
+The release build at `target/release/firewol-tauri.exe` is current with the latest `m4-interface` commit. It needs the WebView2 Runtime, which Windows 11 includes. It opens your user folder unless `FIREWOL_OPEN` names another one.
 
 ```powershell
 .\target\release\firewol-tauri.exe
 $env:FIREWOL_OPEN = 'D:\Some\Folder'; .\target\release\firewol-tauri.exe
 ```
 
-File operations are real: cut, paste, rename and Recycle Bin change files on disk. Undo (Ctrl+Z or the toast button) reverses them within the running session. Settings and pins live in `%LOCALAPPDATA%\Firewol\explorer.json`, the same file the Win32 build uses. WebView2 keeps its profile in `%LOCALAPPDATA%\dev.firewol.app`. The theme choice is stored per WebView2 profile in `localStorage` until the settings page moves it into the core settings.
+File operations are real: cut, paste, rename and Recycle Bin change files on disk. Undo (Ctrl+Z or the toast button) reverses them within the running session. Settings and pins live in `%LOCALAPPDATA%\Firewol\explorer.json`, the same file the Win32 build uses. WebView2 keeps its profile in `%LOCALAPPDATA%\dev.firewol.app`. Search indexes are temporary `search-<pid>-*` folders under `%LOCALAPPDATA%\Firewol`; the next start removes those of processes that ended.
+
+Search: typing searches the folder and its subfolders after a 150 ms pause; while the field is in use, the scope chip switches to a whole local NTFS drive (in-window confirmation, then UAC for the read-only helper; the drive index is shared by all windows until stopped from the chip), `.*` enables regular expressions, and Filters narrows by extension, size and modified date (local days). Esc closes a popover, then clears the search.
 
 Shortcuts: Ctrl+L path, Ctrl+F search, Alt+Left/Right/Up, F5, Ctrl+N new window, Ctrl+\ split view, Ctrl+B sidebar, Ctrl+X/C/V, F2 rename, Del recycle, Ctrl+Z undo, Ctrl or Shift click for multi-selection, Shift+F10 or the Menu key for the context menu. Themes are under `⋯` in the toolbar.
 
@@ -44,10 +46,10 @@ cargo build --release --locked -p firewol-tauri --features custom-protocol
 | Interface types | `npm run check` |
 | Memory and performance gate | `.\scripts\Measure-M4Gate.ps1 -App .\target\release\firewol-tauri.exe -Fixture <M0 fixture>` |
 | UI Automation stress | `.\scripts\Test-UiaStress.ps1 -App <exe> -Folder <100k folder>` |
-| Interface self-test | `.\scripts\Test-Interface.ps1` (disposable fixture, isolated `LOCALAPPDATA`); `main.json` lists 71 steps and the detached tab reports from `window-1.json` |
+| Interface self-test | `.\scripts\Test-Interface.ps1` (disposable fixture, isolated `LOCALAPPDATA`); `main.json` lists 87 steps and the detached tab reports from `window-1.json` |
 | Window screenshot | `powershell.exe -File .\scripts\Capture-Window.ps1 -ProcessId <pid> -OutputPath <png> -TitleLike Firewol` |
 
-The 100,000-file and 1,000,000-record fixture used by every gate run is `target/verify-m3-be5d47eaa6cc4d62b64e597855550377/fixture` (ignored by Git). Recreate one with `firewol-m0.exe prepare 100000 1000000` and `FIREWOL_M0_ROOT` (see README › Reproduce the M0 measurement). The self-test fixture is a folder with `source\note.txt` and an empty `dest`; the folder-style steps style and then clear `source\z-folder`.
+The 100,000-file and 1,000,000-record fixture used by every gate run is `target/verify-m3-be5d47eaa6cc4d62b64e597855550377/fixture` (ignored by Git). Recreate one with `firewol-m0.exe prepare 100000 1000000` and `FIREWOL_M0_ROOT` (see README › Reproduce the M0 measurement). The self-test fixture is a folder with `source\note.txt` and an empty `dest`; the folder-style steps style and then clear `source\z-folder`, which also holds `report-2026.log` (4 KB) and `many\item-000.txt` to `item-299.txt` for the search steps. Before it starts the interface, the script checks that an unelevated `--ntfs-helper` call exits without a window or WebView2 profile.
 
 The gate and UIA scripts isolate `LOCALAPPDATA` and `WEBVIEW2_USER_DATA_FOLDER` under `target/`, so they never touch your real settings. Their reports land in `target/measure-m4-*` and `target/uia-*`.
 
@@ -73,7 +75,8 @@ The gate and UIA scripts isolate `LOCALAPPDATA` and `WEBVIEW2_USER_DATA_FOLDER` 
 | Tauri contract | `src-tauri/src/contract.rs` → generated `src/lib/bindings/*.ts`, re-exported by `src/lib/contract.ts` |
 | Tauri commands, windows, WebView2 settings | `src-tauri/src/main.rs` |
 | Panes, history, folder snapshots, item identities | `src-tauri/src/folders.rs` |
-| Interface | `src/App.svelte` (shell, menus, toast, benchmark, self-test), `src/lib/FileList.svelte` (virtual grid), `src/lib/pane.svelte.ts` (pane model), `src/lib/theme.css` (tokens and shared controls), `src/lib/Icon.svelte`, `src/lib/FolderStyleSheet.svelte` and `src/lib/styles.ts` (folder styles) |
+| Interface | `src/App.svelte` (shell, menus, toast, benchmark, self-test), `src/lib/FileList.svelte` (virtual grid), `src/lib/pane.svelte.ts` (pane model), `src/lib/theme.css` (tokens and shared controls), `src/lib/Icon.svelte`, `src/lib/FolderStyleSheet.svelte` and `src/lib/styles.ts` (folder styles), `src/lib/SearchBox.svelte` (search field, scope chip, Regex, Filters), `src/lib/volumes.svelte.ts` (shared NTFS index state) |
+| NTFS volume search | `src-tauri/src/volumes.rs` (one index and elevated helper per drive, shared by every window), core `explorer/volume/`; `--ntfs-helper` is handled at the top of `main()` before Tauri starts |
 | Design | `docs/DESIGN.md`; mockup canvas linked there (private Artifact) |
 
 ## Decisions and why
@@ -93,10 +96,9 @@ The gate and UIA scripts isolate `LOCALAPPDATA` and `WEBVIEW2_USER_DATA_FOLDER` 
 - Cold start to the first list takes about 0.52 s, of which WebView2 startup is about 0.37 s (target 0.3 s; Win32 about 0.1 s). Accepted.
 - A slow, event-heavy UI Automation client can push the WebView2 browser process to a 268 MB transient peak. Accepted; Narrator-style use is far lighter.
 - Long paths overflow the breadcrumb; DESIGN asks for leading segments to collapse into `…`.
-- Listing order is the file system's enumeration order (NTFS: by name, folders mixed with files). Folders-first and column sorting are not implemented.
-- Search covers folder search without filters or regex; NTFS volume search, filters and regex exist only in the Win32 build.
+- NTFS volume search from the Tauri build is verified up to the in-window confirmation and the helper's argument handling; accepting the UAC prompt needs a person, so a full drive index has not yet run from this build (the core helper is the one M3 verified).
+- Search results keep index order (trigram matches by index position, one- and two-letter prefixes by name); result columns do not sort.
 - Recycle and rename act on one item; multi-item recycle needs sequential jobs in the session.
-- The theme lives in WebView2 `localStorage`, not in `Settings.appearance`.
 - `package.json` is still named `firewol-m0`.
 - Three mockup PNGs exported by the user sit untracked in the project root; leave them out of commits unless the user asks.
 

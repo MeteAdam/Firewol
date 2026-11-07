@@ -38,6 +38,7 @@
     pause: ["M8.5 5v14M15.5 5v14"],
     play: ["M7 4.5v15l12-7.5z"],
     transfer: ["M7 4v16M3.5 7.5L7 4l3.5 3.5M17 20V4M13.5 16.5L17 20l3.5-3.5"],
+    filter: ["M4 5h16l-6.2 7.4V18l-3.6 1.8v-7.4z"],
     toPane: ["M3 12h12M11 7l5 5-5 5M20 4v16"],
   };
   export type IconName = keyof typeof PATHS;

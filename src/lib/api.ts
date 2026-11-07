@@ -14,6 +14,9 @@ import type {
   SortView,
   FolderProgress,
   TabSnapshot,
+  SearchRequest,
+  SearchCount,
+  VolumeState,
 } from "./contract";
 
 export const api = {
@@ -33,7 +36,13 @@ export const api = {
   folderProgress: (id: number) => invoke<FolderProgress>("folder_progress", { id }),
   locateSelection: (id: number, items: ItemRef[]) => invoke<(number | null)[]>("locate_selection", { id, items }),
   startIndex: (id: number) => invoke<IndexState>("start_index", { id }),
-  search: (id: number, text: string, offset: number) => invoke<Page>("search", { id, text, offset }),
+  search: (request: SearchRequest) => invoke<Page>("search", { request }),
+  searchCount: (request: SearchRequest) => invoke<SearchCount>("search_count", { request }),
+  /** The drive letter when `path` is on a local NTFS volume that volume search can index. */
+  ntfsDrive: (path: string) => invoke<string | null>("ntfs_drive", { path }),
+  volumeStates: () => invoke<VolumeState[]>("volume_states"),
+  startVolumeIndex: (drive: string) => invoke<VolumeState>("start_volume_index", { drive }),
+  stopVolumeIndex: (drive: string) => invoke<void>("stop_volume_index", { drive }),
   session: () => invoke<SessionState>("session"),
   setClipboard: (items: ItemRef[], cut: boolean) => invoke<SessionState>("set_clipboard", { items, cut }),
   paste: (into: ItemRef) => invoke<void>("paste", { into }),

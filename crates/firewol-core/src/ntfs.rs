@@ -12,7 +12,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    GetVolumeInformationW, OPEN_EXISTING,
+    GetDriveTypeW, GetVolumeInformationW, OPEN_EXISTING,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{FSCTL_ENUM_USN_DATA, MFT_ENUM_DATA_V0};
@@ -99,6 +99,18 @@ pub(crate) fn is_elevated() -> Result<bool> {
         )?;
     }
     Ok(elevation.TokenIsElevated != 0)
+}
+
+/// True for a fixed or removable local drive; mapped network drives can report NTFS too,
+/// but their journal cannot be read.
+pub(crate) fn is_local(drive: char) -> bool {
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    let root = wide(OsStr::new(&format!("{drive}:\\")));
+    matches!(
+        unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) },
+        DRIVE_REMOVABLE | DRIVE_FIXED
+    )
 }
 
 pub(crate) fn volume_serial(drive: char) -> Result<u32> {

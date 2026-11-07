@@ -32,6 +32,118 @@ pub struct SearchQuery {
     pub page: PageRequest,
 }
 
+impl Filters {
+    /// Rejects reversed ranges and extensions that are not a single plain suffix.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(extension) = &self.extension {
+            let extension = extension.trim().trim_start_matches('.');
+            ensure!(
+                extension.len() <= 64
+                    && !extension.chars().any(|c| matches!(
+                        c,
+                        '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'
+                    )),
+                "Enter an extension such as pdf or .txt"
+            );
+        }
+        ensure!(
+            self.min_bytes
+                .zip(self.max_bytes)
+                .is_none_or(|(min, max)| min <= max),
+            "The minimum size is larger than the maximum size"
+        );
+        ensure!(
+            self.modified_after
+                .zip(self.modified_before)
+                .is_none_or(|(after, before)| after <= before),
+            "The date range is reversed"
+        );
+        Ok(())
+    }
+}
+
+struct Plan {
+    source: &'static str,
+    predicate: &'static str,
+    order: &'static str,
+    term: Option<String>,
+}
+
+const FILTER: &str = "AND (?2 IS NULL OR extension = ?2)
+    AND (?3 IS NULL OR size >= ?3) AND (?4 IS NULL OR size <= ?4)
+    AND (?5 IS NULL OR modified >= ?5) AND (?6 IS NULL OR modified <= ?6)";
+
+type FilterParams = (
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+fn filter_params(filters: &Filters) -> Result<FilterParams> {
+    let extension = filters
+        .extension
+        .as_ref()
+        .map(|ext| ext.trim().trim_start_matches('.').to_lowercase())
+        .filter(|ext| !ext.is_empty());
+    Ok((
+        extension,
+        filters.min_bytes.map(i64::try_from).transpose()?,
+        filters.max_bytes.map(i64::try_from).transpose()?,
+        filters.modified_after,
+        filters.modified_before,
+    ))
+}
+
+const INDEX_PREFIX: &str = "search-";
+
+/// Removes index folders left by Firewol processes that ended without dropping them
+/// (an exiting window process does not run destructors). Folders of running processes stay.
+pub fn remove_stale_indexes(data_dir: &Path) {
+    let Ok(entries) = fs::read_dir(data_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(INDEX_PREFIX))
+        else {
+            continue;
+        };
+        let owner = rest
+            .split_once('-')
+            .and_then(|(pid, _)| pid.parse::<u32>().ok());
+        if owner.is_some_and(|pid| pid == std::process::id() || process_running(pid)) {
+            continue;
+        }
+        // Folders without an owner come from older builds; files still open cannot be removed.
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+fn process_running(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(process) => process,
+        // Access denied means the process exists; an invalid id means it ended.
+        Err(error) => {
+            return error.code() == windows::Win32::Foundation::ERROR_ACCESS_DENIED.to_hresult();
+        }
+    };
+    let mut code = 0;
+    let running =
+        unsafe { GetExitCodeProcess(process, &mut code) }.is_ok() && code == STILL_ACTIVE.0 as u32;
+    let _ = unsafe { CloseHandle(process) };
+    running
+}
+
 #[derive(Clone)]
 pub struct SearchIndex(Arc<TempDir>);
 
@@ -50,7 +162,7 @@ impl SearchIndex {
         fs::create_dir_all(data_dir)?;
         let index = Self(Arc::new(
             tempfile::Builder::new()
-                .prefix("search-")
+                .prefix(&format!("{INDEX_PREFIX}{}-", std::process::id()))
                 .tempdir_in(data_dir)?,
         ));
         let db = index.writer()?;
@@ -138,22 +250,57 @@ impl SearchReader {
     }
 
     pub fn search(&mut self, query: &SearchQuery, cancel: &Cancellation) -> Result<ItemPage> {
+        self.guarded(cancel, |reader| reader.query(query, cancel))
+    }
+
+    /// Counts matches up to `cap + 1`, so a result above `cap` means "more than `cap`".
+    pub fn count(&mut self, query: &SearchQuery, cap: u32, cancel: &Cancellation) -> Result<u64> {
+        self.guarded(cancel, |reader| {
+            let plan = reader.plan(query)?;
+            let sql = format!(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM {} WHERE {} {FILTER} LIMIT ?7)",
+                plan.source, plan.predicate
+            );
+            let (extension, min, max, after, before) = filter_params(&query.filters)?;
+            let count: i64 = reader.db.prepare_cached(&sql)?.query_row(
+                params![
+                    plan.term,
+                    extension,
+                    min,
+                    max,
+                    after,
+                    before,
+                    i64::from(cap) + 1
+                ],
+                |row| row.get(0),
+            )?;
+            Ok(count as u64)
+        })
+    }
+
+    fn guarded<T>(
+        &mut self,
+        cancel: &Cancellation,
+        run: impl FnOnce(&Self) -> Result<T>,
+    ) -> Result<T> {
         cancel.check()?;
         let token = cancel.clone();
         self.db
             .progress_handler(1000, Some(move || token.is_cancelled()))?;
-        let result = self.query(query, cancel);
+        let result = run(self);
         self.db.progress_handler(0, None::<fn() -> bool>)?;
         result
     }
 
-    fn query(&self, query: &SearchQuery, cancel: &Cancellation) -> Result<ItemPage> {
+    /// Validates the query and picks the table, term predicate and order it searches with.
+    fn plan(&self, query: &SearchQuery) -> Result<Plan> {
         let text = query.text.trim();
         ensure!(
             !text.is_empty() && text.len() <= 1024 && !text.contains('\0'),
             "Enter a search term of 1–1024 bytes"
         );
-        let (source, term_predicate, order, term) = if query.regex {
+        query.filters.validate()?;
+        Ok(if query.regex {
             let regex = RegexBuilder::new(text)
                 .case_insensitive(true)
                 .size_limit(1 << 20)
@@ -165,7 +312,12 @@ impl SearchReader {
                 FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
                 move |ctx| Ok(regex.is_match(ctx.get_raw(0).as_str()?)),
             )?;
-            ("entries", "matches_regex(name_key)", "id", None)
+            Plan {
+                source: "entries",
+                predicate: "matches_regex(name_key)",
+                order: "id",
+                term: None,
+            }
         } else {
             let text = text.to_lowercase();
             if text.chars().count() < 3 {
@@ -173,42 +325,44 @@ impl SearchReader {
                     .replace('\\', "\\\\")
                     .replace('%', "\\%")
                     .replace('_', "\\_");
-                (
-                    "entries",
-                    "name_key LIKE ?1 ESCAPE '\\'",
-                    "name_key COLLATE NOCASE, id",
-                    Some(format!("{escaped}%")),
-                )
+                Plan {
+                    source: "entries",
+                    predicate: "name_key LIKE ?1 ESCAPE '\\'",
+                    order: "name_key COLLATE NOCASE, id",
+                    term: Some(format!("{escaped}%")),
+                }
             } else {
-                (
-                    "names JOIN entries ON entries.id = names.rowid",
-                    "names MATCH ?1",
-                    "names.rowid",
-                    Some(format!("\"{}\"", text.replace('"', "\"\""))),
-                )
+                Plan {
+                    source: "names JOIN entries ON entries.id = names.rowid",
+                    predicate: "names MATCH ?1",
+                    order: "names.rowid",
+                    term: Some(format!("\"{}\"", text.replace('"', "\"\""))),
+                }
             }
-        };
+        })
+    }
+
+    fn query(&self, query: &SearchQuery, cancel: &Cancellation) -> Result<ItemPage> {
+        let Plan {
+            source,
+            predicate,
+            order,
+            term,
+        } = self.plan(query)?;
         let sql = format!(
-            "SELECT path, directory, file_ref, file_volume, size, modified FROM {source} WHERE {term_predicate}
-             AND (?2 IS NULL OR extension = ?2)
-             AND (?3 IS NULL OR size >= ?3) AND (?4 IS NULL OR size <= ?4)
-             AND (?5 IS NULL OR modified >= ?5) AND (?6 IS NULL OR modified <= ?6)
-             ORDER BY {order} LIMIT ?7 OFFSET ?8"
+            "SELECT path, directory, file_ref, file_volume, size, modified FROM {source}
+             WHERE {predicate} {FILTER} ORDER BY {order} LIMIT ?7 OFFSET ?8"
         );
-        let filters = &query.filters;
-        let extension = filters
-            .extension
-            .as_ref()
-            .map(|ext| ext.trim_start_matches('.').to_lowercase());
+        let (extension, min, max, after, before) = filter_params(&query.filters)?;
         let limit = query.page.limit();
         let mut statement = self.db.prepare_cached(&sql)?;
         let mut rows = statement.query(params![
             term,
             extension,
-            filters.min_bytes.map(i64::try_from).transpose()?,
-            filters.max_bytes.map(i64::try_from).transpose()?,
-            filters.modified_after,
-            filters.modified_before,
+            min,
+            max,
+            after,
+            before,
             limit + 1,
             query.page.offset,
         ])?;

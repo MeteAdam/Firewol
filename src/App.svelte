@@ -7,6 +7,7 @@
   import {
     FOLDER_PROGRESS,
     INDEX_STATE,
+    VOLUME_STATE,
     OPERATION_DONE,
     SESSION_CHANGED,
     SETTINGS_CHANGED,
@@ -22,19 +23,22 @@
     type SessionState,
     type Startup,
     type TransferStatus,
+    type VolumeState,
   } from "./lib/contract";
   import FileList from "./lib/FileList.svelte";
   import FolderIcon from "./lib/FolderIcon.svelte";
   import FolderStyleSheet from "./lib/FolderStyleSheet.svelte";
   import { formatCount, formatSize, useLocale } from "./lib/format";
   import Icon from "./lib/Icon.svelte";
-  import { Pane } from "./lib/pane.svelte";
+  import { NO_FILTERS, Pane } from "./lib/pane.svelte";
   import { PRESETS, colors, hex, presetClass } from "./lib/appearance";
   import { details, isCustom, labelOf, menuRows, parentPath, type MenuContext, type MenuRow } from "./lib/menu";
+  import SearchBox from "./lib/SearchBox.svelte";
   import Sheet from "./lib/Sheet.svelte";
   import Settings from "./lib/Settings.svelte";
   import { styleKey, styleMap, tint } from "./lib/styles";
   import TabBar from "./lib/TabBar.svelte";
+  import { volumes } from "./lib/volumes.svelte";
   import { PaneSlot, folderTab, restore, snapshot, type Tab } from "./lib/tabs.svelte";
 
   type Check = (step: string, ok: boolean, detail?: string) => void;
@@ -63,7 +67,9 @@
   let toast = $state<{ message: string; undo: boolean; error: boolean }>();
   let transfer = $state.raw<TransferStatus | null>(null);
   let fatal = $state("");
-  let searchField: HTMLInputElement | undefined = $state();
+  let searchBox: SearchBox | undefined = $state();
+  /** The NTFS drive waiting for in-window confirmation before Windows asks for approval. */
+  let volumeAsk = $state<{ drive: string; pane: Pane }>();
   let settingsSection = $state("appearance");
   let folderSheet = $state<{ item: ItemRef; name: string; path: string }>();
   let addressField: HTMLInputElement | undefined = $state();
@@ -158,6 +164,34 @@
       settings = await api.updateSettings({ appearance: old ? { ...settings.appearance, preset: old[0], dark: stored("dark", "false") === "true" } : settings.appearance, migrate_appearance: true });
     }
     try { localStorage.removeItem("firewol.preset"); localStorage.removeItem("firewol.dark"); } catch { /* A locked WebView profile can still use core settings. */ }
+  }
+
+  /** Every folder tab's pane, including tabs in the background. */
+  const allPanes = () => slots.flatMap(slot => slot.tabs.flatMap(tab => tab.kind === "folder" ? [tab.pane] : []));
+
+  function volumeChanged(state: VolumeState) {
+    volumes.update(state);
+    allPanes().forEach(pane => pane.volumeChanged(state));
+    if (state.error) notify(state.error, { error: true });
+  }
+
+  async function startVolume() {
+    const ask = volumeAsk;
+    volumeAsk = undefined;
+    if (!ask) return;
+    try {
+      volumes.update(await api.startVolumeIndex(ask.drive));
+      ask.pane.setVolume(ask.drive);
+    } catch (reason) {
+      notify(String(reason), { error: true });
+    }
+  }
+
+  function resultText(pane: Pane) {
+    if (!pane.searchReady) return "Waiting for the index";
+    const count = pane.resultCount;
+    if (!count) return pane.rows ? "Counting results…" : "Searching…";
+    return `${formatCount(count.count)}${count.more ? "+" : ""} ${count.count === 1 && !count.more ? "result" : "results"}`;
   }
 
   function newPane() {
@@ -454,7 +488,7 @@
     if (event.key === "Escape" && menu) menu = undefined;
     else if (event.key === "Escape" && editing) editing = false;
     else if (event.ctrlKey && key === "l") editAddress();
-    else if (event.ctrlKey && key === "f") searchField?.focus();
+    else if (event.ctrlKey && key === "f") searchBox?.focus();
     else if (event.ctrlKey && event.shiftKey && key === "n" && activeTab) void detachTab(slots[activeIndex], activeTab);
     else if (event.ctrlKey && key === "n") newWindow();
     else if (event.ctrlKey && key === "t") void newTab();
@@ -710,7 +744,7 @@
       for (let sample = 0; sample < 30; sample++) {
         const start = performance.now();
         await main.search(QUERIES[sample % QUERIES.length]);
-        if (!main.results?.items.length) throw new Error("Expected search results in the fixture");
+        if (!main.entry(0)) throw new Error("Expected search results in the fixture");
         await painted();
         times.push(performance.now() - start);
       }
@@ -742,6 +776,74 @@
    * Drives the real interface functions against a fixture with `source\note.txt` and an
    * empty `dest` folder next to it, then saves each step's result.
    */
+  /** M4.3-f: debounce, paged results, regex, filters and the NTFS scope chip (declined). */
+  async function searchSteps(source: Pane, check: Check) {
+    activeIndex = slots.findIndex(slot => slot.active?.kind === "folder" && slot.active.pane === source);
+    await source.startIndex();
+    await waitFor(() => source.index === "ready", 10000, "the folder index");
+    const searchCall = api.search;
+    let searches = 0;
+    api.search = (request) => { searches++; return searchCall(request); };
+    try {
+      for (const text of ["i", "it", "ite", "item", "item-"]) source.input(text);
+      check("typing waits before searching", searches === 0 && source.query === "item-");
+      await waitFor(() => source.resultCount !== null, 5000, "debounced results");
+      check("a burst of keys runs one search", searches === 1, `${searches} searches`);
+    } finally {
+      api.search = searchCall;
+    }
+    check("results count every match past the first page", source.resultCount?.count === 300 && !source.resultCount.more && source.rows === 300, JSON.stringify(source.resultCount));
+    await source.loadPage(256);
+    check("later result pages load on demand", source.entry(299)?.name.startsWith("item-") === true && Object.keys(source.resultPages).length === 2);
+    await source.search("report");
+    check("search covers subfolders", source.rows === 1 && source.entry(0)?.path.endsWith("z-folder\\report-2026.log") === true, source.entry(0)?.path);
+    const found = () => Array.from({ length: source.rows }, (_, row) => source.entry(row)?.name).sort().join();
+    source.setRegex(true);
+    await source.search("^file\\d+\\.txt$");
+    check("regular expression search", found() === "file10.txt,file2.txt", found());
+    await source.search("(");
+    check("an invalid expression explains itself", source.rows === 0 && /regular expression/i.test(source.searchError), source.searchError);
+    source.setFilters({ ...NO_FILTERS, minBytes: 1024 });
+    await source.search(".");
+    check("size filter", found() === "report-2026.log", found());
+    source.setFilters({ ...NO_FILTERS, modifiedAfter: Math.floor(Date.now() / 1000) + 86_400 });
+    await source.search(".");
+    check("date filter", source.rows === 0 && !source.searchError, source.searchError);
+    source.setFilters(NO_FILTERS);
+    await source.search(".");
+    await tick();
+    const box = document.querySelector<HTMLElement>('.toolbar [role="search"]');
+    check("the toolbar search box shows the scope, regex and filter controls", !!box?.querySelector('button[title="Search scope"]') && box.querySelector('button[aria-label="Regular expression"]')?.getAttribute("aria-pressed") === "true");
+    const enter = (input: HTMLInputElement, value: string) => { input.value = value; input.dispatchEvent(new Event("input", { bubbles: true })); };
+    box!.querySelector<HTMLButtonElement>('button[title="Filters"]')!.click();
+    await tick();
+    const form = () => box!.querySelector<HTMLFormElement>('form[aria-label="Search filters"]');
+    enter(form()!.querySelector("input")!, ".LOG");
+    await waitFor(() => found() === "report-2026.log", 5000, "results filtered from the popover");
+    check("the Filters popover applies the extension while typing", source.filters.extension === "LOG");
+    enter(form()!.querySelector<HTMLInputElement>('input[aria-label="Minimum size"]')!, "5");
+    enter(form()!.querySelector<HTMLInputElement>('input[aria-label="Maximum size"]')!, "1");
+    await tick();
+    check("a reversed size range waits with a message", source.filters.minBytes === 5 * 1024 ** 2 && source.filters.maxBytes === null && /larger than/.test(form()?.querySelector('[role="alert"]')?.textContent ?? ""));
+    box!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await tick();
+    check("Escape closes the popover first", !form() && source.searching);
+    box!.querySelector<HTMLButtonElement>('button[title="Search scope"]')!.click();
+    const ntfs = () => [...box!.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')].find((item) => item.textContent?.includes("NTFS"));
+    await waitFor(() => !!ntfs(), 5000, "the NTFS scope of the fixture drive");
+    ntfs()!.click();
+    await tick();
+    const ask = document.querySelector<HTMLDialogElement>('dialog[aria-label^="Search all of"]');
+    check("NTFS search asks in the window before Windows does", !!ask?.open && !source.volume);
+    [...ask!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Cancel")!.click();
+    await tick();
+    check("declining keeps folder search", !document.querySelector('dialog[aria-label^="Search all of"]') && !source.volume && Object.keys(volumes.states).length === 0);
+    source.setRegex(false);
+    source.setFilters(NO_FILTERS);
+    await source.search("");
+    check("clearing the search returns to the listing", source.rows === source.count && !!source.entry(0));
+  }
+
   async function selfTest(info: Startup) {
     const steps: { step: string; ok: boolean; detail?: string }[] = [];
     const check = (step: string, ok: boolean, detail?: string) => {
@@ -832,6 +934,7 @@
       await source.sortBy("name");
       await source.refresh();
       check("sort and refresh preserve selected identity", source.selected !== oldRow && source.selectedRefs()[0]?.index === identity.index && source.selectedRefs()[0]?.path === identity.path);
+      await searchSteps(source, check);
       const slot = slots[0];
       const originalTab = slot.active;
       source.query = "file";
@@ -920,6 +1023,7 @@
     const unlisten = [
       listen<FolderProgress>(FOLDER_PROGRESS, (event) => panes.forEach((pane) => pane.progress(event.payload))),
       listen<IndexState>(INDEX_STATE, (event) => panes.forEach((pane) => pane.indexed(event.payload))),
+      listen<VolumeState>(VOLUME_STATE, (event) => volumeChanged(event.payload)),
       listen<OperationDone>(OPERATION_DONE, (event) => finished(event.payload)),
       listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
       listen<SettingsView>(SETTINGS_CHANGED, (event) => (settings = withPending(event.payload))),
@@ -933,7 +1037,7 @@
     ];
     void (async () => {
       const info = await api.startup();
-      await loadSettings();
+      await Promise.all([loadSettings(), volumes.load()]);
       const start = performance.now();
       useLocale(info.locale);
       startup = info;
@@ -1000,18 +1104,13 @@
           <button class="ib sm" aria-label="Refresh (F5)" title="Refresh (F5)" onclick={() => active?.refresh()}><Icon name="refresh" size={14} /></button>
         </nav>
       {/if}
-      <label class="field search">
-        <span class="sr">Search {title}</span>
-        <span class="muted icon"><Icon name="search" /></span>
-        <input
-          bind:this={searchField}
-          type="search"
-          placeholder={`Search ${title}`}
-          value={active?.query ?? ""}
-          oninput={(event) => active?.search(event.currentTarget.value)}
-        />
-        <kbd class="kbd">Ctrl F</kbd>
-      </label>
+      {#if active}
+        {#key active}
+          <SearchBox bind:this={searchBox} pane={active} label={title} onvolume={drive => (volumeAsk = { drive, pane: active! })} />
+        {/key}
+      {:else}
+        <div class="search-gap"></div>
+      {/if}
       <div class="seg" role="group" aria-label="View">
         <button class="ib on" aria-pressed="true" aria-label="Details view" title="Details view"><Icon name="list" /></button>
         <button class="ib" aria-pressed="false" aria-label="Grid view (not in this build)" title="Grid view (not in this build)" disabled><Icon name="grid" /></button>
@@ -1056,7 +1155,9 @@
                 <button class="ib" title="Back" aria-label="Pane back" disabled={!pane.canBack} onclick={() => pane.back()}><Icon name="back" /></button>
                 <button class="ib" title="Forward" aria-label="Pane forward" disabled={!pane.canForward} onclick={() => pane.forward()}><Icon name="forward" /></button>
                 <input class="field pane-address" aria-label="Pane folder path" value={pane.path} onfocus={() => (activeIndex = index)} onkeydown={(event) => { if (event.key === "Enter") void pane.open(event.currentTarget.value); }} />
-                <input class="field pane-search" aria-label={`Search ${paneLabel(pane)}`} placeholder={`Search ${paneLabel(pane)}`} value={pane.query} onfocus={() => (activeIndex = index)} oninput={event => pane.search(event.currentTarget.value)} />
+                <div class="pane-search" onfocusin={() => (activeIndex = index)}>
+                  <SearchBox {pane} label={paneLabel(pane)} compact onvolume={drive => (volumeAsk = { drive, pane })} />
+                </div>
               </div>
             {/if}
           {/if}
@@ -1086,7 +1187,7 @@
       {#if fatal || active?.error}
         <span class="error">{fatal || active?.error}</span>
       {:else if active}
-        <span>{formatCount(active.rows)} {active.searching ? (active.rows === 1 ? "result" : "results") : active.rows === 1 ? "item" : "items"}{active.complete ? "" : " · reading…"}{selectedCount > 0 ? ` · ${selectedCount} selected` : ""}</span>
+        <span>{active.searching ? resultText(active) : `${formatCount(active.rows)} ${active.rows === 1 ? "item" : "items"}${active.complete ? "" : " · reading…"}`}{selectedCount > 0 ? ` · ${selectedCount} selected` : ""}</span>
       {/if}
       {#if session.clipboard}
         <span>· {session.clipboard.count} {session.clipboard.cut ? "cut" : "copied"}</span>
@@ -1100,7 +1201,10 @@
           <button class="ib xs" aria-label="Cancel transfer" onclick={() => api.cancelTransfer()}><Icon name="close" size={12} /></button>
         </span>
       {/if}
-      {#if active?.index === "building"}
+      {#if active?.volume}
+        {@const volume = volumes.states[active.volume]}
+        <span>{volume?.ready ? `${active.volume}: index · ${formatCount(volume.count)} items` : `Indexing ${active.volume}:…`}</span>
+      {:else if active?.index === "building"}
         <span>Indexing folder…</span>
       {:else if active?.index === "ready"}
         <span>Folder index ready · {formatCount(active.indexCount)} items</span>
@@ -1160,6 +1264,17 @@
   {#if folderSheet}
     <FolderStyleSheet name={folderSheet.name} path={folderSheet.path} style={styleOf(folderSheet.item)} onsave={saveFolderStyle} onclose={() => (folderSheet = undefined)} />
   {/if}
+  {#if volumeAsk}
+    {@const drive = volumeAsk.drive}
+    <Sheet title={`Search all of ${drive}:?`} onclose={() => (volumeAsk = undefined)}>
+      <p>Firewol indexes the files you can open on {drive}: for this session and keeps the index up to date while it runs.</p>
+      <p class="muted">Reading the NTFS change journal needs a small read-only helper with administrator rights, so Windows asks for approval next. The helper cannot change files. If you decline, folder search keeps working.</p>
+      <div class="actions">
+        <button class="action" onclick={() => (volumeAsk = undefined)}>Cancel</button>
+        <button class="action primary" onclick={startVolume}>Continue</button>
+      </div>
+    </Sheet>
+  {/if}
   {#if closeWarning}
     <Sheet title="A file operation is running" onclose={() => (closeWarning = false)}>
       <p>Keep Firewol open until this operation finishes. You can continue browsing while it runs.</p>
@@ -1192,7 +1307,7 @@
   .crumb:hover { background: var(--hover); }
   .crumb.cur { font-weight: 600; }
   .crumb-space { flex-grow: 1; align-self: stretch; min-width: 24px; border: 0; background: transparent; }
-  .search { flex: 0 1 280px; min-width: 180px; margin: 0 6px; }
+  .search-gap { flex: 0 1 280px; }
   .body { display: flex; flex: 1; min-height: 0; gap: 8px; padding: 0 12px 0 8px; }
   .sidebar { display: flex; flex-direction: column; gap: 2px; flex: 0 0 216px; padding: 2px 0; overflow: auto; }
   .side-head { display: flex; align-items: center; justify-content: space-between; padding: 0 4px 4px 12px; }
@@ -1206,7 +1321,9 @@
   .pane-slot { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
   .pane-nav { display: flex; gap: 4px; min-width: 0; }
   .pane-address { min-width: 0; width: 45%; flex: 1; }
-  .pane-search { min-width: 80px; width: 35%; }
+  .pane-search { display: flex; flex: 0 1 35%; min-width: 120px; }
+  .pane-search:focus-within { flex-basis: 60%; }
+  .pane-search :global(.box) { flex: 1; }
   .body.settings-only { padding: 8px 12px 0 8px; }
   .glyph { display: inline-flex; justify-content: center; flex: none; width: 16px; color: var(--accent); }
   .status.collapsed { height: 12px; overflow: hidden; visibility: hidden; }

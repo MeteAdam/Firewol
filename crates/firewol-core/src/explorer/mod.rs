@@ -14,7 +14,7 @@ pub use operations::{
     MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations, TransferControl, TransferProgress,
     TransferRequest, TransferState,
 };
-pub use search::{Filters, SearchIndex, SearchQuery, SearchReader};
+pub use search::{Filters, SearchIndex, SearchQuery, SearchReader, remove_stale_indexes};
 pub use session::{Clipboard, Completion, History, Session};
 pub use settings::{
     Appearance, CaptionShape, FolderKey, FolderStyle, MenuAction, MenuEntry, Preset, Rgb, Settings,

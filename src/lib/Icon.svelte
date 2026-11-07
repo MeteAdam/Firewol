@@ -2,6 +2,10 @@
   // One outline set (24 px grid, round caps), drawn at 16 px. See docs/DESIGN.md › Iconography.
   const PATHS = {
     settings: ["M5 6h14M5 12h14M5 18h14M9 3v6M15 9v6M9 15v6"],
+    down: ["M12 5v14M6 13l6 6 6-6"],
+    shield: ["M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z", "M9 12l2 2 4-4"],
+    info: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "M12 11v5M12 8h.01"],
+    menu: ["M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M8 9h8M8 13h8M8 17h5"],
     back: ["M19 12H5M11 6l-6 6 6 6"],
     forward: ["M5 12h14M13 6l6 6-6 6"],
     up: ["M12 19V5M6 11l6-6 6 6"],

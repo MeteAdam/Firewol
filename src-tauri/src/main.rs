@@ -12,11 +12,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+use anyhow::Context as _;
 use contract::{
     ClipboardState, IndexState, ItemRef, Navigation, OperationDone, Page, SessionState, Startup,
     Step, TransferPhase, TransferStatus,
 };
-use firewol_core::explorer::{Operation, Session, TransferState, data_dir, home};
+use firewol_core::explorer::{
+    MenuAction, Operation, Session, TransferState, actions, data_dir, home,
+};
 use folders::{Folders, Notice, Notify, item_id, lock, segment, text};
 use tauri::{
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
@@ -26,6 +29,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
     ICoreWebView2_19,
 };
+use windows::Win32::Foundation::HWND;
 use windows_core::Interface;
 
 static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -336,6 +340,68 @@ fn operation_busy(files: State<'_, Files>) -> bool {
     files.0.busy()
 }
 
+/// The window handle travels as an integer because `HWND` is not `Send`.
+fn owner(window: &Window) -> Result<isize, String> {
+    Ok(window.hwnd().map_err(message)?.0 as isize)
+}
+
+/// Runs the stored custom action at `index`. The executable is looked up in the saved menu, never
+/// taken from the interface; `executable` only confirms the menu did not change since it was shown.
+#[tauri::command]
+async fn run_menu_action(
+    window: Window,
+    files: State<'_, Files>,
+    index: usize,
+    executable: String,
+    target: contract::ItemRef,
+) -> Result<(), String> {
+    let files = files.0.clone();
+    let owner = owner(&window)?;
+    let target = item_id(&target).map_err(message)?;
+    blocking(move || {
+        let settings = files.settings();
+        let entry = settings
+            .menu
+            .get(index)
+            .filter(|entry| entry.visible)
+            .context("This menu action is no longer available")?;
+        let MenuAction::Custom {
+            executable: stored,
+            administrator,
+        } = &entry.action
+        else {
+            anyhow::bail!("This menu entry is not a custom action");
+        };
+        anyhow::ensure!(
+            *stored == executable,
+            "The menu changed. Open it again and retry."
+        );
+        actions::run_custom(
+            Path::new(stored),
+            *administrator,
+            &target,
+            &settings.elevation,
+            HWND(owner as _),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn run_as_administrator(
+    window: Window,
+    files: State<'_, Files>,
+    target: contract::ItemRef,
+) -> Result<(), String> {
+    let files = files.0.clone();
+    let owner = owner(&window)?;
+    let target = item_id(&target).map_err(message)?;
+    blocking(move || {
+        actions::run_as_administrator(&target, &files.settings().elevation, HWND(owner as _))
+    })
+    .await
+}
+
 fn session_state(session: &Session) -> SessionState {
     SessionState {
         pins: session
@@ -588,6 +654,8 @@ fn main() {
             get_settings,
             update_settings,
             operation_busy,
+            run_menu_action,
+            run_as_administrator,
             open_window,
             save_report
         ])

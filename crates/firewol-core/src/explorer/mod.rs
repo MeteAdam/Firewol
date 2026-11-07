@@ -1,3 +1,4 @@
+pub mod actions;
 mod directory;
 pub mod elevation;
 pub mod icons;

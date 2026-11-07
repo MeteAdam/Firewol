@@ -44,7 +44,7 @@ cargo build --release --locked -p firewol-tauri --features custom-protocol
 | Interface types | `npm run check` |
 | Memory and performance gate | `.\scripts\Measure-M4Gate.ps1 -App .\target\release\firewol-tauri.exe -Fixture <M0 fixture>` |
 | UI Automation stress | `.\scripts\Test-UiaStress.ps1 -App <exe> -Folder <100k folder>` |
-| Interface self-test | `.\scripts\Test-Interface.ps1` (disposable fixture, isolated `LOCALAPPDATA`); `main.json` lists 40 steps and the detached tab reports from `window-1.json` |
+| Interface self-test | `.\scripts\Test-Interface.ps1` (disposable fixture, isolated `LOCALAPPDATA`); `main.json` lists 57 steps and the detached tab reports from `window-1.json` |
 | Window screenshot | `powershell.exe -File .\scripts\Capture-Window.ps1 -ProcessId <pid> -OutputPath <png> -TitleLike Firewol` |
 
 The 100,000-file and 1,000,000-record fixture used by every gate run is `target/verify-m3-be5d47eaa6cc4d62b64e597855550377/fixture` (ignored by Git). Recreate one with `firewol-m0.exe prepare 100000 1000000` and `FIREWOL_M0_ROOT` (see README › Reproduce the M0 measurement). The self-test fixture is a folder with `source\note.txt` and an empty `dest`.

@@ -66,7 +66,7 @@
 <style>
   .tabbar { position: relative; display: flex; align-items: center; min-width: 0; max-width: 100%; }
   .tabs { display: flex; gap: 4px; min-width: 0; overflow: auto; scrollbar-width: none; }
-  .tab { display: flex; align-items: center; flex: 0 1 180px; min-width: 88px; height: 32px; padding: 0 4px 0 2px; border: var(--border-w) solid transparent; border-radius: var(--radius-s); color: var(--muted); touch-action: none; }
+  .tab { display: flex; align-items: center; flex: 0 1 auto; max-width: 200px; min-width: 88px; height: 32px; padding: 0 4px 0 2px; border: var(--border-w) solid transparent; border-radius: var(--radius-s); color: var(--muted); touch-action: none; }
   .tab.on { background: var(--tab-active); color: var(--text); border-color: var(--border); box-shadow: var(--shadow-s); backdrop-filter: var(--blur); }
   .label { display: flex; align-items: center; gap: 8px; min-width: 0; height: 100%; padding: 0 8px; border: 0; background: transparent; font-size: 12px; }
   .label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

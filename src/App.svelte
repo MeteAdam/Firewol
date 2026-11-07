@@ -26,8 +26,10 @@
   import { formatCount, formatSize, useLocale } from "./lib/format";
   import Icon from "./lib/Icon.svelte";
   import { Pane } from "./lib/pane.svelte";
-  import { PRESETS, colors, presetClass } from "./lib/appearance";
+  import { PRESETS, colors, hex, presetClass } from "./lib/appearance";
+  import { details, isCustom, labelOf, menuRows, parentPath, type MenuContext, type MenuRow } from "./lib/menu";
   import Sheet from "./lib/Sheet.svelte";
+  import Settings from "./lib/Settings.svelte";
   import TabBar from "./lib/TabBar.svelte";
   import { PaneSlot, folderTab, restore, snapshot, type Tab } from "./lib/tabs.svelte";
 
@@ -55,7 +57,8 @@
   let toast = $state<{ message: string; undo: boolean; error: boolean }>();
   let transfer = $state.raw<TransferStatus | null>(null);
   let fatal = $state("");
-  let searchField: HTMLInputElement;
+  let searchField: HTMLInputElement | undefined = $state();
+  let settingsSection = $state("appearance");
   let addressField: HTMLInputElement | undefined = $state();
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let transferTimer: ReturnType<typeof setInterval> | undefined;
@@ -65,6 +68,8 @@
   const otherTab = $derived(slots[activeIndex === 0 ? 1 : 0]?.active);
   const other = $derived(otherTab?.kind === "folder" ? otherTab.pane : undefined);
   const title = $derived(activeTab?.kind === "settings" ? "Settings" : active?.label ?? "Firewol");
+  // Settings alone in the window replaces the folder chrome, as in the approved mockup.
+  const settingsOnly = $derived(slots.length === 1 && activeTab?.kind === "settings");
   const focused = $derived(active?.focusedEntry);
   const selectedCount = $derived(active?.selection.size ?? 0);
   const pinned = $derived(session.pins.some((pin) => pin.path === active?.folder?.path));
@@ -82,8 +87,36 @@
   }
 
   async function saveSettings(patch: SettingsPatch) {
-    try { settings = await api.updateSettings(patch); }
+    try { settings = withPending(await api.updateSettings(patch)); }
     catch (reason) { notify(String(reason), { error: true }); }
+  }
+
+  // Appearance edits (colour wheel drags) show at once and reach the core at most every 150 ms.
+  let pendingAppearance: AppearanceView | undefined;
+  let appearanceTimer: ReturnType<typeof setTimeout> | undefined;
+  const withPending = (view: SettingsView) => (pendingAppearance ? { ...view, appearance: pendingAppearance } : view);
+
+  function previewAppearance(appearance: AppearanceView) {
+    if (!settings) return;
+    pendingAppearance = appearance;
+    settings = { ...settings, appearance };
+    clearTimeout(appearanceTimer);
+    appearanceTimer = setTimeout(() => void flushAppearance(), 150);
+  }
+
+  async function flushAppearance() {
+    clearTimeout(appearanceTimer);
+    const appearance = pendingAppearance;
+    if (!appearance) return;
+    try {
+      const saved = await api.updateSettings({ appearance });
+      if (pendingAppearance === appearance) pendingAppearance = undefined;
+      settings = withPending(saved);
+    } catch (reason) {
+      pendingAppearance = undefined;
+      notify(String(reason), { error: true });
+      settings = await api.getSettings();
+    }
   }
 
   function choosePreset(value: AppearanceView["preset"]) {
@@ -211,6 +244,54 @@
     void start(api.undo(), true);
   }
 
+  function menuContext(onItem: boolean): MenuContext {
+    return {
+      item: onItem ? focused : undefined,
+      selectedCount,
+      searching: !!active?.searching,
+      current: !!active?.folder?.item,
+      clipboard: !!session.clipboard,
+      idle: !transfer,
+      split: !!other?.folder?.item,
+      elevation: settings?.elevation ?? { mode: "standard", executables: [] },
+    };
+  }
+
+  /** Runs a saved menu entry; programs start in the core, which re-checks identity and policy. */
+  async function runEntry(row: MenuRow) {
+    menu = undefined;
+    const action = row.entry.action;
+    const item = focused;
+    try {
+      if (isCustom(action)) {
+        const target = item?.id ?? active?.folder?.item;
+        if (target) await api.runMenuAction(row.index, action.custom.executable, target);
+        return;
+      }
+      switch (action) {
+        case "open": if (item) open(item, false); break;
+        case "run_as_administrator": if (item?.id) await api.runAsAdministrator(item.id); break;
+        case "containing": if (item) await active?.open(parentPath(item.path)); break;
+        case "copy": await clip(false); break;
+        case "cut": await clip(true); break;
+        case "paste": paste(); break;
+        case "copy_other": toOtherPane(false); break;
+        case "move_other": toOtherPane(true); break;
+        case "rename": if (active) active.renaming = active.selected; break;
+        case "recycle": recycle(); break;
+        case "undo": undo(); break;
+        case "refresh": await active?.refresh(); break;
+        case "folder_style": break;
+      }
+    } catch (reason) {
+      notify(String(reason), { error: true });
+    }
+  }
+
+  async function saveOrThrow(patch: SettingsPatch) {
+    settings = withPending(await api.updateSettings(patch));
+  }
+
   async function togglePin(path: string | undefined) {
     menu = undefined;
     if (!path) return;
@@ -290,8 +371,9 @@
     catch (reason) { notify(String(reason), { error: true }); if (tab.kind === "folder") await tab.pane.resume(); }
   }
 
-  function openSettings() {
+  function openSettings(section?: string) {
     menu = undefined;
+    if (section) settingsSection = section;
     const slot = slots[activeIndex];
     if (!slot) return;
     let tab = slot.tabs.find(tab => tab.kind === "settings");
@@ -356,6 +438,90 @@
     await tick();
     await frame();
     await frame();
+  }
+
+  /** Drives the Settings tab through its real controls; leaves the appearance as it found it. */
+  async function settingsSelfTest(check: (step: string, ok: boolean, detail?: string) => void) {
+    const root = document.querySelector<HTMLElement>(".settings")!;
+    const shell = document.querySelector<HTMLElement>(".shell")!.parentElement!;
+    const original = settings!.appearance;
+    const button = (text: string) => [...root.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.textContent?.trim() === text);
+    const type = (input: HTMLInputElement, value: string, event: "input" | "change") => {
+      input.value = value;
+      input.dispatchEvent(new Event(event, { bubbles: true }));
+    };
+    button("Glassmorphism")?.click();
+    await painted();
+    check("a preset card applies its theme at once", shell.classList.contains("p-glass"));
+    await flushAppearance();
+    check("the chosen preset persists through the core", (await api.getSettings()).appearance.preset === "glassmorphism");
+    type(root.querySelector<HTMLInputElement>('input[aria-label="Accent colour"]')!, "#123456", "change");
+    await painted();
+    check("a typed hex overrides the accent token", getComputedStyle(shell).getPropertyValue("--accent").trim().toLowerCase() === "#123456");
+    const wheel = root.querySelector<HTMLCanvasElement>("canvas")!.getBoundingClientRect();
+    root.querySelector("canvas")!.dispatchEvent(new PointerEvent("pointerdown", { clientX: wheel.right - 4, clientY: wheel.top + wheel.height / 2, pointerId: 1, bubbles: true }));
+    root.querySelector("canvas")!.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, bubbles: true }));
+    const picked = settings!.appearance.accent;
+    check("the colour wheel picks a hue at the kept brightness", !!picked && picked[0] === 0x56 && picked[0] > picked[1] + 40 && picked[0] > picked[2] + 40, picked?.join());
+    button("Reset to preset")?.click();
+    await flushAppearance();
+    const reset = await api.getSettings();
+    check("Reset to preset clears colour overrides", reset.appearance.accent === null && reset.appearance.preset === "glassmorphism");
+    button("Circle")?.click();
+    button("Left")?.click();
+    await painted();
+    const caption = document.querySelector(".caption");
+    check("window controls follow shape and side", !!caption?.classList.contains("circle") && caption.classList.contains("left"));
+    const find = root.querySelector<HTMLInputElement>('input[type="search"]')!;
+    type(find, "uac", "input");
+    await painted();
+    const links = [...root.querySelectorAll(".s-link")].map((link) => link.textContent?.trim()).join();
+    check("Find a setting filters sections", links === "Administrator", links);
+    type(find, "", "input");
+    previewAppearance(original);
+    await flushAppearance();
+    check("appearance restores through the core", (await api.getSettings()).appearance.preset === original.preset);
+
+    const initialMenu = JSON.stringify(settings!.menu);
+    button("Context menu")?.click();
+    await painted();
+    root.querySelector<HTMLInputElement>('input[aria-label="Show Copy"]')!.click();
+    await waitFor(() => settings!.menu.some((entry) => entry.action === "copy" && !entry.visible), 5000, "hiding Copy");
+    check("the menu editor hides an action", true);
+    const form = root.querySelector<HTMLFormElement>("form.add")!;
+    const executable = form.querySelector<HTMLInputElement>('input[aria-label="Executable path"]')!;
+    type(form.querySelector<HTMLInputElement>('input[aria-label="Custom action label"]')!, "Self-test action", "input");
+    type(executable, "notepad", "input");
+    form.requestSubmit();
+    await waitFor(() => !!root.querySelector('[role="alert"]'), 5000, "a refused custom action");
+    const refusal = root.querySelector('[role="alert"]')?.textContent ?? "";
+    check("an invalid executable is refused inline", /absolute path/i.test(refusal), refusal);
+    // Saved only: the self-test never runs this program.
+    type(executable, "C:\\Tools\\firewol-self-test.exe", "input");
+    form.requestSubmit();
+    await waitFor(() => settings!.menu.some((entry) => isCustom(entry.action) && entry.label === "Self-test action"), 5000, "a custom action");
+    check("a custom action is added", !root.querySelector('[role="alert"]'));
+
+    const radio = (name: string) => [...root.querySelectorAll<HTMLButtonElement>('button[role="radio"]')].find((item) => item.querySelector("strong")?.textContent === name)!;
+    button("Administrator")?.click();
+    await painted();
+    radio("Any executable").click();
+    await painted();
+    check("Any executable asks for confirmation first", !!root.querySelector('[aria-label="Allow any executable"]') && settings!.elevation.mode === "standard");
+    button("Cancel")?.click();
+    radio("Allowlisted executables").click();
+    await waitFor(() => settings!.elevation.mode === "allowlist", 5000, "allowlist mode");
+    const allow = root.querySelector<HTMLFormElement>("form.add")!;
+    type(allow.querySelector<HTMLInputElement>("input")!, "C:\\Windows\\System32\\whoami.exe", "input");
+    allow.requestSubmit();
+    await waitFor(() => settings!.elevation.executables.length === 1, 5000, "an allowlisted executable");
+    check("an allowlisted executable is saved", /whoami\.exe$/i.test(settings!.elevation.executables[0]), settings!.elevation.executables[0]);
+    radio("Standard").click();
+    await waitFor(() => settings!.elevation.mode === "standard", 5000, "standard mode");
+    root.querySelector<HTMLButtonElement>('button[aria-label^="Remove "]')!.click();
+    await waitFor(() => settings!.elevation.executables.length === 0, 5000, "an empty allowlist");
+    check("administrator policy returns to Standard", true);
+    return initialMenu;
   }
 
   async function waitFor(ready: () => boolean, timeout: number, what: string) {
@@ -576,10 +742,29 @@
       press(",");
       await waitFor(() => slots[0].active?.kind === "settings", 5000, "Ctrl+,");
       await tick();
-      check("Ctrl+, opens Settings as a tab", !!document.querySelector(".settings-pane") && !document.querySelector(".grid"));
+      check("Ctrl+, opens Settings as a tab", !!document.querySelector(".settings") && !document.querySelector(".grid") && !document.querySelector(".toolbar"));
+      const initialMenu = await settingsSelfTest(check);
       press("w");
       await waitFor(() => tabs().length === count && shown(), 5000, "closing Settings");
       check("closing Settings returns to a folder tab", true);
+      const listing = active!;
+      listing.select((listing.pages[0] ?? []).findIndex((entry) => !entry.directory));
+      showMenu("item", 40, 40);
+      await painted();
+      const items = () => [...document.querySelectorAll<HTMLButtonElement>(".menu .mi")];
+      const labels = items().map((item) => item.querySelector(".label")?.textContent?.trim()).join("|");
+      check("the context menu follows the saved menu", labels.includes("Self-test action") && !labels.split("|").includes("Copy") && labels.includes("Cut") && labels.includes("Edit menu…") && !labels.includes("Customize folder"), labels);
+      items().find((item) => item.textContent?.includes("Edit menu…"))!.click();
+      await waitFor(() => slots[0].active?.kind === "settings" && !!document.querySelector(".settings h2"), 5000, "Edit menu…");
+      check("Edit menu… opens the Context menu section", document.querySelector(".settings h2")?.textContent === "Context menu");
+      const settingsButton = (text: string) => [...document.querySelectorAll<HTMLButtonElement>(".settings button")].find((item) => item.textContent?.trim() === text);
+      settingsButton("Reset to default…")?.click();
+      await painted();
+      settingsButton("Reset menu")?.click();
+      await waitFor(() => JSON.stringify(settings!.menu) === initialMenu, 5000, "the menu reset");
+      check("Reset restores the core default menu", true);
+      press("w");
+      await waitFor(() => tabs().length === count && shown(), 5000, "closing Settings again");
       const sidebarBefore = sidebar;
       press("b");
       await waitFor(() => sidebar !== sidebarBefore, 5000, "Ctrl+B");
@@ -611,10 +796,11 @@
       listen<IndexState>(INDEX_STATE, (event) => panes.forEach((pane) => pane.indexed(event.payload))),
       listen<OperationDone>(OPERATION_DONE, (event) => finished(event.payload)),
       listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
-      listen<SettingsView>(SETTINGS_CHANGED, (event) => (settings = event.payload)),
+      listen<SettingsView>(SETTINGS_CHANGED, (event) => (settings = withPending(event.payload))),
       appWindow.onCloseRequested(async (event) => {
         if (allowClose) return;
         event.preventDefault();
+        await flushAppearance();
         if (await api.operationBusy()) closeWarning = true;
         else { allowClose = true; await appWindow.close(); }
       }),
@@ -666,6 +852,7 @@
       </div>
     </header>
 
+    {#if !settingsOnly}
     <div class="toolbar">
       <button class="ib" class:on={sidebar} aria-pressed={sidebar} aria-label="Sidebar (Ctrl+B)" title="Sidebar (Ctrl+B)" onclick={toggleSidebar}><Icon name="sidebar" /></button>
       <button class="ib" aria-label="Back (Alt+Left)" title="Back (Alt+Left)" disabled={!active?.canBack} onclick={() => active?.back()}><Icon name="back" /></button>
@@ -706,9 +893,10 @@
       <button class="ib" class:on={slots.length > 1} aria-pressed={slots.length > 1} aria-label="Split view (Ctrl+\)" title="Split view (Ctrl+\)" onclick={toggleSplit}><Icon name="split" /></button>
       <button class="ib" aria-label="More" title="More" aria-haspopup="menu" onmousedown={(event) => event.stopPropagation()} onclick={(event) => showMenu("more", event.clientX - 220, event.clientY + 16)}><Icon name="more" /></button>
     </div>
+    {/if}
 
-    <div class="body">
-      {#if sidebar}
+    <div class="body" class:settings-only={settingsOnly}>
+      {#if sidebar && !settingsOnly}
         <nav class="sidebar" aria-label="Pinned folders">
           <div class="side-head">
             <span class="side-title">Pinned</span>
@@ -759,19 +947,15 @@
             onrecycle={recycle}
           />
           {/key}
-          {:else if slot.active?.kind === "settings"}
-            <section class="settings-pane" aria-label="Settings">
-              <h1>Settings</h1><p class="muted">Changes apply immediately.</p><h2>Appearance</h2>
-              {#each PRESETS as [value, css, name]}<button class="action" aria-pressed={preset === css} onclick={() => choosePreset(value)}>{name}</button>{/each}
-              {#if preset === "light" || preset === "neu"}<button class="action" onclick={toggleDark}>Dark variant: {dark ? "On" : "Off"}</button>{/if}
-            </section>
+          {:else if slot.active?.kind === "settings" && settings}
+            <Settings {settings} dark={dark ?? false} bind:section={settingsSection} onappearance={previewAppearance} onsave={saveOrThrow} />
           {/if}
           </div>
         {/each}
       </div>
     </div>
 
-    <footer class="status" role="status">
+    <footer class="status" role="status" class:collapsed={settingsOnly && !transfer && !fatal}>
       {#if fatal || active?.error}
         <span class="error">{fatal || active?.error}</span>
       {:else if active}
@@ -807,35 +991,33 @@
 
   {#if menu}
     <div class="menu" role="menu" tabindex="-1" style:left={`${menu.x}px`} style:top={`${menu.y}px`} onmousedown={(event) => event.stopPropagation()}>
-      {#if menu.kind === "item"}
-        <button class="mi" role="menuitem" disabled={!focused?.directory} onclick={() => focused && open(focused, false)}><Icon name="open" /><span class="label">Open</span><span class="sc">Enter</span></button>
-        <button class="mi" role="menuitem" disabled={!focused?.directory} onclick={() => focused && open(focused, true)}><Icon name="window" /><span class="label">Open in new tab</span><span class="sc">Ctrl+Enter</span></button>
+      {#if menu.kind === "item" || menu.kind === "area"}
+        {@const onItem = menu.kind === "item"}
+        {#each menuRows(settings?.menu ?? [], menuContext(onItem)) as row (row.index)}
+          {#if row.divider}<div class="sep"></div>{/if}
+          <button class="mi" role="menuitem" disabled={!row.enabled} onclick={() => runEntry(row)}>
+            {#if row.entry.icon || row.entry.color}
+              <span class="glyph" style:color={row.entry.color ? hex(row.entry.color) : undefined}>{#if row.entry.icon}{row.entry.icon}{:else}<Icon name={details(row.entry.action).icon} />{/if}</span>
+            {:else}<Icon name={details(row.entry.action).icon} />{/if}
+            <span class="label">{labelOf(row.entry)}</span><span class="sc">{details(row.entry.action).shortcut}</span>
+          </button>
+          {#if onItem && row.entry.action === "open"}
+            <button class="mi" role="menuitem" disabled={!row.enabled} onclick={() => focused && open(focused, true)}><Icon name="window" /><span class="label">Open in new tab</span><span class="sc">Ctrl+Enter</span></button>
+          {/if}
+        {/each}
         <div class="sep"></div>
-        <button class="mi" role="menuitem" onclick={() => clip(true)}><Icon name="cut" /><span class="label">Cut</span><span class="sc">Ctrl+X</span></button>
-        <button class="mi" role="menuitem" onclick={() => clip(false)}><Icon name="copy" /><span class="label">Copy</span><span class="sc">Ctrl+C</span></button>
-        {#if other?.folder?.item}
-          <button class="mi" role="menuitem" onclick={() => toOtherPane(false)}><Icon name="toPane" /><span class="label">Copy to other pane</span></button>
-          <button class="mi" role="menuitem" onclick={() => toOtherPane(true)}><Icon name="transfer" /><span class="label">Move to other pane</span></button>
+        {#if onItem}
+          {#if focused?.directory && selectedCount === 1}
+            <button class="mi" role="menuitem" onclick={() => togglePin(focused?.path)}><Icon name="pin" /><span class="label">{session.pins.some((pin) => pin.path === focused?.path) ? "Unpin from sidebar" : "Pin to sidebar"}</span></button>
+          {/if}
+          <button class="mi" role="menuitem" onclick={() => { if (focused) void navigator.clipboard.writeText(focused.path); menu = undefined; }}><Icon name="copy" /><span class="label">Copy path</span></button>
+        {:else}
+          <button class="mi" role="menuitem" onclick={() => togglePin(active?.folder?.path)}><Icon name="pin" /><span class="label">{pinned ? "Unpin this folder" : "Pin this folder"}</span></button>
         {/if}
         <div class="sep"></div>
-        <button class="mi" role="menuitem" disabled={selectedCount !== 1} onclick={() => { menu = undefined; if (active) active.renaming = active.selected; }}><Icon name="rename" /><span class="label">Rename</span><span class="sc">F2</span></button>
-        <button class="mi" role="menuitem" disabled={selectedCount !== 1} onclick={recycle}><Icon name="trash" /><span class="label">Move to Recycle Bin</span><span class="sc">Del</span></button>
-        <div class="sep"></div>
-        {#if focused?.directory && selectedCount === 1}
-          <button class="mi" role="menuitem" onclick={() => togglePin(focused?.path)}><Icon name="pin" /><span class="label">{session.pins.some((pin) => pin.path === focused?.path) ? "Unpin from sidebar" : "Pin to sidebar"}</span></button>
-        {/if}
-        <button class="mi" role="menuitem" onclick={() => { if (focused) void navigator.clipboard.writeText(focused.path); menu = undefined; }}><Icon name="copy" /><span class="label">Copy path</span></button>
-        <div class="sep"></div>
-        <button class="mi" role="menuitem" onclick={undo}><Icon name="undo" /><span class="label">Undo</span><span class="sc">Ctrl+Z</span></button>
-        <button class="mi" role="menuitem" onclick={() => { menu = undefined; void active?.refresh(); }}><Icon name="refresh" /><span class="label">Refresh</span><span class="sc">F5</span></button>
-      {:else if menu.kind === "area"}
-        <button class="mi" role="menuitem" disabled={!session.clipboard} onclick={paste}><Icon name="paste" /><span class="label">Paste{session.clipboard ? ` ${session.clipboard.count} item${session.clipboard.count === 1 ? "" : "s"}` : ""}</span><span class="sc">Ctrl+V</span></button>
-        <button class="mi" role="menuitem" onclick={() => togglePin(active?.folder?.path)}><Icon name="pin" /><span class="label">{pinned ? "Unpin this folder" : "Pin this folder"}</span></button>
-        <div class="sep"></div>
-        <button class="mi" role="menuitem" onclick={undo}><Icon name="undo" /><span class="label">Undo</span><span class="sc">Ctrl+Z</span></button>
-        <button class="mi" role="menuitem" onclick={() => { menu = undefined; void active?.refresh(); }}><Icon name="refresh" /><span class="label">Refresh</span><span class="sc">F5</span></button>
+        <button class="mi" role="menuitem" onclick={() => openSettings("menu")}><Icon name="settings" /><span class="label">Edit menu…</span></button>
       {:else}
-        <button class="mi" role="menuitem" onclick={openSettings}><Icon name="settings" /><span class="label">Settings</span><span class="sc">Ctrl+,</span></button>
+        <button class="mi" role="menuitem" onclick={() => openSettings()}><Icon name="settings" /><span class="label">Settings</span><span class="sc">Ctrl+,</span></button>
         <div class="sep"></div>
         <div class="menu-title">Theme</div>
         {#each PRESETS as [value, css, name] (value)}
@@ -895,8 +1077,9 @@
   .pane-nav { display: flex; gap: 4px; min-width: 0; }
   .pane-address { min-width: 0; width: 45%; flex: 1; }
   .pane-search { min-width: 80px; width: 35%; }
-  .settings-pane { flex: 1; min-height: 0; overflow: auto; padding: 24px; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); }
-  .settings-pane .action { margin: 4px; }
+  .body.settings-only { padding: 8px 12px 0 8px; }
+  .glyph { display: inline-flex; justify-content: center; flex: none; width: 16px; color: var(--accent); }
+  .status.collapsed { height: 12px; overflow: hidden; visibility: hidden; }
   .status { display: flex; align-items: center; gap: 12px; flex: none; height: 36px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
   .grow { flex-grow: 1; }
   .error { color: var(--text); }

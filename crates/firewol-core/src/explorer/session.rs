@@ -98,6 +98,7 @@ struct Running {
 pub struct Session {
     data: PathBuf,
     settings: Mutex<Settings>,
+    settings_write: Mutex<()>,
     clipboard: Arc<Mutex<Option<Clipboard>>>,
     running: Arc<Mutex<Option<Running>>>,
     jobs: Sender<Request>,
@@ -155,6 +156,7 @@ impl Session {
         Ok(Self {
             data,
             settings: Mutex::new(settings),
+            settings_write: Mutex::new(()),
             clipboard,
             running,
             jobs,
@@ -171,6 +173,8 @@ impl Session {
 
     /// Applies a change and saves it, merging edits made by other Firewol processes.
     pub fn update_settings(&self, apply: impl FnOnce(&mut Settings)) -> Result<Settings> {
+        // Preserve write order in the in-memory snapshot as well as on disk.
+        let _write = lock(&self.settings_write);
         let settings = Settings::update(&self.data, apply)?;
         *lock(&self.settings) = settings.clone();
         Ok(settings)

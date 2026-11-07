@@ -4,7 +4,7 @@ use std::io::ErrorKind;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::ItemId;
@@ -67,6 +67,8 @@ impl CaptionShape {
 #[serde(default)]
 pub struct Appearance {
     pub preset: Preset,
+    pub dark: bool,
+    pub follow_windows: bool,
     pub background: Option<Rgb>,
     pub surface: Option<Rgb>,
     pub text: Option<Rgb>,
@@ -91,6 +93,12 @@ impl From<&ItemId> for FolderKey {
             volume: item.identity.volume,
             index: item.identity.index,
         }
+    }
+}
+
+impl FolderKey {
+    pub fn parts(self) -> (u32, u64) {
+        (self.volume, self.index)
     }
 }
 
@@ -178,6 +186,8 @@ pub fn default_menu() -> Vec<MenuEntry> {
 
 #[derive(Clone)]
 pub struct Settings {
+    pub version: u32,
+    pub theme_migrated: bool,
     pub last_folder: Option<PathBuf>,
     pub pins: Vec<PathBuf>,
     pub sidebar: Option<bool>,
@@ -190,6 +200,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            version: 2,
+            theme_migrated: false,
             last_folder: None,
             pins: Vec::new(),
             sidebar: None,
@@ -203,6 +215,10 @@ impl Default for Settings {
 
 #[derive(Serialize, Deserialize)]
 struct Stored {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    theme_migrated: bool,
     last_folder: Option<Vec<u16>>,
     #[serde(default)]
     pins: Vec<Vec<u16>>,
@@ -226,6 +242,10 @@ impl Settings {
             Err(error) => return Err(error.into()),
         };
         let mut stored: Stored = serde_json::from_reader(file).context("Read Firewol settings")?;
+        ensure!(
+            stored.version <= 2,
+            "These settings were saved by a newer Firewol version"
+        );
         if !stored
             .menu
             .iter()
@@ -242,6 +262,8 @@ impl Settings {
         }
         let path = |units: Vec<u16>| PathBuf::from(std::ffi::OsString::from_wide(&units));
         Ok(Self {
+            version: 2,
+            theme_migrated: stored.theme_migrated,
             last_folder: stored.last_folder.map(path),
             pins: stored.pins.into_iter().map(path).collect(),
             sidebar: stored.sidebar,
@@ -271,6 +293,8 @@ impl Settings {
     fn save(&self, dir: &Path) -> Result<()> {
         let units = |path: &PathBuf| path.as_os_str().encode_wide().collect();
         let stored = Stored {
+            version: 2,
+            theme_migrated: self.theme_migrated,
             last_folder: self.last_folder.as_ref().map(units),
             pins: self.pins.iter().map(units).collect(),
             sidebar: self.sidebar,

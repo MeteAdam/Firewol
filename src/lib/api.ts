@@ -8,10 +8,15 @@ import type {
   Startup,
   Step,
   TransferStatus,
+  SettingsView,
+  SettingsPatch,
 } from "./contract";
 
 export const api = {
   startup: () => invoke<Startup>("startup"),
+  getSettings: () => invoke<SettingsView>("get_settings"),
+  updateSettings: (patch: SettingsPatch) => invoke<SettingsView>("update_settings", { patch }),
+  operationBusy: () => invoke<boolean>("operation_busy"),
   navigate: (pane: string, path: string | null, step: Step) =>
     invoke<Navigation>("navigate", { pane, path, step }),
   closePane: (pane: string) => invoke<void>("close_pane", { pane }),

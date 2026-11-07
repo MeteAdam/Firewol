@@ -13,6 +13,14 @@ export type { SessionState } from "./bindings/SessionState";
 export type { Startup } from "./bindings/Startup";
 export type { Step } from "./bindings/Step";
 export type { TransferStatus } from "./bindings/TransferStatus";
+export type { AppearanceView } from "./bindings/AppearanceView";
+export type { SettingsView } from "./bindings/SettingsView";
+export type { SettingsPatch } from "./bindings/SettingsPatch";
+export type { MenuEntryView } from "./bindings/MenuEntryView";
+export type { MenuActionView } from "./bindings/MenuActionView";
+export type { FolderStyleView } from "./bindings/FolderStyleView";
+export type { ElevationView } from "./bindings/ElevationView";
+export const SETTINGS_CHANGED = "settings-changed";
 
 // Event names mirror the constants in contract.rs.
 export const FOLDER_PROGRESS = "folder-progress";

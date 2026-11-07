@@ -20,3 +20,6 @@ ts-rs = "12"
 webview2-com = "0.39"
 windows = { version = "0.62", features = ["Win32_Globalization"] }
 windows-core = "0.62"
+
+[dev-dependencies]
+tempfile = "3"

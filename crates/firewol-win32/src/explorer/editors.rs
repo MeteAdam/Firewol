@@ -68,6 +68,7 @@ pub(super) fn appearance(owner: HWND, previous: Appearance) -> Result<Option<App
                 caption_shape: CaptionShape::ALL[shape],
                 caption_fill: color::parse(&values[9])?,
                 caption_hover: color::parse(&values[10])?,
+                ..previous
             })
         },
     )

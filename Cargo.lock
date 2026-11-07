@@ -804,6 +804,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
  "ts-rs",
  "webview2-com",
  "windows",

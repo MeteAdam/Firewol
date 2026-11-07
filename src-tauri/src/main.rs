@@ -3,6 +3,7 @@
 mod contract;
 mod folders;
 mod icons;
+mod settings;
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -42,7 +43,7 @@ struct App {
 }
 
 /// The clipboard, file operations and settings shared by every window.
-struct Files(Session);
+struct Files(Arc<Session>);
 
 #[derive(Clone)]
 struct WindowRequest {
@@ -52,7 +53,7 @@ struct WindowRequest {
 }
 
 #[tauri::command]
-fn startup(
+async fn startup(
     window: Window,
     state: State<'_, App>,
     files: State<'_, Files>,
@@ -64,7 +65,17 @@ fn startup(
         Some(request) => request.path.clone(),
         None => match std::env::var_os("FIREWOL_OPEN") {
             Some(path) => path.to_string_lossy().into_owned(),
-            None => text(&home().map_err(message)?),
+            None => {
+                let files = files.0.clone();
+                blocking(move || {
+                    let last = files
+                        .settings()
+                        .last_folder
+                        .and_then(|path| firewol_core::explorer::resolve_directory(&path).ok());
+                    Ok(text(&last.map(Ok).unwrap_or_else(home)?))
+                })
+                .await?
+            }
         },
     };
     let started = request.as_ref().map_or_else(
@@ -108,6 +119,7 @@ async fn navigate(
     app: AppHandle,
     window: Window,
     state: State<'_, App>,
+    files: State<'_, Files>,
     pane: String,
     path: Option<String>,
     step: Step,
@@ -115,7 +127,16 @@ async fn navigate(
     let folders = state.folders.clone();
     let notify = notifier(&app);
     let owner = window.label().to_owned();
-    blocking(move || folders.navigate(&owner, &pane, path.as_deref(), step, notify)).await
+    let files = files.0.clone();
+    blocking(move || {
+        let navigation = folders.navigate(&owner, &pane, path.as_deref(), step, notify)?;
+        let path = PathBuf::from(&navigation.folder.path);
+        if files.settings().last_folder.as_ref() != Some(&path) {
+            files.update_settings(|settings| settings.last_folder = Some(path))?;
+        }
+        Ok(navigation)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -239,13 +260,43 @@ fn cancel_transfer(files: State<'_, Files>) {
 }
 
 #[tauri::command]
-fn toggle_pin(
+async fn toggle_pin(
     app: AppHandle,
     files: State<'_, Files>,
     path: String,
 ) -> Result<SessionState, String> {
-    files.0.toggle_pin(Path::new(&path)).map_err(message)?;
-    Ok(broadcast(&app, &files.0))
+    let files = files.0.clone();
+    blocking(move || {
+        files.toggle_pin(Path::new(&path))?;
+        Ok(broadcast(&app, &files))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_settings(files: State<'_, Files>) -> Result<contract::SettingsView, String> {
+    let files = files.0.clone();
+    blocking(move || settings::view(&files.settings())).await
+}
+
+#[tauri::command]
+async fn update_settings(
+    app: AppHandle,
+    files: State<'_, Files>,
+    patch: contract::SettingsPatch,
+) -> Result<contract::SettingsView, String> {
+    let files = files.0.clone();
+    blocking(move || {
+        let view = settings::update(&files, patch)?;
+        app.emit(contract::SETTINGS_CHANGED, &view)?;
+        Ok(view)
+    })
+    .await
+}
+
+#[tauri::command]
+fn operation_busy(files: State<'_, Files>) -> bool {
+    files.0.busy()
 }
 
 fn session_state(session: &Session) -> SessionState {
@@ -401,7 +452,7 @@ fn main() {
                     },
                 );
             })?;
-            app.manage(Files(session));
+            app.manage(Files(Arc::new(session)));
             build_window(app.handle(), "main")?;
             Ok(())
         })
@@ -428,6 +479,9 @@ fn main() {
             pause_transfer,
             cancel_transfer,
             toggle_pin,
+            get_settings,
+            update_settings,
+            operation_busy,
             open_window,
             save_report
         ])

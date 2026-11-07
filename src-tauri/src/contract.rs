@@ -9,6 +9,118 @@ pub const FOLDER_PROGRESS: &str = "folder-progress";
 pub const INDEX_STATE: &str = "index-state";
 pub const OPERATION_DONE: &str = "operation-done";
 pub const SESSION_CHANGED: &str = "session-changed";
+pub const SETTINGS_CHANGED: &str = "settings-changed";
+
+#[derive(Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AppearanceView {
+    #[ts(
+        type = "'light_morphism' | 'glassmorphism' | 'neumorphism' | 'neubrutalism' | 'claymorphism' | 'skeuomorphism' | 'metal_morphism'"
+    )]
+    pub preset: String,
+    pub dark: bool,
+    pub follow_windows: bool,
+    pub background: Option<[u8; 3]>,
+    pub surface: Option<[u8; 3]>,
+    pub text: Option<[u8; 3]>,
+    pub accent: Option<[u8; 3]>,
+    pub folder: Option<[u8; 3]>,
+    pub folder_label: Option<[u8; 3]>,
+    pub caption_left: bool,
+    #[ts(type = "'rounded' | 'square' | 'circle' | 'minimal'")]
+    pub caption_shape: String,
+    pub caption_fill: Option<[u8; 3]>,
+    pub caption_hover: Option<[u8; 3]>,
+}
+
+#[derive(Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MenuActionView {
+    Open,
+    RunAsAdministrator,
+    Containing,
+    Copy,
+    Cut,
+    Paste,
+    CopyOther,
+    MoveOther,
+    Rename,
+    Recycle,
+    FolderStyle,
+    Undo,
+    Refresh,
+    Custom {
+        executable: String,
+        administrator: bool,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MenuEntryView {
+    pub action: MenuActionView,
+    pub visible: bool,
+    pub label: String,
+    pub icon: String,
+    pub color: Option<[u8; 3]>,
+}
+
+#[derive(Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FolderStyleView {
+    pub alias: String,
+    pub color: Option<[u8; 3]>,
+    pub icon: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct StyledFolder {
+    pub volume: u32,
+    pub index: String,
+    pub style: FolderStyleView,
+}
+
+#[derive(Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ElevationView {
+    #[ts(type = "'standard' | 'allowlist' | 'all_executables'")]
+    pub mode: String,
+    pub executables: Vec<String>,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct SettingsView {
+    pub version: u32,
+    pub theme_migrated: bool,
+    pub sidebar: bool,
+    pub appearance: AppearanceView,
+    pub menu: Vec<MenuEntryView>,
+    pub folders: Vec<StyledFolder>,
+    pub elevation: ElevationView,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(default, deny_unknown_fields)]
+#[derive(Default)]
+#[ts(export)]
+pub struct SettingsPatch {
+    #[ts(optional)]
+    pub appearance: Option<AppearanceView>,
+    #[ts(optional)]
+    pub sidebar: Option<bool>,
+    #[ts(optional)]
+    pub menu: Option<Vec<MenuEntryView>>,
+    #[ts(optional)]
+    pub elevation: Option<ElevationView>,
+    #[ts(optional)]
+    pub allow_all_confirmed: Option<bool>,
+    #[ts(optional)]
+    pub migrate_appearance: Option<bool>,
+}
 
 /// A folder shown in the breadcrumb or the sidebar.
 #[derive(Clone, Serialize, TS)]

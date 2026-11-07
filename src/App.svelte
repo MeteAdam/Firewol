@@ -2,12 +2,17 @@
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick } from "svelte";
+  import { MediaQuery } from "svelte/reactivity";
   import { api } from "./lib/api";
   import {
     FOLDER_PROGRESS,
     INDEX_STATE,
     OPERATION_DONE,
     SESSION_CHANGED,
+    SETTINGS_CHANGED,
+    type SettingsView,
+    type SettingsPatch,
+    type AppearanceView,
     type Entry,
     type FolderProgress,
     type IndexState,
@@ -21,16 +26,9 @@
   import { formatCount, formatSize, useLocale } from "./lib/format";
   import Icon from "./lib/Icon.svelte";
   import { Pane } from "./lib/pane.svelte";
+  import { PRESETS, colors, presetClass } from "./lib/appearance";
+  import Sheet from "./lib/Sheet.svelte";
 
-  const PRESETS = [
-    ["light", "Light-morphism"],
-    ["glass", "Glassmorphism"],
-    ["neu", "Neumorphism"],
-    ["brutal", "Neubrutalism"],
-    ["clay", "Claymorphism"],
-    ["skeuo", "Skeuomorphism"],
-    ["metal", "Metal-morphism"],
-  ] as const;
   const QUERIES = ["ré", "cord", "port", "résumé", "record-0000"];
 
   const appWindow = getCurrentWindow();
@@ -40,9 +38,14 @@
   let lists = $state<FileList[]>([]);
   let paneCounter = 0;
   let activeIndex = $state(0);
-  let sidebar = $state(true);
-  let preset = $state(stored("preset", "light"));
-  let dark = $state(stored("dark", "false") === "true");
+  let settings = $state.raw<SettingsView>();
+  const windowsDark = new MediaQuery("(prefers-color-scheme: dark)");
+  const sidebar = $derived(settings?.sidebar ?? true);
+  const preset = $derived(presetClass(settings?.appearance.preset ?? "light_morphism"));
+  const dark = $derived((preset === "light" || preset === "neu") && (settings?.appearance.follow_windows ? windowsDark.current : settings?.appearance.dark));
+  let closeWarning = $state(false);
+  let closeWhenFinished = false;
+  let allowClose = false;
   let editing = $state(false);
   let address = $state("");
   let menu = $state<{ kind: "item" | "area" | "more"; x: number; y: number }>();
@@ -73,22 +76,28 @@
     }
   }
 
-  function store(key: string, value: string) {
-    try {
-      localStorage.setItem(`firewol.${key}`, value);
-    } catch {
-      // Appearance still applies for this window.
-    }
+  async function saveSettings(patch: SettingsPatch) {
+    try { settings = await api.updateSettings(patch); }
+    catch (reason) { notify(String(reason), { error: true }); }
   }
 
-  function choosePreset(value: string) {
-    preset = value;
-    store("preset", value);
+  function choosePreset(value: AppearanceView["preset"]) {
+    if (settings) void saveSettings({ appearance: { ...settings.appearance, preset: value } });
   }
 
   function toggleDark() {
-    dark = !dark;
-    store("dark", String(dark));
+    if (settings) void saveSettings({ appearance: { ...settings.appearance, dark: !dark, follow_windows: false } });
+  }
+
+  function toggleSidebar() { void saveSettings({ sidebar: !sidebar }); }
+
+  async function loadSettings() {
+    settings = await api.getSettings();
+    if (!settings.theme_migrated) {
+      const old = PRESETS.find(([, css]) => css === stored("preset", ""));
+      settings = await api.updateSettings({ appearance: old ? { ...settings.appearance, preset: old[0], dark: stored("dark", "false") === "true" } : settings.appearance, migrate_appearance: true });
+    }
+    try { localStorage.removeItem("firewol.preset"); localStorage.removeItem("firewol.dark"); } catch { /* A locked WebView profile can still use core settings. */ }
   }
 
   function newPane() {
@@ -139,6 +148,7 @@
   }
 
   function finished(done: OperationDone) {
+    if (closeWhenFinished) void appWindow.close();
     const waiters = doneWaiters;
     doneWaiters = [];
     waiters.forEach((resolve) => resolve(done));
@@ -251,7 +261,7 @@
     else if (event.ctrlKey && key === "f") searchField.focus();
     else if (event.ctrlKey && key === "n") newWindow();
     else if (event.ctrlKey && event.key === "\\") void toggleSplit();
-    else if (event.ctrlKey && key === "b") sidebar = !sidebar;
+    else if (event.ctrlKey && key === "b") toggleSidebar();
     else if (event.altKey && event.key === "ArrowLeft") void active?.back();
     else if (event.altKey && event.key === "ArrowRight") void active?.forward();
     else if (event.altKey && event.key === "ArrowUp") void active?.up();
@@ -434,6 +444,13 @@
       check("pin", session.pins.some((pin) => pin.path === destPath));
       await togglePin(destPath);
       check("unpin", !session.pins.some((pin) => pin.path === destPath));
+      const original = await api.getSettings();
+      await saveSettings({ sidebar: false, appearance: { ...original.appearance, accent: [18, 52, 86] } });
+      await painted();
+      check("settings apply through CSS tokens", getComputedStyle(document.querySelector(".fw")!).getPropertyValue("--accent").trim() === "#123456" && !sidebar);
+      const persisted = await api.getSettings();
+      check("settings persist through the core", !persisted.sidebar && persisted.appearance.accent?.join() === "18,52,86" && persisted.version === 2);
+      await saveSettings({ sidebar: original.sidebar, appearance: original.appearance });
     } catch (reason) {
       if (steps.every((step) => step.ok)) steps.push({ step: "error", ok: false, detail: String(reason) });
     }
@@ -446,9 +463,17 @@
       listen<IndexState>(INDEX_STATE, (event) => panes.forEach((pane) => pane.indexed(event.payload))),
       listen<OperationDone>(OPERATION_DONE, (event) => finished(event.payload)),
       listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
+      listen<SettingsView>(SETTINGS_CHANGED, (event) => (settings = event.payload)),
+      appWindow.onCloseRequested(async (event) => {
+        if (allowClose) return;
+        event.preventDefault();
+        if (await api.operationBusy()) closeWarning = true;
+        else { allowClose = true; await appWindow.close(); }
+      }),
     ];
     void (async () => {
       const info = await api.startup();
+      await loadSettings();
       const start = performance.now();
       useLocale(info.locale);
       startup = info;
@@ -474,7 +499,7 @@
 
 <svelte:window onkeydown={shortcut} onmousedown={() => (menu = undefined)} />
 
-<div class="fw p-{preset}" class:dark>
+<div class="fw p-{preset}" class:dark use:colors={settings?.appearance}>
   <div class="shell">
     <header class="titlebar" data-tauri-drag-region>
       <div class="tabs" role="tablist" aria-label="Folder tabs">
@@ -487,7 +512,7 @@
       </div>
       <button class="ib" aria-label="New window (Ctrl+N)" title="New window (Ctrl+N)" onclick={newWindow}><Icon name="plus" /></button>
       <div class="drag" data-tauri-drag-region></div>
-      <div class="caption">
+      <div class="caption {settings?.appearance.caption_shape ?? 'rounded'}" class:left={settings?.appearance.caption_left}>
         <button class="cap" aria-label="Minimize" onclick={() => appWindow.minimize()}><Icon name="minimize" size={14} weight={1.5} /></button>
         <button class="cap" aria-label="Maximize" onclick={() => appWindow.toggleMaximize()}><Icon name="maximize" size={14} weight={1.5} /></button>
         <button class="cap close" aria-label="Close" onclick={() => appWindow.close()}><Icon name="close" size={14} weight={1.5} /></button>
@@ -495,7 +520,7 @@
     </header>
 
     <div class="toolbar">
-      <button class="ib" class:on={sidebar} aria-pressed={sidebar} aria-label="Sidebar (Ctrl+B)" title="Sidebar (Ctrl+B)" onclick={() => (sidebar = !sidebar)}><Icon name="sidebar" /></button>
+      <button class="ib" class:on={sidebar} aria-pressed={sidebar} aria-label="Sidebar (Ctrl+B)" title="Sidebar (Ctrl+B)" onclick={toggleSidebar}><Icon name="sidebar" /></button>
       <button class="ib" aria-label="Back (Alt+Left)" title="Back (Alt+Left)" disabled={!active?.canBack} onclick={() => active?.back()}><Icon name="back" /></button>
       <button class="ib" aria-label="Forward (Alt+Right)" title="Forward (Alt+Right)" disabled={!active?.canForward} onclick={() => active?.forward()}><Icon name="forward" /></button>
       <button class="ib" aria-label="Up one level (Alt+Up)" title="Up one level (Alt+Up)" disabled={(active?.folder?.segments.length ?? 0) < 2} onclick={() => active?.up()}><Icon name="up" /></button>
@@ -640,15 +665,24 @@
         <button class="mi" role="menuitem" onclick={() => { menu = undefined; void active?.refresh(); }}><Icon name="refresh" /><span class="label">Refresh</span><span class="sc">F5</span></button>
       {:else}
         <div class="menu-title">Theme</div>
-        {#each PRESETS as [value, name] (value)}
-          <button class="mi" class:on={preset === value} role="menuitemradio" aria-checked={preset === value} onclick={() => choosePreset(value)}><Icon name="palette" /><span class="label">{name}</span></button>
+        {#each PRESETS as [value, css, name] (value)}
+          <button class="mi" class:on={preset === css} role="menuitemradio" aria-checked={preset === css} onclick={() => choosePreset(value)}><Icon name="palette" /><span class="label">{name}</span></button>
         {/each}
-        <button class="mi" role="menuitemcheckbox" aria-checked={dark} onclick={toggleDark}><Icon name="check" /><span class="label">Dark variant</span><span class="sc">{dark ? "On" : "Off"}</span></button>
+        {#if preset === "light" || preset === "neu"}<button class="mi" role="menuitemcheckbox" aria-checked={dark ?? false} onclick={toggleDark}><Icon name="check" /><span class="label">Dark variant</span><span class="sc">{dark ? "On" : "Off"}</span></button>{/if}
         <div class="sep"></div>
         <button class="mi" role="menuitem" onclick={newWindow}><Icon name="window" /><span class="label">New window</span><span class="sc">Ctrl+N</span></button>
         <button class="mi" role="menuitem" onclick={toggleSplit}><Icon name="split" /><span class="label">{panes.length > 1 ? "Single pane" : "Split view"}</span><span class="sc">Ctrl+\</span></button>
       {/if}
     </div>
+  {/if}
+  {#if closeWarning}
+    <Sheet title="A file operation is running" onclose={() => (closeWarning = false)}>
+      <p>Keep Firewol open until this operation finishes. You can continue browsing while it runs.</p>
+      <div class="actions">
+        <button class="action" onclick={() => { closeWhenFinished = true; closeWarning = false; if (!transfer) void appWindow.close(); }}>Close when finished</button>
+        <button class="action primary" onclick={() => (closeWarning = false)}>Keep open</button>
+      </div>
+    </Sheet>
   {/if}
 </div>
 
@@ -662,9 +696,13 @@
   .tl span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .drag { flex-grow: 1; align-self: stretch; }
   .caption { display: flex; align-self: flex-start; }
-  .cap { display: flex; align-items: center; justify-content: center; width: 46px; height: 40px; padding: 0; border: 0; background: transparent; }
+  .caption.left { order: -1; margin-right: 8px; }
+  .caption.rounded .cap { border-radius: 6px; }
+  .caption.circle .cap { border-radius: 50%; width: 28px; height: 28px; margin: 6px; }
+  .caption.minimal .cap { width: 32px; }
+  .cap { display: flex; align-items: center; justify-content: center; width: 46px; height: 40px; padding: 0; border: 0; background: var(--caption-fill, transparent); }
   .cap:hover { background: var(--hover); }
-  .cap.close:hover { background: #c42b1c; color: #ffffff; }
+  .cap.close:hover { background: var(--caption-hover, #c42b1c); color: #ffffff; }
   .toolbar { display: flex; align-items: center; gap: 4px; flex: none; min-height: 52px; padding: 6px 12px 8px 10px; }
   .address { flex: 1 1 360px; min-width: 0; margin-left: 6px; overflow: hidden; }
   .icon { display: flex; flex: none; }

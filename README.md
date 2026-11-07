@@ -71,9 +71,8 @@ Firewol is organized as a modular Rust workspace:
 ```
 Firewol/
 ├── crates/
-│   ├── firewol-core/      # Pure Rust engine: NTFS USN reader, SQLite FTS5 search,
-│   │                      # directory enumeration, transfers, session state & elevation
-│   └── firewol-win32/     # Direct2D / Win32 native reference implementation
+│   └── firewol-core/      # Pure Rust engine: NTFS USN reader, SQLite FTS5 search,
+│                          # directory enumeration, transfers, session state & elevation
 ├── src-tauri/             # Tauri v2 backend, IPC contract & TypeScript type generation (ts-rs)
 ├── src/                   # Frontend UI built with Svelte 5, TypeScript & Vite
 └── Cargo.toml             # Rust workspace configuration
@@ -115,8 +114,8 @@ To produce an optimized, standalone Windows binary:
 # Build the Svelte frontend
 npm run build
 
-# Build the release executable
-cargo build --release --locked -p firewol-tauri
+# Build the release executable (custom-protocol embeds dist/ instead of the dev server)
+cargo build --release --locked -p firewol-tauri --features custom-protocol
 ```
 
 The compiled executable will be located at:
@@ -124,10 +123,7 @@ The compiled executable will be located at:
 .\target\release\firewol-tauri.exe
 ```
 
-*(Optional)* You can also build the Direct2D / Win32 fallback executable:
-```powershell
-cargo build --release --locked -p firewol-win32
-```
+The native Win32 interface that served as the reference until the Tauri interface reached parity was removed in M4.4. It remains available at the Git tag `m3-win32-final`.
 
 ---
 

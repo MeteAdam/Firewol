@@ -1,6 +1,7 @@
 [workspace]
-members = ["crates/firewol-core", "crates/firewol-win32", "src-tauri"]
-default-members = ["crates/firewol-core", "crates/firewol-win32"]
+members = ["crates/firewol-core", "src-tauri"]
+# The Tauri interface needs `npm run build` first, so plain `cargo build` covers the core only.
+default-members = ["crates/firewol-core"]
 resolver = "3"
 
 [workspace.package]

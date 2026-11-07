@@ -1,15 +1,18 @@
 <script lang="ts">
+  import type { FolderStyleView } from "./contract";
   import { PaneSlot, type Tab } from "./tabs.svelte";
   import FolderIcon from "./FolderIcon.svelte";
   import Icon from "./Icon.svelte";
-  let { slot, onselect, onclose, onnew, ondetach }: {
-    slot: PaneSlot; onselect: (tab: Tab) => void; onclose: (tab: Tab) => void;
+  import { tint } from "./styles";
+  let { slot, styleOf, onselect, onclose, onnew, ondetach }: {
+    slot: PaneSlot; styleOf: (tab: Tab) => FolderStyleView | undefined;
+    onselect: (tab: Tab) => void; onclose: (tab: Tab) => void;
     onnew: () => void; ondetach: (tab: Tab) => void;
   } = $props();
   let strip: HTMLDivElement;
   let drag: { tab: Tab; x: number; y: number; moved: boolean } | undefined;
   let context = $state<Tab>();
-  const label = (tab: Tab) => tab.kind === "settings" ? "Settings" : tab.pane.label;
+  const label = (tab: Tab) => tab.kind === "settings" ? "Settings" : styleOf(tab)?.alias || tab.pane.label;
   function down(event: PointerEvent, tab: Tab) {
     if (event.button !== 0 || (event.target as HTMLElement).closest(".close")) return;
     drag = { tab, x: event.clientX, y: event.clientY, moved: false };
@@ -53,7 +56,7 @@
             if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); onselect(slot.tabs[(index + (event.key === "ArrowLeft" ? -1 : 1) + slot.tabs.length) % slot.tabs.length]); }
             else if (event.key === "Enter" || event.key === " ") onselect(tab);
           }}>
-          {#if tab.kind === "folder"}<FolderIcon />{:else}<Icon name="settings" />{/if}<span>{label(tab)}</span>
+          {#if tab.kind === "folder"}{@const style = styleOf(tab)}<FolderIcon color={tint(style)} glyph={style?.icon} />{:else}<Icon name="settings" />{/if}<span>{label(tab)}</span>
         </button>
         <button class="ib sm close" title={`Close ${label(tab)}`} aria-label={`Close ${label(tab)}`} onclick={() => onclose(tab)}><Icon name="close" size={12} /></button>
       </div>

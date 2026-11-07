@@ -71,7 +71,8 @@ function enabled(action: MenuActionView, context: MenuContext): boolean | null {
     case "copy_other": case "move_other": return context.split ? selected && idle : null;
     case "rename": case "recycle": return selected && idle && context.selectedCount <= 1;
     case "paste": return context.current && context.clipboard && idle;
-    case "folder_style": return null; // Shown once folder styles are ported (M4.3-e).
+    // Win32 rule: a selected folder item, or the current folder from the empty area.
+    case "folder_style": return item ? (item.directory ? selected : null) : context.current;
     case "undo": return idle;
     case "refresh": return context.current;
   }

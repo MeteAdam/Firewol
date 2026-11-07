@@ -10,6 +10,7 @@ import type {
   TransferStatus,
   SettingsView,
   SettingsPatch,
+  FolderStyleView,
   SortView,
   FolderProgress,
   TabSnapshot,
@@ -19,6 +20,9 @@ export const api = {
   startup: () => invoke<Startup>("startup"),
   getSettings: () => invoke<SettingsView>("get_settings"),
   updateSettings: (patch: SettingsPatch) => invoke<SettingsView>("update_settings", { patch }),
+  /** `null` (or an empty style) clears the folder's customization. */
+  setFolderStyle: (folder: ItemRef, style: FolderStyleView | null) =>
+    invoke<SettingsView>("set_folder_style", { folder, style }),
   operationBusy: () => invoke<boolean>("operation_busy"),
   navigate: (pane: string, path: string | null, step: Step, sort: SortView) =>
     invoke<Navigation>("navigate", { pane, path, step, sort }),

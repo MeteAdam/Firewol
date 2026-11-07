@@ -1,10 +1,12 @@
 use anyhow::{Result, ensure};
 use firewol_core::explorer::elevation::{ElevationMode, ElevationPolicy, validate_executable};
-use firewol_core::explorer::{Appearance, MenuAction, MenuEntry, Session, Settings};
+use firewol_core::explorer::{
+    Appearance, FolderStyle, ItemId, MenuAction, MenuEntry, Rgb, Session, Settings,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 
-use crate::contract::{ElevationView, SettingsPatch, SettingsView, StyledFolder};
+use crate::contract::{ElevationView, FolderStyleView, SettingsPatch, SettingsView, StyledFolder};
 
 fn mirror<T: Serialize, U: DeserializeOwned>(value: T) -> Result<U> {
     Ok(serde_json::from_value(serde_json::to_value(value)?)?)
@@ -25,7 +27,7 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
                 Ok(StyledFolder {
                     volume,
                     index: index.to_string(),
-                    style: mirror(style)?,
+                    style: style_view(style),
                 })
             })
             .collect::<Result<_>>()?,
@@ -38,6 +40,32 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
                 .collect(),
         },
     })
+}
+
+/// Direct conversion: listings call this for every styled folder row.
+pub fn style_view(style: &FolderStyle) -> FolderStyleView {
+    FolderStyleView {
+        alias: style.alias.clone(),
+        color: style.color.map(|Rgb(red, green, blue)| [red, green, blue]),
+        icon: style.icon.clone(),
+        tags: style.tags.clone(),
+    }
+}
+
+/// Saves (or, for `None` or an empty style, removes) a folder's style. The core re-verifies the
+/// identity and that it is still a folder.
+pub fn set_folder_style(
+    session: &Session,
+    folder: &ItemId,
+    style: Option<FolderStyleView>,
+) -> Result<SettingsView> {
+    let style = style.map_or_else(FolderStyle::default, |view| FolderStyle {
+        alias: view.alias,
+        color: view.color.map(|[red, green, blue]| Rgb(red, green, blue)),
+        icon: view.icon,
+        tags: view.tags,
+    });
+    view(&session.set_folder_style(folder, style)?)
 }
 
 pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {

@@ -6,6 +6,7 @@
   import { formatDate, formatSize, location, typeName } from "./format";
   import Icon from "./Icon.svelte";
   import { PAGE, type Pane } from "./pane.svelte";
+  import { tint } from "./styles";
 
   const ROW = 32;
   const HEADER = 32;
@@ -41,6 +42,8 @@
   const first = $derived(Math.max(0, top - OVERSCAN));
   const end = $derived(Math.min(rows, top + Math.ceil(height / ROW) + OVERSCAN));
   const visible = $derived(Array.from({ length: Math.max(0, end - first) }, (_, index) => first + index));
+  const tagged = $derived(pane.tagged);
+  const shownName = (entry: Entry) => entry.style?.alias || entry.name;
   const activeRow = $derived(
     pane.selected >= first && pane.selected < end ? `${id}-row-${pane.selected}` : undefined,
   );
@@ -151,7 +154,7 @@
       await frame();
       const entry = pane.entry(last);
       const cell = grid.querySelector(`[aria-rowindex="${last + 2}"] .nm`);
-      if (entry && cell?.textContent === entry.name) return true;
+      if (entry && cell?.textContent === shownName(entry)) return true;
     }
     return false;
   }
@@ -161,14 +164,14 @@
   }
 </script>
 
-<section class="list" class:marked class:searching={pane.searching} aria-label={pane.folder?.path ?? "Folder"}>
+<section class="list" class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"}>
   <div
     class="grid"
     role="grid"
     tabindex="0"
     aria-multiselectable="true"
     aria-rowcount={rows + 1}
-    aria-colcount={4}
+    aria-colcount={tagged ? 5 : 4}
     aria-activedescendant={activeRow}
     aria-label={pane.searching ? "Search results" : "Files"}
     bind:this={grid}
@@ -185,6 +188,7 @@
       <div role="columnheader" aria-sort={pane.sort.column === "modified" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("modified")}>Date modified</button></div>
       {#if !pane.searching}<div role="columnheader" aria-sort={pane.sort.column === "type" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" onclick={() => pane.sortBy("type")}>Type</button></div>{/if}
       <div role="columnheader" class="size" aria-sort={pane.sort.column === "size" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("size")}>Size</button></div>
+      {#if tagged}<div role="columnheader" class="tags-head">Tags</div>{/if}
     </div>
     <div class="spacer" role="rowgroup" style:height={`${rows * ROW}px`}>
       <div class="rows" style:transform={`translateY(${first * ROW}px)`}>
@@ -208,7 +212,7 @@
           >
             {#if entry}
               <div role="gridcell" class="name">
-                {#if entry.directory}<FolderIcon />{:else}<FileIcon icon={entry.icon} />{/if}
+                {#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} />{:else}<FileIcon icon={entry.icon} />{/if}
                 {#if row === pane.renaming}
                   <input
                     class="rename"
@@ -226,13 +230,14 @@
                     onblur={(event) => finishRename(entry, event.currentTarget.value)}
                   />
                 {:else}
-                  <span class="nm">{entry.name}</span>
+                  <span class="nm" title={entry.style?.alias ? entry.name : undefined}>{shownName(entry)}</span>
                 {/if}
               </div>
               {#if pane.searching}<div role="gridcell" class="dim">{location(entry)}</div>{/if}
               <div role="gridcell" class="dim">{formatDate(entry.modified)}</div>
               {#if !pane.searching}<div role="gridcell" class="dim">{typeName(entry)}</div>{/if}
               <div role="gridcell" class="dim size">{formatSize(entry.size)}</div>
+              {#if tagged}<div role="gridcell" class="tags">{#each entry.style?.tags ?? [] as tag (tag)}<span class="tag">{tag}</span>{/each}</div>{/if}
             {:else}
               <div role="gridcell" class="placeholder"></div>
             {/if}
@@ -280,6 +285,12 @@
     border-radius: var(--radius-s);
   }
   .searching .cols { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) 150px 84px; }
+  .tagged .cols { grid-template-columns: minmax(0, 1fr) 150px 128px 84px 168px; }
+  .searching.tagged .cols { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) 150px 84px 168px; }
+  .tags-head { padding-left: 4px; }
+  .tags { display: flex; gap: 4px; min-width: 0; overflow: hidden; }
+  .tag { flex: 0 1 auto; min-width: 0; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); font-size: 11px; line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row.sel .tag { background: color-mix(in srgb, currentColor 18%, transparent); }
   .hdr {
     position: sticky;
     top: 0;

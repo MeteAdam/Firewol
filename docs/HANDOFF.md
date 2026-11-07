@@ -44,10 +44,10 @@ cargo build --release --locked -p firewol-tauri --features custom-protocol
 | Interface types | `npm run check` |
 | Memory and performance gate | `.\scripts\Measure-M4Gate.ps1 -App .\target\release\firewol-tauri.exe -Fixture <M0 fixture>` |
 | UI Automation stress | `.\scripts\Test-UiaStress.ps1 -App <exe> -Folder <100k folder>` |
-| Interface self-test | `.\scripts\Test-Interface.ps1` (disposable fixture, isolated `LOCALAPPDATA`); `main.json` lists 57 steps and the detached tab reports from `window-1.json` |
+| Interface self-test | `.\scripts\Test-Interface.ps1` (disposable fixture, isolated `LOCALAPPDATA`); `main.json` lists 71 steps and the detached tab reports from `window-1.json` |
 | Window screenshot | `powershell.exe -File .\scripts\Capture-Window.ps1 -ProcessId <pid> -OutputPath <png> -TitleLike Firewol` |
 
-The 100,000-file and 1,000,000-record fixture used by every gate run is `target/verify-m3-be5d47eaa6cc4d62b64e597855550377/fixture` (ignored by Git). Recreate one with `firewol-m0.exe prepare 100000 1000000` and `FIREWOL_M0_ROOT` (see README › Reproduce the M0 measurement). The self-test fixture is a folder with `source\note.txt` and an empty `dest`.
+The 100,000-file and 1,000,000-record fixture used by every gate run is `target/verify-m3-be5d47eaa6cc4d62b64e597855550377/fixture` (ignored by Git). Recreate one with `firewol-m0.exe prepare 100000 1000000` and `FIREWOL_M0_ROOT` (see README › Reproduce the M0 measurement). The self-test fixture is a folder with `source\note.txt` and an empty `dest`; the folder-style steps style and then clear `source\z-folder`.
 
 The gate and UIA scripts isolate `LOCALAPPDATA` and `WEBVIEW2_USER_DATA_FOLDER` under `target/`, so they never touch your real settings. Their reports land in `target/measure-m4-*` and `target/uia-*`.
 
@@ -73,7 +73,7 @@ The gate and UIA scripts isolate `LOCALAPPDATA` and `WEBVIEW2_USER_DATA_FOLDER` 
 | Tauri contract | `src-tauri/src/contract.rs` → generated `src/lib/bindings/*.ts`, re-exported by `src/lib/contract.ts` |
 | Tauri commands, windows, WebView2 settings | `src-tauri/src/main.rs` |
 | Panes, history, folder snapshots, item identities | `src-tauri/src/folders.rs` |
-| Interface | `src/App.svelte` (shell, menus, toast, benchmark, self-test), `src/lib/FileList.svelte` (virtual grid), `src/lib/pane.svelte.ts` (pane model), `src/lib/theme.css` (tokens and shared controls), `src/lib/Icon.svelte` |
+| Interface | `src/App.svelte` (shell, menus, toast, benchmark, self-test), `src/lib/FileList.svelte` (virtual grid), `src/lib/pane.svelte.ts` (pane model), `src/lib/theme.css` (tokens and shared controls), `src/lib/Icon.svelte`, `src/lib/FolderStyleSheet.svelte` and `src/lib/styles.ts` (folder styles) |
 | Design | `docs/DESIGN.md`; mockup canvas linked there (private Artifact) |
 
 ## Decisions and why

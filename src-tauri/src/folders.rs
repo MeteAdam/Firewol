@@ -1,14 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use firewol_core::explorer::{
-    Cancellation, Directory, Filters, History, Item, ItemId, ItemPage, PAGE_SIZE, SearchIndex,
-    SearchQuery, SearchReader, Sort, SortColumn, data_dir, display_path, page,
+    Cancellation, Directory, Filters, FolderKey, FolderStyle, History, Item, ItemId, ItemPage,
+    PAGE_SIZE, SearchIndex, SearchQuery, SearchReader, Sort, SortColumn, data_dir, display_path,
+    page,
 };
 
 use crate::contract::{
@@ -24,6 +25,8 @@ pub enum Notice {
 }
 
 pub type Notify = Arc<dyn Fn(Notice) + Send + Sync>;
+pub type Styles = BTreeMap<FolderKey, FolderStyle>;
+type StyleSource = Arc<dyn Fn() -> Styles + Send + Sync>;
 
 /// Open folder snapshots, keyed by the id the interface holds, and the panes showing them.
 #[derive(Default)]
@@ -31,6 +34,7 @@ pub struct Folders {
     next: AtomicU64,
     open: Mutex<HashMap<u64, Arc<Folder>>>,
     panes: Mutex<HashMap<String, Pane>>,
+    styles: OnceLock<StyleSource>,
 }
 
 struct Folder {
@@ -60,6 +64,16 @@ struct Pane {
 }
 
 impl Folders {
+    /// Sets where listings read folder styles from (the shared settings), once at startup.
+    pub fn use_styles(&self, source: impl Fn() -> Styles + Send + Sync + 'static) {
+        let _ = self.styles.set(Arc::new(source));
+    }
+
+    /// Read per page rather than cached, so every listed page shows the latest saved styles.
+    fn styles(&self) -> Styles {
+        self.styles.get().map(|source| source()).unwrap_or_default()
+    }
+
     /// Opens `path` (or the history entry `step` names) in `pane` and updates its history.
     pub fn navigate(
         &self,
@@ -202,13 +216,14 @@ impl Folders {
             sort_ms,
             page: Page {
                 sorted: complete,
-                ..convert(first)
+                ..convert(first, &self.styles())
             },
         })
     }
 
     pub fn page(&self, id: u64, offset: u32, sort: SortView) -> Result<Page> {
         let folder = self.get(id)?;
+        let styles = self.styles();
         let sort = sort_core(sort);
         *lock(&folder.sort) = sort;
         let mut directory = lock(&folder.directory);
@@ -216,7 +231,7 @@ impl Folders {
         let items = directory.list_dir(page(offset), &folder.cancel)?;
         Ok(Page {
             sorted: directory.is_sorted(),
-            ..convert(items)
+            ..convert(items, &styles)
         })
     }
 
@@ -318,7 +333,9 @@ impl Folders {
             filters: Filters::default(),
             page: page(offset),
         };
-        Ok(convert(reader.search(&query, &cancel)?))
+        let items = reader.search(&query, &cancel)?;
+        drop(search);
+        Ok(convert(items, &self.styles()))
     }
 
     fn close(&self, id: u64) {
@@ -441,16 +458,16 @@ pub fn item_id(item: &ItemRef) -> Result<ItemId> {
     ))
 }
 
-fn convert(page: ItemPage) -> Page {
+fn convert(page: ItemPage, styles: &Styles) -> Page {
     Page {
         offset: page.offset,
         has_more: page.has_more,
         sorted: false,
-        items: page.items.iter().map(entry).collect(),
+        items: page.items.iter().map(|item| entry(item, styles)).collect(),
     }
 }
 
-fn entry(item: &Item) -> Entry {
+fn entry(item: &Item, styles: &Styles) -> Entry {
     Entry {
         name: item.name().to_string_lossy().into_owned(),
         path: text(&item.path),
@@ -462,6 +479,12 @@ fn entry(item: &Item) -> Entry {
             .attributes
             .is_some_and(|attributes| attributes & FILE_ATTRIBUTE_HIDDEN != 0),
         id: item.id.as_ref().map(item_ref),
+        style: item
+            .id
+            .as_ref()
+            .filter(|_| item.directory)
+            .and_then(|id| styles.get(&FolderKey::from(id)))
+            .map(crate::settings::style_view),
     }
 }
 
@@ -518,6 +541,47 @@ mod tests {
         assert_eq!(lock(&folders.open).len(), 1);
         folders.close_pane("detached", "main:1");
         assert!(lock(&folders.open).is_empty() && lock(&folders.panes).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn listings_attach_folder_styles_by_identity() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let styled = fixture.path().join("styled");
+        std::fs::create_dir(&styled)?;
+        std::fs::create_dir(fixture.path().join("plain"))?;
+        std::fs::write(fixture.path().join("file.txt"), "x")?;
+        let key = FolderKey::from(&ItemId::at(styled)?);
+        let folders = Folders::default();
+        folders.use_styles(move || {
+            Styles::from([(
+                key,
+                FolderStyle {
+                    alias: "Work".into(),
+                    tags: vec!["alpha".into()],
+                    ..FolderStyle::default()
+                },
+            )])
+        });
+        let navigation = folders.navigate(
+            "main",
+            "main:1",
+            Some(&text(fixture.path())),
+            Step::New,
+            SortView::default(),
+            Arc::new(|_| {}),
+        )?;
+        let items = &navigation.folder.page.items;
+        let alias = |name: &str| {
+            items
+                .iter()
+                .find(|entry| entry.name == name)
+                .and_then(|entry| entry.style.as_ref())
+                .map(|style| style.alias.clone())
+        };
+        assert_eq!(alias("styled").as_deref(), Some("Work"));
+        assert_eq!(alias("plain"), None);
+        assert_eq!(alias("file.txt"), None);
         Ok(())
     }
 }

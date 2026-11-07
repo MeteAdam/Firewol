@@ -100,6 +100,8 @@ pub struct MenuEntryView {
     pub color: Option<[u8; 3]>,
 }
 
+/// A folder's alias, icon colour, icon glyph and tags. Sent to `set_folder_style`, where an
+/// empty style (or `null`) removes the customization.
 #[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct FolderStyleView {
@@ -190,6 +192,8 @@ pub struct Entry {
     pub modified: Option<i64>,
     pub hidden: bool,
     pub id: Option<ItemRef>,
+    /// The folder style matched by identity when the page was listed; `null` for files.
+    pub style: Option<FolderStyleView>,
 }
 
 #[derive(Serialize, TS)]
@@ -276,11 +280,21 @@ pub struct ClipboardState {
     pub cut: bool,
 }
 
+/// A pinned folder. `item` is its identity (when the folder exists), which the interface
+/// matches against `SettingsView.folders` so aliases and colours follow style edits live.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct Pin {
+    pub name: String,
+    pub path: String,
+    pub item: Option<ItemRef>,
+}
+
 /// Emitted as `session-changed` to every window when pins or the clipboard change.
 #[derive(Clone, Serialize, TS)]
 #[ts(export)]
 pub struct SessionState {
-    pub pins: Vec<Segment>,
+    pub pins: Vec<Pin>,
     pub clipboard: Option<ClipboardState>,
 }
 

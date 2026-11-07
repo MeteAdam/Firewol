@@ -14,13 +14,13 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use contract::{
-    ClipboardState, IndexState, ItemRef, Navigation, OperationDone, Page, SessionState, Startup,
-    Step, TransferPhase, TransferStatus,
+    ClipboardState, FolderStyleView, IndexState, ItemRef, Navigation, OperationDone, Page, Pin,
+    SessionState, SettingsView, Startup, Step, TransferPhase, TransferStatus,
 };
 use firewol_core::explorer::{
-    MenuAction, Operation, Session, TransferState, actions, data_dir, home,
+    ItemId, MenuAction, Operation, Session, TransferState, actions, data_dir, home,
 };
-use folders::{Folders, Notice, Notify, item_id, lock, segment, text};
+use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::{
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
     WindowEvent,
@@ -88,6 +88,10 @@ async fn startup(
         || *STARTED.get_or_init(Instant::now),
         |request| request.requested,
     );
+    let session = {
+        let files = files.0.clone();
+        blocking(move || Ok(session_state(&files))).await?
+    };
     Ok(Startup {
         label,
         adopt: request.as_ref().and_then(|request| request.adopt.clone()),
@@ -105,7 +109,7 @@ async fn startup(
             0
         },
         idle_ms: setting("FIREWOL_SPIKE_IDLE_MS", 10_000),
-        session: session_state(&files.0),
+        session,
         locale: user_locale(),
         since_start_ms: started.elapsed().as_secs_f64() * 1000.0,
     })
@@ -204,24 +208,31 @@ async fn search(state: State<'_, App>, id: u64, text: String, offset: u32) -> Re
     blocking(move || folders.search(id, text, offset)).await
 }
 
+// Session state opens each pin to learn its identity, so these commands stay off the main thread.
 #[tauri::command]
-fn session(files: State<'_, Files>) -> SessionState {
-    session_state(&files.0)
+async fn session(files: State<'_, Files>) -> Result<SessionState, String> {
+    let files = files.0.clone();
+    blocking(move || Ok(session_state(&files))).await
 }
 
 #[tauri::command]
-fn set_clipboard(
+async fn set_clipboard(
     app: AppHandle,
     files: State<'_, Files>,
     items: Vec<ItemRef>,
     cut: bool,
 ) -> Result<SessionState, String> {
-    let items = items.iter().map(item_id).collect::<anyhow::Result<_>>();
-    files
-        .0
-        .set_clipboard(items.map_err(message)?, cut)
+    let items = items
+        .iter()
+        .map(item_id)
+        .collect::<anyhow::Result<_>>()
         .map_err(message)?;
-    Ok(broadcast(&app, &files.0))
+    let files = files.0.clone();
+    blocking(move || {
+        files.set_clipboard(items, cut)?;
+        Ok(broadcast(&app, &files))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -335,6 +346,24 @@ async fn update_settings(
     .await
 }
 
+/// Saves or clears a folder's style and sends the new settings to every window.
+#[tauri::command]
+async fn set_folder_style(
+    app: AppHandle,
+    files: State<'_, Files>,
+    folder: ItemRef,
+    style: Option<FolderStyleView>,
+) -> Result<SettingsView, String> {
+    let files = files.0.clone();
+    let folder = item_id(&folder).map_err(message)?;
+    blocking(move || {
+        let view = settings::set_folder_style(&files, &folder, style)?;
+        app.emit(contract::SETTINGS_CHANGED, &view)?;
+        Ok(view)
+    })
+    .await
+}
+
 #[tauri::command]
 fn operation_busy(files: State<'_, Files>) -> bool {
     files.0.busy()
@@ -408,7 +437,14 @@ fn session_state(session: &Session) -> SessionState {
             .settings()
             .pins
             .iter()
-            .map(|pin| segment(pin))
+            .map(|pin| {
+                let segment = segment(pin);
+                Pin {
+                    name: segment.name,
+                    path: segment.path,
+                    item: ItemId::at(pin.clone()).ok().as_ref().map(item_ref),
+                }
+            })
             .collect(),
         clipboard: session.clipboard().map(|clipboard| ClipboardState {
             count: clipboard.items.len() as u32,
@@ -615,7 +651,12 @@ fn main() {
                     },
                 );
             })?;
-            app.manage(Files(Arc::new(session)));
+            let session = Arc::new(session);
+            let styles = session.clone();
+            app.state::<App>()
+                .folders
+                .use_styles(move || styles.settings().folders);
+            app.manage(Files(session));
             build_window(app.handle(), "main")?;
             Ok(())
         })
@@ -653,6 +694,7 @@ fn main() {
             toggle_pin,
             get_settings,
             update_settings,
+            set_folder_style,
             operation_busy,
             run_menu_action,
             run_as_administrator,

@@ -11,11 +11,13 @@ import type {
   SortView,
   SortColumn,
 } from "./contract";
+import { hasTags } from "./styles";
 
 export const PAGE = 128;
 export const itemKey = (item: ItemRef) => `${item.volume}:${item.index}:${item.path}`;
 // Pages farther than this from the newest page are dropped to bound memory.
 const KEEP = PAGE * 6;
+const tagged = (items: Entry[]) => items.some((entry) => hasTags(entry.style));
 
 /** One folder view. Navigation history lives in the core; this keeps what the list renders. */
 export class Pane {
@@ -25,6 +27,8 @@ export class Pane {
   scroll = $state(0);
   // Listing data is replaced, never mutated, so it skips Svelte's per-field deep proxies.
   folder = $state.raw<FolderView>();
+  /** The open folder's identity; kept while the tab is suspended so its alias still shows. */
+  identity = $state.raw<ItemRef | null>(null);
   count = $state(0);
   complete = $state(false);
   pages = $state.raw<Record<number, Entry[]>>({});
@@ -42,6 +46,9 @@ export class Pane {
   index = $state<"none" | "building" | "ready">("none");
   indexCount = $state(0);
   error = $state("");
+  // Set once a listed page shows a tagged folder and kept until the next folder, so the Tags
+  // column does not come and go while scrolling.
+  #tagged = $state(false);
   #anchor = -1;
   #pending = new Map<number, number>();
   #revision = 0;
@@ -55,6 +62,10 @@ export class Pane {
 
   get searching() {
     return this.query.trim().length > 0;
+  }
+
+  get tagged() {
+    return this.searching ? tagged(this.results?.items ?? []) : this.#tagged;
   }
 
   get rows() {
@@ -156,6 +167,8 @@ export class Pane {
     this.pageVersion++;
     this.#pending.clear();
     this.folder = view;
+    this.identity = view.item;
+    this.#tagged = tagged(view.page.items);
     this.path = view.path;
     this.label = view.segments.at(-1)?.name ?? view.path;
     this.count = view.count;
@@ -237,6 +250,7 @@ export class Pane {
       }
       // A short page that is still growing is fetched again after the next progress event.
       if (page.items.length < PAGE && page.hasMore) return;
+      if (tagged(page.items)) this.#tagged = true;
       const next = { ...this.pages, [offset]: page.items };
       for (const key of Object.keys(next).map(Number)) {
         if (Math.abs(key - offset) > KEEP) delete next[key];
@@ -246,6 +260,34 @@ export class Pane {
       this.error = String(reason);
     } finally {
       if (this.#pending.get(offset) === revision) this.#pending.delete(offset);
+    }
+  }
+
+  /** Re-reads the loaded pages (or results) in place so rows show changed folder styles. */
+  async restyle() {
+    const folder = this.folder;
+    if (!folder) return;
+    if (this.searching) {
+      const search = this.#search;
+      if (this.index !== "ready") return;
+      const page = await api.search(folder.id, this.query, 0).catch(() => undefined);
+      if (page && search === this.#search && this.folder?.id === folder.id) this.results = page;
+      return;
+    }
+    const revision = this.#revision;
+    const offsets = Object.keys(this.pages).map(Number);
+    try {
+      const pages = await Promise.all(offsets.map((offset) => api.listPage(folder.id, offset, this.sort)));
+      if (revision !== this.#revision || this.folder?.id !== folder.id) return;
+      const next = { ...this.pages };
+      offsets.forEach((offset, index) => {
+        const page = pages[index];
+        if (page.items.length === PAGE || !page.hasMore) next[offset] = page.items;
+      });
+      this.pages = next;
+      this.#tagged = Object.values(next).some(tagged);
+    } catch (reason) {
+      this.error = String(reason);
     }
   }
 

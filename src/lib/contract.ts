@@ -10,6 +10,7 @@ export type { OperationDone } from "./bindings/OperationDone";
 export type { Page } from "./bindings/Page";
 export type { Segment } from "./bindings/Segment";
 export type { SessionState } from "./bindings/SessionState";
+export type { Pin } from "./bindings/Pin";
 export type { Startup } from "./bindings/Startup";
 export type { Step } from "./bindings/Step";
 export type { TransferStatus } from "./bindings/TransferStatus";

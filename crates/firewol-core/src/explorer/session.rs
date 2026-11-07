@@ -9,8 +9,8 @@ use std::thread;
 use anyhow::{Context, Result, ensure};
 
 use super::{
-    ItemId, MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations, Settings, TransferControl,
-    TransferProgress, TransferRequest,
+    FolderKey, FolderStyle, ItemId, MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations,
+    Settings, TransferControl, TransferProgress, TransferRequest,
 };
 
 const HISTORY_LIMIT: usize = 64;
@@ -178,6 +178,22 @@ impl Session {
         let settings = Settings::update(&self.data, apply)?;
         *lock(&self.settings) = settings.clone();
         Ok(settings)
+    }
+
+    /// Saves the alias, colour, icon and tags of a folder, keyed by its identity so they follow
+    /// renames and moves on the same volume. A default (empty) style removes the customization.
+    pub fn set_folder_style(&self, folder: &ItemId, style: FolderStyle) -> Result<Settings> {
+        let style = style.normalized()?;
+        let file = folder.verify()?;
+        ensure!(file.metadata()?.is_dir(), "Select a folder to customize it");
+        let key = FolderKey::from(folder);
+        self.update_settings(|settings| {
+            if style == FolderStyle::default() {
+                settings.folders.remove(&key);
+            } else {
+                settings.folders.insert(key, style);
+            }
+        })
     }
 
     /// Pins the folder, or unpins it when it is already pinned. Returns whether it is pinned.

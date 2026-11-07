@@ -1,7 +1,7 @@
 <script lang="ts">
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
   import { api } from "./lib/api";
   import {
@@ -14,6 +14,8 @@
     type SettingsPatch,
     type AppearanceView,
     type Entry,
+    type FolderStyleView,
+    type ItemRef,
     type FolderProgress,
     type IndexState,
     type OperationDone,
@@ -23,6 +25,7 @@
   } from "./lib/contract";
   import FileList from "./lib/FileList.svelte";
   import FolderIcon from "./lib/FolderIcon.svelte";
+  import FolderStyleSheet from "./lib/FolderStyleSheet.svelte";
   import { formatCount, formatSize, useLocale } from "./lib/format";
   import Icon from "./lib/Icon.svelte";
   import { Pane } from "./lib/pane.svelte";
@@ -30,8 +33,11 @@
   import { details, isCustom, labelOf, menuRows, parentPath, type MenuContext, type MenuRow } from "./lib/menu";
   import Sheet from "./lib/Sheet.svelte";
   import Settings from "./lib/Settings.svelte";
+  import { styleKey, styleMap, tint } from "./lib/styles";
   import TabBar from "./lib/TabBar.svelte";
   import { PaneSlot, folderTab, restore, snapshot, type Tab } from "./lib/tabs.svelte";
+
+  type Check = (step: string, ok: boolean, detail?: string) => void;
 
   const QUERIES = ["ré", "cord", "port", "résumé", "record-0000"];
 
@@ -59,6 +65,7 @@
   let fatal = $state("");
   let searchField: HTMLInputElement | undefined = $state();
   let settingsSection = $state("appearance");
+  let folderSheet = $state<{ item: ItemRef; name: string; path: string }>();
   let addressField: HTMLInputElement | undefined = $state();
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let transferTimer: ReturnType<typeof setInterval> | undefined;
@@ -67,7 +74,12 @@
   const active = $derived(activeTab?.kind === "folder" ? activeTab.pane : undefined);
   const otherTab = $derived(slots[activeIndex === 0 ? 1 : 0]?.active);
   const other = $derived(otherTab?.kind === "folder" ? otherTab.pane : undefined);
-  const title = $derived(activeTab?.kind === "settings" ? "Settings" : active?.label ?? "Firewol");
+  // Tabs, the title and pins look styles up by identity, so they follow edits at once.
+  const styles = $derived(styleMap(settings));
+  const styleOf = (id?: ItemRef | null) => (id ? styles.get(styleKey(id)) : undefined);
+  const paneLabel = (pane: Pane) => styleOf(pane.identity)?.alias || pane.label;
+  const tabStyle = (tab: Tab) => (tab.kind === "folder" ? styleOf(tab.pane.identity) : undefined);
+  const title = $derived(activeTab?.kind === "settings" ? "Settings" : active ? paneLabel(active) : "Firewol");
   // Settings alone in the window replaces the folder chrome, as in the approved mockup.
   const settingsOnly = $derived(slots.length === 1 && activeTab?.kind === "settings");
   const focused = $derived(active?.focusedEntry);
@@ -76,6 +88,16 @@
 
   $effect(() => {
     document.title = `${title} – Firewol`;
+  });
+
+  // Listed rows carry their style from the core, so shown pages are re-read when styles change.
+  let stylesSeen: string | undefined;
+  $effect(() => {
+    const next = JSON.stringify(settings?.folders ?? []);
+    untrack(() => {
+      if (stylesSeen !== undefined && stylesSeen !== next) for (const pane of panes) void pane.restyle();
+      stylesSeen = next;
+    });
   });
 
   function stored(key: string, fallback: string) {
@@ -258,10 +280,11 @@
   }
 
   /** Runs a saved menu entry; programs start in the core, which re-checks identity and policy. */
-  async function runEntry(row: MenuRow) {
+  async function runEntry(row: MenuRow, onItem: boolean) {
     menu = undefined;
     const action = row.entry.action;
-    const item = focused;
+    // The empty-area menu acts on the open folder, as its enable rules assume.
+    const item = onItem ? focused : undefined;
     try {
       if (isCustom(action)) {
         const target = item?.id ?? active?.folder?.item;
@@ -281,11 +304,31 @@
         case "recycle": recycle(); break;
         case "undo": undo(); break;
         case "refresh": await active?.refresh(); break;
-        case "folder_style": break;
+        case "folder_style": customizeFolder(item); break;
       }
     } catch (reason) {
       notify(String(reason), { error: true });
     }
+  }
+
+  /** Opens the folder sheet for a folder item, or for the open folder from the empty area. */
+  function customizeFolder(item: Entry | undefined) {
+    const folder = active?.folder;
+    const target = item ? (item.directory ? item.id : null) : folder?.item;
+    if (!target || (!item && !folder)) {
+      notify("Select a folder to customize it", { error: true });
+      return;
+    }
+    folderSheet = item
+      ? { item: target, name: item.name, path: item.path }
+      : { item: target, name: folder!.segments.at(-1)?.name ?? folder!.path, path: folder!.path };
+  }
+
+  async function saveFolderStyle(style: FolderStyleView | null) {
+    const sheet = folderSheet;
+    if (!sheet) return;
+    settings = withPending(await api.setFolderStyle(sheet.item, style));
+    folderSheet = undefined;
   }
 
   async function saveOrThrow(patch: SettingsPatch) {
@@ -404,6 +447,8 @@
   }
 
   function shortcut(event: KeyboardEvent) {
+    // An open sheet is modal: window shortcuts must not act behind it.
+    if (document.querySelector("dialog[open]")) return;
     const key = event.key.toLowerCase();
     const typing = event.target instanceof HTMLInputElement;
     if (event.key === "Escape" && menu) menu = undefined;
@@ -441,7 +486,7 @@
   }
 
   /** Drives the Settings tab through its real controls; leaves the appearance as it found it. */
-  async function settingsSelfTest(check: (step: string, ok: boolean, detail?: string) => void) {
+  async function settingsSelfTest(check: Check) {
     const root = document.querySelector<HTMLElement>(".settings")!;
     const shell = document.querySelector<HTMLElement>(".shell")!.parentElement!;
     const original = settings!.appearance;
@@ -523,6 +568,87 @@
     check("administrator policy returns to Standard", true);
     return initialMenu;
   }
+
+  /**
+   * Styles the fixture's `z-folder` through the context menu and the real sheet, checks the list,
+   * Tags column, tab, title and pin, then clears the style from the empty-area menu.
+   */
+  async function folderStyleSelfTest(check: Check, pane: Pane, folderPath: string) {
+    const ALIAS = "Self-test alias";
+    const sheet = () => document.querySelector<HTMLDialogElement>('dialog[aria-label="Customize folder"]');
+    const field = (label: string) => sheet()!.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+    const sheetButton = (name: string) =>
+      [...sheet()!.querySelectorAll<HTMLButtonElement>("button")].find((item) => item.getAttribute("aria-label") === name || item.textContent?.trim() === name)!;
+    const typeText = (input: HTMLInputElement, value: string) => {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const openSheet = async (kind: "item" | "area") => {
+      showMenu(kind, 40, 40);
+      await painted();
+      const item = [...document.querySelectorAll<HTMLButtonElement>(".menu .mi")].find((entry) => entry.querySelector(".label")?.textContent?.trim() === "Customize folder…");
+      if (!item?.disabled) item?.click();
+      await waitFor(() => !!sheet(), 5000, "the folder sheet");
+      return item;
+    };
+    const tabLabel = () => document.querySelector(".tab.on .label > span:last-child")?.textContent;
+    const pinLabels = () => [...document.querySelectorAll(".sidebar .pin > span:last-child")].map((label) => label.textContent);
+
+    await pane.open(folderPath);
+    const row = (pane.pages[0] ?? []).findIndex((entry) => entry.name === "z-folder");
+    await pane.select(row);
+    const folder = pane.entry(row);
+    check("find z-folder", !!folder?.id, names(pane).join());
+    const key = styleKey(folder!.id!);
+    const item = await openSheet("item");
+    check("Customize folder… is enabled on a folder", !!item && !item.disabled);
+    check("the sheet opens for the right-clicked folder", !!sheet()?.textContent?.includes(folder!.path));
+    typeText(field("Display name"), ALIAS);
+    sheetButton("Teal").click();
+    typeText(field("Add tag"), "alpha, beta");
+    await painted();
+    sheetButton("Save").click();
+    await waitFor(() => !sheet() && pane.entry(row)?.style?.alias === ALIAS, 5000, "the saved style");
+    const saved = (await api.getSettings()).folders.find((styled) => styleKey(styled) === key)?.style;
+    check("the sheet saves alias, colour and tags through the core", saved?.alias === ALIAS && saved.color?.join() === "20,160,160" && saved.tags.join() === "alpha,beta" && saved.icon === "", JSON.stringify(saved));
+    await painted();
+    const cells = document.getElementById(`pane-0-row-${row}`);
+    check("the alias replaces the name in the list", cells?.querySelector(".nm")?.textContent === ALIAS, cells?.textContent ?? "no row");
+    const shape = cells?.querySelector(".folder-icon");
+    check("the folder colour tints the folder icon", !!shape && getComputedStyle(shape).color === "rgb(20, 160, 160)", shape ? getComputedStyle(shape).color : "no icon");
+    const tags = [...(cells?.querySelectorAll(".tag") ?? [])].map((tag) => tag.textContent).join();
+    check("a Tags column lists the folder's tags", !!document.querySelector(".tags-head") && tags === "alpha,beta", tags);
+    await pane.refresh();
+    check("a reload lists the style from the core", pane.entry(row)?.style?.alias === ALIAS && pane.tagged);
+
+    await pane.open(folder!.path);
+    await painted();
+    check("the alias names the tab and the window", tabLabel() === ALIAS && document.title.startsWith(ALIAS), `${tabLabel()} / ${document.title}`);
+    await togglePin(folder!.path);
+    await painted();
+    check("the pinned folder shows the alias", pinLabels().includes(ALIAS), pinLabels().join());
+    await openSheet("area");
+    check("the empty-area menu edits the open folder's saved style", field("Display name").value === ALIAS && sheetButton("Clear style") !== undefined);
+    sheetButton("Icon ★").click();
+    sheetButton("Save").click();
+    await waitFor(() => !sheet() && styleOf(pane.identity)?.icon === "★", 5000, "the icon glyph");
+    await painted();
+    const glyph = document.querySelector(".sidebar .pin .folder-glyph");
+    check("the icon glyph replaces the folder shape in the folder colour", glyph?.textContent === "★" && getComputedStyle(glyph).color === "rgb(20, 160, 160)", glyph?.outerHTML ?? "no glyph");
+    await openSheet("area");
+    sheetButton("Clear style").click();
+    await waitFor(() => !sheet() && !styleOf(pane.identity), 5000, "the cleared style");
+    await painted();
+    const remaining = (await api.getSettings()).folders.length;
+    check("Clear style removes the alias everywhere", tabLabel() === "z-folder" && pinLabels().includes("z-folder") && remaining === 0, `${tabLabel()} / ${pinLabels().join()} / ${remaining}`);
+    await togglePin(folder!.path);
+    await pane.back();
+    await waitFor(() => pane.folder?.path === folderPath && !pane.tagged, 5000, "the unstyled listing");
+    await painted();
+    check("the Tags column hides when no listed folder has tags", !document.querySelector(".tags-head") && !pane.entry(row)?.style);
+  }
+
+  const names = (pane: Pane) => (pane.pages[0] ?? []).map((entry) => entry.name);
 
   async function waitFor(ready: () => boolean, timeout: number, what: string) {
     const start = performance.now();
@@ -622,7 +748,6 @@
       steps.push({ step, ok, detail });
       if (!ok) throw new Error(`${step}: ${detail ?? "failed"}`);
     };
-    const names = (pane: Pane) => (pane.pages[0] ?? []).map((entry) => entry.name);
     const pick = (pane: Pane, name: string) => {
       const row = names(pane).indexOf(name);
       check(`find ${name}`, row >= 0, names(pane).join(", "));
@@ -765,6 +890,7 @@
       check("Reset restores the core default menu", true);
       press("w");
       await waitFor(() => tabs().length === count && shown(), 5000, "closing Settings again");
+      await folderStyleSelfTest(check, active!, sourcePath);
       const sidebarBefore = sidebar;
       press("b");
       await waitFor(() => sidebar !== sidebarBefore, 5000, "Ctrl+B");
@@ -843,7 +969,7 @@
 <div class="fw p-{preset}" class:dark use:colors={settings?.appearance}>
   <div class="shell">
     <header class="titlebar" data-tauri-drag-region>
-      {#if slots.length === 1}<TabBar slot={slots[0]} onselect={tab => selectTab(slots[0], tab)} onclose={tab => closeTab(slots[0], tab)} onnew={() => newTab()} ondetach={tab => detachTab(slots[0], tab)} />{:else}<span class="app-title">Firewol</span>{/if}
+      {#if slots.length === 1}<TabBar slot={slots[0]} styleOf={tabStyle} onselect={tab => selectTab(slots[0], tab)} onclose={tab => closeTab(slots[0], tab)} onnew={() => newTab()} ondetach={tab => detachTab(slots[0], tab)} />{:else}<span class="app-title">Firewol</span>{/if}
       <div class="drag" data-tauri-drag-region></div>
       <div class="caption {settings?.appearance.caption_shape ?? 'rounded'}" class:left={settings?.appearance.caption_left}>
         <button class="cap" aria-label="Minimize" onclick={() => appWindow.minimize()}><Icon name="minimize" size={14} weight={1.5} /></button>
@@ -910,8 +1036,9 @@
             ><Icon name="pin" size={14} /></button>
           </div>
           {#each session.pins as pin (pin.path)}
-            <button class="pin" class:on={pin.path === active?.folder?.path} onclick={() => active?.open(pin.path)}>
-              <FolderIcon /><span>{pin.name}</span>
+            {@const style = styleOf(pin.item)}
+            <button class="pin" class:on={pin.path === active?.folder?.path} title={pin.path} onclick={() => active?.open(pin.path)}>
+              <FolderIcon color={tint(style)} glyph={style?.icon} /><span>{style?.alias || pin.name}</span>
             </button>
           {:else}
             <p class="muted side-empty">Pin folders you use often. They stay here until you unpin them.</p>
@@ -922,14 +1049,14 @@
         {#each slots as slot, index (slot)}
           <div class="pane-slot">
           {#if slots.length > 1}
-            <TabBar {slot} onselect={tab => selectTab(slot, tab)} onclose={tab => closeTab(slot, tab)} onnew={() => newTab(undefined, slot)} ondetach={tab => detachTab(slot, tab)} />
+            <TabBar {slot} styleOf={tabStyle} onselect={tab => selectTab(slot, tab)} onclose={tab => closeTab(slot, tab)} onnew={() => newTab(undefined, slot)} ondetach={tab => detachTab(slot, tab)} />
             {#if slot.active?.kind === "folder"}
               {@const pane = slot.active.pane}
               <div class="pane-nav">
                 <button class="ib" title="Back" aria-label="Pane back" disabled={!pane.canBack} onclick={() => pane.back()}><Icon name="back" /></button>
                 <button class="ib" title="Forward" aria-label="Pane forward" disabled={!pane.canForward} onclick={() => pane.forward()}><Icon name="forward" /></button>
                 <input class="field pane-address" aria-label="Pane folder path" value={pane.path} onfocus={() => (activeIndex = index)} onkeydown={(event) => { if (event.key === "Enter") void pane.open(event.currentTarget.value); }} />
-                <input class="field pane-search" aria-label={`Search ${pane.label}`} placeholder={`Search ${pane.label}`} value={pane.query} onfocus={() => (activeIndex = index)} oninput={event => pane.search(event.currentTarget.value)} />
+                <input class="field pane-search" aria-label={`Search ${paneLabel(pane)}`} placeholder={`Search ${paneLabel(pane)}`} value={pane.query} onfocus={() => (activeIndex = index)} oninput={event => pane.search(event.currentTarget.value)} />
               </div>
             {/if}
           {/if}
@@ -995,7 +1122,7 @@
         {@const onItem = menu.kind === "item"}
         {#each menuRows(settings?.menu ?? [], menuContext(onItem)) as row (row.index)}
           {#if row.divider}<div class="sep"></div>{/if}
-          <button class="mi" role="menuitem" disabled={!row.enabled} onclick={() => runEntry(row)}>
+          <button class="mi" role="menuitem" disabled={!row.enabled} onclick={() => runEntry(row, onItem)}>
             {#if row.entry.icon || row.entry.color}
               <span class="glyph" style:color={row.entry.color ? hex(row.entry.color) : undefined}>{#if row.entry.icon}{row.entry.icon}{:else}<Icon name={details(row.entry.action).icon} />{/if}</span>
             {:else}<Icon name={details(row.entry.action).icon} />{/if}
@@ -1029,6 +1156,9 @@
         <button class="mi" role="menuitem" onclick={toggleSplit}><Icon name="split" /><span class="label">{slots.length > 1 ? "Single pane" : "Split view"}</span><span class="sc">Ctrl+\</span></button>
       {/if}
     </div>
+  {/if}
+  {#if folderSheet}
+    <FolderStyleSheet name={folderSheet.name} path={folderSheet.path} style={styleOf(folderSheet.item)} onsave={saveFolderStyle} onclose={() => (folderSheet = undefined)} />
   {/if}
   {#if closeWarning}
     <Sheet title="A file operation is running" onclose={() => (closeWarning = false)}>

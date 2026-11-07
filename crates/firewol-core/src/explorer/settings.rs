@@ -111,6 +111,53 @@ pub struct FolderStyle {
     pub tags: Vec<String>,
 }
 
+impl FolderStyle {
+    pub const MAX_ALIAS: usize = 100;
+    pub const MAX_ICON: usize = 8;
+    pub const MAX_TAG: usize = 32;
+    pub const MAX_TAGS: usize = 8;
+
+    /// Trims the text, drops empty and repeated tags and applies the Win32 editor's limits.
+    /// A style that comes back equal to the default means "no customization".
+    pub fn normalized(self) -> Result<Self> {
+        let alias = self.alias.trim().to_owned();
+        ensure!(
+            alias.chars().count() <= Self::MAX_ALIAS,
+            "Keep the display name within {} characters",
+            Self::MAX_ALIAS
+        );
+        let icon = self.icon.trim().to_owned();
+        ensure!(
+            icon.chars().count() <= Self::MAX_ICON,
+            "Keep the icon within {} characters",
+            Self::MAX_ICON
+        );
+        let mut tags: Vec<String> = Vec::new();
+        for tag in self.tags.iter().map(|tag| tag.trim()) {
+            if tag.is_empty() || tags.iter().any(|existing| existing == tag) {
+                continue;
+            }
+            ensure!(!tag.contains(','), "Tags cannot contain commas");
+            ensure!(
+                tag.chars().count() <= Self::MAX_TAG,
+                "Keep each tag within {} characters",
+                Self::MAX_TAG
+            );
+            tags.push(tag.to_owned());
+        }
+        ensure!(
+            tags.len() <= Self::MAX_TAGS,
+            "Use up to eight tags per folder"
+        );
+        Ok(Self {
+            alias,
+            color: self.color,
+            icon,
+            tags,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MenuAction {

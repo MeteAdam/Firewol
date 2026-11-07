@@ -6,7 +6,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Result, ensure};
-use firewol_core::explorer::{Completion, History, ItemId, Operation, Session};
+use firewol_core::explorer::{
+    Completion, FolderKey, FolderStyle, History, ItemId, Operation, Rgb, Session, Settings,
+};
 
 #[test]
 fn history_steps_back_and_forward_and_drops_forward_entries() {
@@ -114,5 +116,58 @@ fn session_pins_persist_and_reject_empty_clipboard_actions() -> Result<()> {
     assert_eq!(session.settings().pins, vec![folder.clone()]);
     assert!(!session.toggle_pin(&folder)?);
     assert!(session.settings().pins.is_empty());
+    Ok(())
+}
+
+#[test]
+fn folder_styles_follow_identity_normalize_and_clear() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let root = fixture.path().canonicalize()?;
+    let data = root.join("data");
+    let folder = root.join("Projects");
+    fs::create_dir(&folder)?;
+    let file = root.join("note.txt");
+    fs::write(&file, "x")?;
+    let session = Session::open(data.clone(), |_| {})?;
+    let id = ItemId::at(folder.clone())?;
+    let style = FolderStyle {
+        alias: "  Work  ".into(),
+        color: Some(Rgb(1, 2, 3)),
+        icon: " ★ ".into(),
+        tags: vec![" alpha".into(), "".into(), "beta".into(), "alpha".into()],
+    };
+    session.set_folder_style(&id, style)?;
+    // Renaming keeps the identity, so the style follows the folder.
+    let renamed = root.join("Renamed");
+    fs::rename(&folder, &renamed)?;
+    let saved = Settings::load(&data)?;
+    let stored = &saved.folders[&FolderKey::from(&ItemId::at(renamed.clone())?)];
+    assert_eq!(stored.alias, "Work");
+    assert_eq!(stored.icon, "★");
+    assert_eq!(stored.tags, ["alpha", "beta"]);
+    assert!(
+        session
+            .set_folder_style(&ItemId::at(file)?, FolderStyle::default())
+            .is_err()
+    );
+    let too_many = FolderStyle {
+        tags: (0..9).map(|index| format!("t{index}")).collect(),
+        ..FolderStyle::default()
+    };
+    let current = ItemId::at(renamed.clone())?;
+    assert!(session.set_folder_style(&current, too_many).is_err());
+    assert_eq!(session.settings().folders.len(), 1);
+    // The stale path no longer verifies, so a replaced folder is never restyled.
+    assert!(
+        session
+            .set_folder_style(&id, FolderStyle::default())
+            .is_err()
+    );
+    let blank = FolderStyle {
+        alias: "   ".into(),
+        ..FolderStyle::default()
+    };
+    session.set_folder_style(&current, blank)?;
+    assert!(Settings::load(&data)?.folders.is_empty());
     Ok(())
 }

@@ -11,7 +11,11 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-build = "2"
 
 [dependencies]
+anyhow = "1"
 firewol-core = { path = "../crates/firewol-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = "2"
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Globalization"] }
+windows-core = "0.62"

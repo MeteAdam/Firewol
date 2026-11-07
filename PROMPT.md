@@ -1,7 +1,7 @@
 # Firewol File Explorer — Master Specification & Agent Prompt
 
 > **Rol:** Kıdemli Sistem Mimarı, Rust/Sistem Mühendisi ve UI/UX Mühendisi.  
-> **Görev:** Windows Dosya Gezgini'nin (Windows Explorer) hantal, yavaş ve kısıtlayıcı yapısına alternatif; ultra hafif (<150 MB RAM), anlık arama (instant search) yeteneğine sahip, aşırı derecede özelleştirilebilir ve açık kaynaklı yeni nesil bir masaüstü dosya yöneticisi (Firewol) geliştirmek.
+> **Görev:** Windows Dosya Gezgini'nin (Windows Explorer) hantal, yavaş ve kısıtlayıcı yapısına alternatif; ultra hafif (tek pencere ~150 MB RAM), anlık arama (instant search) yeteneğine sahip, aşırı derecede özelleştirilebilir ve açık kaynaklı yeni nesil bir masaüstü dosya yöneticisi (Firewol) geliştirmek.
 
 ---
 
@@ -23,8 +23,8 @@
 
 ## 2. Kesin Kurallar ve Katı Kısıtlamalar (Invariants)
 
-1. **Bellek (RAM) Sınırı (Kati Kural):**
-   * Uygulama arka planda ve çalışma anında **en fazla 150 MB RAM** tüketmelidir.
+1. **Bellek (RAM) Bütçesi:**
+   * Tek pencere boşta **~150 MB** civarında kalmalı; en kötü durumda (4 pencere + indeksleme + transfer) **250 MB'ın altında** olmalıdır (2026-11-07'de 150 MB kesin sınırından gevşetildi).
    * `everything.exe` gibi sürekli arka planda açık kaldığında yüksek RAM tüketen araçların aksine, Firewol belleği şişirmeden anlık arama sunmalıdır.
 2. **Sıfır Dosya Sistemi Kirliliği (Clean Filesystem):**
    * Kullanıcının yaptığı klasör rengi, simge ve etiket özelleştirmeleri dosya sistemine (`desktop.ini` vb.) dokunmaz. Tüm özelleştirmeler Firewol'un yerel hafif konfigürasyon/veritabanı katmanında izole tutulur.
@@ -55,7 +55,7 @@
 * **Everything-Seviyesi Hız, Sıfır RAM Yükü:**
   * Windows Explorer gibi 30 dakika süren dosya taramalarına son; arama sonuçları milisaniyeler içinde (instant) listelenir.
   * NTFS disklerde Master File Table (MFT) ve USN Journal doğrudan okunur; ilk açılışta hızlı ve arka planda hafif bir disk önbelleği (SQLite FTS5 / Tantivy) oluşturulur.
-  * Milyonlarca dosya RAM'e boca edilmez; bellek 150 MB sınırının altında tutulurken anlık sorgulama disk önbelleğinden çekilir.
+  * Milyonlarca dosya RAM'e boca edilmez; bellek bütçesi aşılmadan anlık sorgulama disk önbelleğinden çekilir.
 * **Arama Filtreleri:** Uzantı, dosya boyutu, değiştirilme tarihi ve anlık regex desteği.
 
 ### 4.2. Kapsamlı Özelleştirilebilirlik ve Tema Motoru (Styling & Theme Presets)
@@ -132,8 +132,8 @@
 
 | Metrik | Hedef Değer | Kısıtlama |
 | :--- | :--- | :--- |
-| **Maksimum RAM Tüketimi** | `< 150 MB` | **Kesin Kural / Aşılamaz** |
-| **Boşta Çalışma (Idle) RAM** | `~40 – 70 MB` | Minimum arka plan maliyeti |
+| **Maksimum RAM Tüketimi** | `< 250 MB` | En kötü durum: 4 pencere + indeksleme + transfer |
+| **Boşta Çalışma (Idle) RAM** | `~150 MB` | Tek pencere |
 | **Arama Yanıt Süresi** | `< 100 ms` | Anlık sonuç gösterimi |
 | **100k Dosyalı Dizin Yükleme** | `< 300 ms` | Sanal liste renderlama |
 | **Arayüz Tepki Hızı (UI FPS)**| `60 – 120 FPS`| Donma ve takılma yok |
@@ -170,7 +170,7 @@ Projects/Firewol/
 ## 7. Uygulama Talimatı (Prompt Directive)
 
 Bu şartname doğrultusunda Firewol File Explorer projesini geliştirirken:
-1. Her zaman belirtilen 150 MB RAM kuralını gözetin.
+1. Her zaman belirtilen RAM bütçesini (tek pencere ~150 MB, en kötü durum < 250 MB) gözetin.
 2. Hiçbir Windows kirliliğini (Home sekmesi zorunluluğu, istenmeyen quick-access yerleşimleri) projeye dahil etmeyin; arayüzü tertemiz ve minimal başlatın.
 3. 7 farklı morphism temasını ve yuvarlak renk paleti düzenleyicisini eksiksiz destekleyin.
 4. Nilesoft Shell esintili sağ tık menüsünü hem uygulama içinde tam özelleştirilebilir hem de isteğe bağlı OS entegrasyonuna hazır tasarlayın.

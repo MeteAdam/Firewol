@@ -1,0 +1,47 @@
+<script lang="ts" module>
+  // One outline set (24 px grid, round caps), drawn at 16 px. See docs/DESIGN.md › Iconography.
+  const PATHS = {
+    back: ["M19 12H5M11 6l-6 6 6 6"],
+    forward: ["M5 12h14M13 6l6 6-6 6"],
+    up: ["M12 19V5M6 11l6-6 6 6"],
+    sidebar: ["M5.5 4h13A2.5 2.5 0 0 1 21 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5v-11A2.5 2.5 0 0 1 5.5 4z", "M9 4v16"],
+    split: ["M5.5 4h13A2.5 2.5 0 0 1 21 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5v-11A2.5 2.5 0 0 1 5.5 4z", "M12 4v16"],
+    search: ["M17.5 11a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0z", "M20 20l-4.2-4.2"],
+    refresh: ["M20 12a8 8 0 1 1-2.4-5.7L20 8.5", "M20 4v4.5h-4.5"],
+    chevron: ["M9 6l6 6-6 6"],
+    sortUp: ["M6 15l6-6 6 6"],
+    list: ["M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"],
+    grid: ["M5.5 4h3.5A1.5 1.5 0 0 1 10.5 5.5V9A1.5 1.5 0 0 1 9 10.5H5.5A1.5 1.5 0 0 1 4 9V5.5A1.5 1.5 0 0 1 5.5 4z", "M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9a1.5 1.5 0 0 1-1.5 1.5H15A1.5 1.5 0 0 1 13.5 9V5.5A1.5 1.5 0 0 1 15 4z", "M5.5 13.5h3.5a1.5 1.5 0 0 1 1.5 1.5v3.5A1.5 1.5 0 0 1 9 20H5.5A1.5 1.5 0 0 1 4 18.5V15a1.5 1.5 0 0 1 1.5-1.5z", "M15 13.5h3.5A1.5 1.5 0 0 1 20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15a1.5 1.5 0 0 1-1.5-1.5V15a1.5 1.5 0 0 1 1.5-1.5z"],
+    more: ["M5.5 12h.01M12 12h.01M18.5 12h.01"],
+    plus: ["M12 5v14M5 12h14"],
+    close: ["M17 7L7 17M7 7l10 10"],
+    minimize: ["M5 12h14"],
+    maximize: ["M7.5 5.5h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z"],
+    drive: ["M3 13h18v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", "M3 13l2.6-7.2A2 2 0 0 1 7.5 4.5h9a2 2 0 0 1 1.9 1.3L21 13", "M7 16.5h.01"],
+    file: ["M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z", "M14 3v5h5"],
+    open: ["M3 7.5V6a2 2 0 0 1 2-2h3.6c.6 0 1.2.3 1.6.7L12 6h7a2 2 0 0 1 2 2v1.5", "M3.2 10.5h17.6l-1.6 8a2 2 0 0 1-2 1.5H6.8a2 2 0 0 1-2-1.5z"],
+    window: ["M5.5 5h13A2.5 2.5 0 0 1 21 7.5v10a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5v-10A2.5 2.5 0 0 1 5.5 5z", "M3 9h18M8 5v4"],
+    copy: ["M11 9h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z", "M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5"],
+    palette: ["M12 3a9 9 0 1 0 0 18c1 0 1.6-.8 1.6-1.6 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.7-1.6 1.6-1.6H16a5 5 0 0 0 5-5C21 6.6 17 3 12 3z", "M7.5 11h.01M10 7.5h.01M14.5 7.5h.01"],
+    check: ["M5 12.5l4.5 4.5L19 7.5"],
+  };
+  export type IconName = keyof typeof PATHS;
+</script>
+
+<script lang="ts">
+  let { name, size = 16, weight = 1.7 }: { name: IconName; size?: number; weight?: number } = $props();
+</script>
+
+<svg
+  viewBox="0 0 24 24"
+  width={size}
+  height={size}
+  fill="none"
+  stroke="currentColor"
+  stroke-width={name === "more" ? 3 : weight}
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"
+>
+  {#each PATHS[name] as d}<path {d}></path>{/each}
+</svg>

@@ -1,25 +1,16 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Firewol M0",
+  "productName": "Firewol",
   "version": "0.1.0",
-  "identifier": "dev.firewol.m0",
+  "identifier": "dev.firewol.app",
   "build": {
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "Firewol M0",
-        "width": 900,
-        "height": 680,
-        "minWidth": 520,
-        "minHeight": 420
-      }
-    ],
+    "windows": [],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self'"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self'; img-src 'self' data:"
     }
   },
   "bundle": {

@@ -21,8 +21,10 @@ impl Directory {
         let source = fs::read_dir(&path).with_context(|| format!("List {}", path.display()))?;
         let db = Connection::open("")?;
         crate::index::configure(&db)?;
+        // Pages are read in row order, so a small cache keeps each open pane cheap.
         db.execute_batch(
-            "CREATE TABLE listing (row INTEGER PRIMARY KEY, name BLOB, directory INTEGER)",
+            "PRAGMA cache_size = -1024;
+             CREATE TABLE listing (row INTEGER PRIMARY KEY, name BLOB, directory INTEGER)",
         )?;
         Ok(Self {
             path,

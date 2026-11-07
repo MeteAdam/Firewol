@@ -34,9 +34,11 @@ On 2026-11-07, the existing MSVC x64 toolchain and Windows SDK were verified. Ru
 
 The release UI copied two 4 GiB files in parallel, completed verification, and reported success. A second transfer was paused at 5,385 MiB with no published files, resumed beyond 7,232 MiB, and cancelled before publication. Cancellation removed both staging directories and preserved both sources. The exact-identity Recycle Bin restore and destination-conflict probe also passed. All fixtures and settings were isolated under `target/verify-m3-be5d47eaa6cc4d62b64e597855550377` on the local NTFS drive.
 
-The user also exercised **Run as administrator…** on a disposable executable in an isolated, identity-bound allowlist and pressed **No** in the real Windows UAC dialog. Firewol displayed **Windows elevation was cancelled**, remained responsive, and subsequently returned the expected single result for `fixture.txt` in ordinary folder search. No fixture process remained running. This verifies the M3 administrator-launch cancellation path. The earlier command-line M0 NTFS probe succeeded without a user-observed prompt, so it does not verify the separate NTFS-helper denial path.
+The user also exercised **Run as administrator…** on a disposable executable in an isolated, identity-bound allowlist and pressed **No** in the real Windows UAC dialog. Firewol displayed **Windows elevation was cancelled**, remained responsive, and subsequently returned the expected single result for `fixture.txt` in ordinary folder search. No fixture process remained running. This verifies the M3 administrator-launch cancellation path.
 
-**Release remains blocked.** A 100,000-row list initially presented in 103 ms, scrolled at 88 FPS and verified its last row, but later became unresponsive with desktop UI Automation active. A fresh single-window process reached **555,610,112 bytes of private working set**. Samples of its busy thread ran through Windows accessibility routines. This suggests an accessibility-related enumeration problem; its root cause has not been isolated. The attempted four-window M3 run was stopped, and these results supersede any inference that the earlier memory measurements cover this scenario. NTFS-helper-specific UAC denial is also pending.
+The NTFS-helper denial path was verified separately with the same release build and isolated settings. After **NTFS search…** was confirmed, `consent.exe` showed the Windows UAC prompt on the secure desktop. The prompt was cancelled 3.6 seconds later. Firewol displayed **Windows elevation was cancelled. Folder search is available.**, started no helper process and stayed responsive. Folder search for `fixture.txt` then returned its single result. A process-level watcher recorded the timeline in `target/verify-m4-ntfs-denial-1ba6738177984e04906fb73ed1e14971`.
+
+**Release remains blocked.** A 100,000-row list initially presented in 103 ms, scrolled at 88 FPS and verified its last row, but later became unresponsive with desktop UI Automation active. A fresh single-window process reached **555,610,112 bytes of private working set**. Samples of its busy thread ran through Windows accessibility routines. This suggests an accessibility-related enumeration problem; its root cause has not been isolated. The attempted four-window M3 run was stopped, and these results supersede any inference that the earlier memory measurements cover this scenario. M4 replaces this list control and repeats both measurements.
 
 The fixture's `list.json`, `memory.json`, `large-list-blocker.json`, `large-list-stack.txt` and `uac-ui-denial.json` retain the observations locally. Large transfer payloads were removed after verification; the directory fixture and reports remain. `STATE.md` identifies the next investigation.
 
@@ -45,6 +47,40 @@ For subsequent interactive measurements, `scripts/Measure-Session.ps1` reuses th
 ```powershell
 .\scripts\Measure-Session.ps1 -AppProcessId 12345 -ControlPath .\target\session-control.json -OutputPath .\target\session-memory.json
 ```
+
+## M4.1 interface spike: Tauri v2 and Svelte
+
+M4 replaces the Win32/GDI interface with the design in [docs/DESIGN.md](docs/DESIGN.md). The spike implements the main window with paged browsing, the breadcrumb, folder search, split view, new windows and all seven presets on top of `firewol-core`. Settings, file operations, tabs and transfers still live only in the Win32 build.
+
+```powershell
+npm ci
+npm run build
+cargo build --release --locked -p firewol-tauri --features custom-protocol
+$env:FIREWOL_OPEN = $env:USERPROFILE
+.\target\release\firewol-tauri.exe
+```
+
+WebView2 starts with `--enable-low-end-device-mode` and `--process-per-site`, so every window shares one renderer process, and unfocused windows switch to the low memory target. Dates and numbers use the Windows regional format from `GetUserDefaultLocaleName`. The list's grid is its own scroll container, so UI Automation exposes a scrollable table that contains only the rendered rows.
+
+### M4.1 gate results
+
+On 2026-11-07, `scripts/Measure-M4Gate.ps1` ran the release build on the 100,000-file fixture with its 1,000,000-record index. One window opened the folder, scrolled for 3 s, verified the last row, built the folder index, ran 30 searches and then idled. It then opened three more windows, each with split panes, for eight 100,000-row panes, and ran a concurrent one-million-record index build and a 256 MiB copy.
+
+| Measurement | Result | M4 target |
+| --- | ---: | ---: |
+| One window, idle | 148,525,056 bytes | ~150 MB |
+| Peak across all phases (four windows, eight panes, indexing, copy) | 200,531,968 bytes | < 250,000,000 |
+| In-app navigation into the 100,000-row folder (median of 5) | 24 ms | < 300 ms |
+| Cold start to first visible list | 522 ms (WebView2 ready after 374 ms) | < 300 ms |
+| Scrolling | 165 FPS (other windows 125–131 FPS) | ≥ 60 FPS |
+| Ready-index search p95 (30 queries) | 19.6 ms | < 100 ms |
+| Folder index build (100,000 items) | 554 ms | — |
+
+Without tuning, the same run peaked at 520,949,760 bytes and one idle window used 205,230,080 bytes. Each window then had its own renderer, and fast scrolling grew a Chromium raster and cache pool by about 70 MB per renderer. Low-end device mode removed that growth without a visible change in the Light, Glass and Metal presets.
+
+`scripts/Test-UiaStress.ps1` opens the same folder and runs `scripts/Uia-Client.ps1`. Every 250 ms the client walks all descendants of the window, scrolls the first scrollable element by 7 % and listens to structure and name events for 60 s. The Win32 build completed one walk in 43.8 s and returned 500,037 elements. Its window did not hang in that run; the 555 MB stall above remains unreproduced, but it shows that the owner-data list exposes every row. The spike completed 182 walks with a median of 59 ms and at most 235 elements, scrolled 181 times and never hung. Under this deliberately slow, event-heavy client, the WebView2 browser process queued UI Automation events and the total briefly peaked at 267,722,752 bytes before falling back to 121 MB.
+
+Open items: cold start misses the 300 ms target because WebView2 startup takes about 0.37 s (the Win32 build shows its list in about 0.1 s), and a heavy UI Automation client can push memory above the budget for a short time.
 
 ## M2 navigation and appearance
 
@@ -65,7 +101,7 @@ The release tests cover legacy settings and concurrent writes. Windows UI exerci
 
 `cargo test --release --locked` exercises Windows item identity, copy and undo conflicts, long Unicode paths, paged search and external folder changes. The release executable was also tested with a disposable NTFS volume for UAC-approved volume search, ACL visibility, live journal updates and journal loss recovery.
 
-Three release runs on Windows 11 used a 100,000-row NTFS directory and an index of one million synthetic files. First list presentation took 94–232 ms, ready-index search p95 was 85–97 ms, and native scrolling reached 79–95 FPS. The last virtual row was verified in all three runs. Initial folder indexing took 7.8–10.6 seconds. The folder workload peaked at 9,932,800 bytes of sampled private working set. The explicit UAC-denial exercise remains open.
+Three release runs on Windows 11 used a 100,000-row NTFS directory and an index of one million synthetic files. First list presentation took 94–232 ms, ready-index search p95 was 85–97 ms, and native scrolling reached 79–95 FPS. The last virtual row was verified in all three runs. Initial folder indexing took 7.8–10.6 seconds. The folder workload peaked at 9,932,800 bytes of sampled private working set. The explicit UAC-denial exercise was completed on 2026-11-07 (see Current verification).
 
 A 256 MiB transfer through the release Rust core also completed while the native window was open. The window and the separate transfer probe peaked at a combined 6,180,864 bytes of sampled private working set.
 
@@ -85,7 +121,7 @@ To record native startup and scrolling, set `FIREWOL_M1_LIST_REPORT` to a new JS
 
 The NTFS probe opens a UAC prompt for a one-shot read-only helper. It checks the MFT for the reference of a disposable file opened under the caller's regular permissions. The Recycle Bin probe checks the original file identity and bytes after restore, and verifies that a destination conflict preserves the replacement file. [MFT enumeration](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_enum_usn_data) · [RecycleItem](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-itransfersource-recycleitem)
 
-Build and measure the Tauri comparison with Node, npm and the WebView2 Runtime.
+Build and measure the Tauri comparison with Node, npm and the WebView2 Runtime. These commands apply to the M0 prototype at commit `59062e9`; `src-tauri` and `src` now hold the M4 interface spike.
 
 ```powershell
 npm ci

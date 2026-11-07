@@ -292,6 +292,122 @@
     if (into && items.length > 0) void start(api.transfer(items, into, moveItems));
   }
 
+  // In-window drag and drop, as in the Win32 build: pointer events, not HTML5 or OLE, so
+  // virtual rows can leave the DOM mid-drag. Drop on a folder row or tile, another pane,
+  // a folder tab or a pin; Shift moves, Esc cancels.
+  const MAX_DRAG = 32;
+  type DropTarget = { item: ItemRef; name: string; path: string; element: HTMLElement };
+  let drag = $state<{ entries: Entry[]; from: string; x: number; y: number; move: boolean; target?: DropTarget; refusal: string }>();
+  let dragFrame = 0;
+  const samePath = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  const within = (path: string, folder: string) => samePath(path, folder) || path.toLowerCase().startsWith(`${folder.toLowerCase()}\\`);
+
+  function dropAt(x: number, y: number): DropTarget | undefined {
+    const element = document.elementFromPoint(x, y);
+    if (!(element instanceof Element)) return undefined;
+    const pane = (id: string | undefined) => allPanes().find((candidate) => candidate.id === id);
+    const row = element.closest<HTMLElement>("[data-row]");
+    const list = element.closest<HTMLElement>("[data-pane]");
+    if (row && list) {
+      const entry = pane(list.dataset.pane)?.entry(Number(row.dataset.row));
+      if (entry?.directory && entry.id) return { item: entry.id, name: entry.style?.alias || entry.name, path: entry.path, element: row };
+    }
+    if (list) {
+      const target = pane(list.dataset.pane);
+      if (target?.folder?.item) return { item: target.folder.item, name: paneLabel(target), path: target.folder.path, element: list };
+    }
+    const tab = element.closest<HTMLElement>("[data-tab]");
+    const tabPane = pane(tab?.dataset.tab);
+    if (tab && tabPane?.identity) return { item: tabPane.identity, name: paneLabel(tabPane), path: tabPane.path, element: tab };
+    const pin = element.closest<HTMLElement>("[data-pin]");
+    const pinned = session.pins.find((candidate) => candidate.path === pin?.dataset.pin);
+    if (pin && pinned?.item) return { item: pinned.item, name: styleOf(pinned.item)?.alias || pinned.name, path: pinned.path, element: pin };
+    return undefined;
+  }
+
+  function hover(x: number, y: number, move: boolean) {
+    if (!drag) return;
+    const target = dropAt(x, y);
+    const refusal = !target ? "Drop on a folder, a pane, a tab or a pin"
+      : samePath(target.path, drag.from) ? "Already in this folder"
+      : drag.entries.some((entry) => within(target.path, entry.path)) ? "A folder cannot go into itself"
+      : drag.entries.length > MAX_DRAG ? `Drag at most ${MAX_DRAG} items`
+      : "";
+    if (drag.target?.element !== target?.element || !!drag.refusal !== !!refusal) {
+      drag.target?.element.classList.remove("drop-target");
+      if (!refusal) target?.element.classList.add("drop-target");
+    }
+    drag.x = x;
+    drag.y = y;
+    drag.move = move;
+    drag.target = target;
+    drag.refusal = refusal;
+  }
+
+  /** Scrolls a list while the pointer rests near its top or bottom edge. */
+  function autoScroll() {
+    if (!drag) return;
+    const list = document.elementFromPoint(drag.x, drag.y)?.closest<HTMLElement>('[role="grid"]');
+    if (list) {
+      const box = list.getBoundingClientRect();
+      const edge = 40;
+      const speed = drag.y < box.top + edge ? -(box.top + edge - drag.y) : drag.y > box.bottom - edge ? drag.y - (box.bottom - edge) : 0;
+      if (speed) {
+        list.scrollTop += Math.round(speed / 2);
+        hover(drag.x, drag.y, drag.move);
+      }
+    }
+    dragFrame = requestAnimationFrame(autoScroll);
+  }
+
+  function beginDrag(event: PointerEvent, source: Pane) {
+    const entries = source.selectedEntries().filter((entry) => entry.id);
+    if (entries.length === 0 || !source.folder) return;
+    menu = undefined;
+    try { (event.currentTarget as Element | null)?.setPointerCapture(event.pointerId); } catch { /* Synthetic pointers have no capture. */ }
+    drag = { entries, from: source.folder.path, x: event.clientX, y: event.clientY, move: event.shiftKey, refusal: "" };
+    hover(event.clientX, event.clientY, event.shiftKey);
+    window.addEventListener("pointermove", dragMove, true);
+    window.addEventListener("pointerup", dragUp, true);
+    window.addEventListener("pointercancel", endDrag, true);
+    window.addEventListener("keydown", dragKey, true);
+    window.addEventListener("keyup", dragKey, true);
+    dragFrame = requestAnimationFrame(autoScroll);
+  }
+
+  function dragMove(event: PointerEvent) { hover(event.clientX, event.clientY, event.shiftKey); }
+
+  function dragKey(event: KeyboardEvent) {
+    if (!drag) return;
+    if (event.key === "Escape") endDrag();
+    else if (event.key === "Shift") hover(drag.x, drag.y, event.type === "keydown");
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function dragUp(event: PointerEvent) {
+    const current = drag;
+    if (current) hover(event.clientX, event.clientY, event.shiftKey);
+    const target = drag?.target;
+    const refusal = drag?.refusal;
+    endDrag();
+    if (!current || !target || refusal) return;
+    const items = current.entries.flatMap((entry) => (entry.id ? [entry.id] : []));
+    void start(api.transfer(items, target.item, current.move));
+  }
+
+  function endDrag() {
+    drag?.target?.element.classList.remove("drop-target");
+    drag = undefined;
+    cancelAnimationFrame(dragFrame);
+    window.removeEventListener("pointermove", dragMove, true);
+    window.removeEventListener("pointerup", dragUp, true);
+    window.removeEventListener("pointercancel", endDrag, true);
+    window.removeEventListener("keydown", dragKey, true);
+    window.removeEventListener("keyup", dragKey, true);
+  }
+
   function rename(entry: Entry, name: string) {
     if (entry.id) void start(api.rename(entry.id, name));
   }
@@ -918,6 +1034,64 @@
     check("Ctrl+Shift+6 returns to details", !(await api.getSettings()).grid);
   }
 
+  /** M4.3-g: in-window drag and drop with synthetic pointer events over the real layout. */
+  async function dragSteps(source: Pane, target: Pane, check: Check) {
+    const center = (element: Element) => { const box = element.getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; };
+    const rowOf = (pane: Pane, name: string) => document.querySelector<HTMLElement>(`[data-pane="${pane.id}"] [data-row="${names(pane).indexOf(name)}"]`)!;
+    const listOf = (pane: Pane) => document.querySelector<HTMLElement>(`[data-pane="${pane.id}"] [role="grid"]`)!;
+    const pointer = (element: Element, type: string, at: { x: number; y: number }, shiftKey = false) =>
+      element.dispatchEvent(new PointerEvent(type, { clientX: at.x, clientY: at.y, buttons: type === "pointerup" ? 0 : 1, pointerId: 1, isPrimary: true, shiftKey, bubbles: true, cancelable: true }));
+    const ghost = () => document.querySelector(".drag-ghost")?.textContent ?? "";
+    const grab = async (pane: Pane, name: string, over: Element, shiftKey = false) => {
+      const row = rowOf(pane, name);
+      const from = center(row);
+      row.dispatchEvent(new MouseEvent("mousedown", { clientX: from.x, clientY: from.y, button: 0, bubbles: true }));
+      await waitFor(() => pane.focusedEntry?.name === name, 2000, `select ${name}`);
+      pointer(row, "pointermove", { x: from.x + 20, y: from.y });
+      pointer(row, "pointermove", center(over), shiftKey);
+      await tick();
+    };
+    const escape = async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await tick(); };
+    const drop = async (over: Element, shiftKey = false) => {
+      const done = nextDone();
+      pointer(over, "pointerup", center(over), shiftKey);
+      const result = await done;
+      await Promise.all([source.refresh(), target.refresh()]);
+      return result;
+    };
+    await grab(source, "file2.txt", listOf(target));
+    check("dragging over the other pane offers a copy", /Copy to dest/.test(ghost()) && !!listOf(target).closest(".list")?.classList.contains("drop-target"), ghost());
+    await escape();
+    check("Escape cancels a drag", !document.querySelector(".drag-ghost") && !document.querySelector(".drop-target"));
+    await grab(source, "file2.txt", listOf(target), true);
+    check("Shift turns the drag into a move", /Move to dest/.test(ghost()), ghost());
+    let result = await drop(listOf(target), true);
+    check("a Shift drop moves into the other pane", result.succeeded && names(target).includes("file2.txt") && !names(source).includes("file2.txt"), result.message);
+    const undone = nextDone();
+    undo();
+    result = await undone;
+    await Promise.all([source.refresh(), target.refresh()]);
+    check("undo returns the dragged item", result.succeeded && names(source).includes("file2.txt") && !names(target).includes("file2.txt"), result.message);
+    const tabOf = document.querySelector<HTMLElement>(`[data-tab="${target.id}"]`)!;
+    await grab(source, "file2.txt", tabOf);
+    check("a folder tab is a drop target", /Copy to dest/.test(ghost()) && tabOf.classList.contains("drop-target"), ghost());
+    await escape();
+    await grab(source, "file10.txt", rowOf(source, "note.txt"));
+    check("the item's own folder refuses the drop", /Already in this folder/.test(ghost()) && !document.querySelector(".drop-target"), ghost());
+    await escape();
+    await grab(source, "z-folder", rowOf(source, "z-folder"));
+    check("a folder refuses a drop into itself", /cannot go into itself/.test(ghost()), ghost());
+    await escape();
+    await grab(source, "file10.txt", rowOf(source, "z-folder"));
+    check("a folder row is a drop target", /Copy to z-folder/.test(ghost()) && rowOf(source, "z-folder").classList.contains("drop-target"), ghost());
+    result = await drop(rowOf(source, "z-folder"));
+    check("dropping on a folder row copies into it", result.succeeded && names(source).includes("file10.txt"), result.message);
+    const removed = nextDone();
+    undo();
+    check("undo removes the dropped copy", (await removed).succeeded);
+    await source.refresh();
+  }
+
   async function selfTest(info: Startup) {
     const steps: { step: string; ok: boolean; detail?: string }[] = [];
     const check = (step: string, ok: boolean, detail?: string) => {
@@ -990,6 +1164,7 @@
       result = await settle(target, done);
       check("undo recycle", result.succeeded && names(target).includes("note.txt"), result.message);
       await transferSteps(source, target, check);
+      await dragSteps(source, target, check);
       await togglePin(destPath);
       check("pin", session.pins.some((pin) => pin.path === destPath));
       await togglePin(destPath);
@@ -1212,7 +1387,7 @@
           </div>
           {#each session.pins as pin (pin.path)}
             {@const style = styleOf(pin.item)}
-            <button class="pin" class:on={pin.path === active?.folder?.path} title={pin.path} onclick={() => active?.open(pin.path)}>
+            <button class="pin" data-pin={pin.path} class:on={pin.path === active?.folder?.path} title={pin.path} onclick={() => active?.open(pin.path)}>
               <FolderIcon color={tint(style)} glyph={style?.icon} /><span>{style?.alias || pin.name}</span>
             </button>
           {:else}
@@ -1251,6 +1426,7 @@
             onmenu={(x, y, onRow) => showMenu(onRow ? "item" : "area", x, y)}
             onrename={rename}
             onrecycle={recycle}
+            ondrag={(event) => { if (slot.active?.kind === "folder") beginDrag(event, slot.active.pane); }}
           />
           {/key}
           {:else if slot.active?.kind === "settings" && settings}
@@ -1284,6 +1460,14 @@
       {/if}
     </footer>
   </div>
+
+  {#if drag}
+    <div class="drag-ghost" class:refused={!!drag.refusal} style:left={`${drag.x + 14}px`} style:top={`${drag.y + 12}px`} role="status" aria-live="polite">
+      <Icon name={drag.refusal ? "close" : drag.move ? "transfer" : "copy"} size={14} />
+      <span>{drag.entries.length === 1 ? (drag.entries[0].style?.alias || drag.entries[0].name) : `${drag.entries.length} items`}</span>
+      <span class="muted">{drag.refusal || `${drag.move ? "Move" : "Copy"} to ${drag.target?.name}${drag.move ? "" : " · Shift moves"}`}</span>
+    </div>
+  {/if}
 
   {#if toast}
     <div class="toast" class:error={toast.error} role="alert">
@@ -1410,6 +1594,10 @@
   .grow { flex-grow: 1; }
   .error { color: var(--text); }
   :global(.ib.xs) { width: 22px; height: 22px; border-radius: 999px; }
+  .drag-ghost { position: fixed; z-index: 40; display: flex; align-items: center; gap: 8px; max-width: 420px; padding: 6px 12px; border: var(--border-w) solid var(--border); border-radius: var(--radius-s); background: var(--surface-2); box-shadow: var(--shadow-pop); backdrop-filter: var(--blur); font-size: 12px; pointer-events: none; white-space: nowrap; }
+  .drag-ghost span { overflow: hidden; text-overflow: ellipsis; }
+  .drag-ghost.refused { color: var(--muted); }
+  :global(.tab.drop-target), :global(.pin.drop-target) { outline: 2px dashed var(--accent); outline-offset: -2px; }
   .toast { position: fixed; left: 50%; bottom: 52px; z-index: 30; display: flex; align-items: center; gap: 12px; max-width: min(640px, calc(100% - 32px)); padding: 8px 8px 8px 16px; transform: translateX(-50%); border: var(--border-w) solid var(--border); border-radius: var(--radius); background: var(--surface-2); box-shadow: var(--shadow-pop); backdrop-filter: var(--blur); font-size: 13px; }
   .toast.error { border-color: #c42b1c; }
   .toast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

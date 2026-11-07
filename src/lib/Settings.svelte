@@ -21,7 +21,7 @@
     { id: "appearance", name: "Appearance", icon: "palette", keys: "theme preset light dark follow windows colours colors wheel background surface text accent folder label window controls caption buttons side shape fill hover" },
     { id: "menu", name: "Context menu", icon: "menu", keys: "context menu right click actions hide show reorder custom action executable reset" },
     { id: "search", name: "Search", icon: "search", keys: "search find folder shortcut regex regular expression filters extension size date ntfs volume drive scope index" },
-    { id: "transfers", name: "Transfers", icon: "transfer", keys: "transfers copy move verify pause resume cancel" },
+    { id: "transfers", name: "Transfers", icon: "transfer", keys: "transfers copy move verify pause resume cancel speed graph drag drop" },
     { id: "admin", name: "Administrator", icon: "shield", keys: "administrator admin elevation uac run as allowlist executable any" },
     { id: "about", name: "About", icon: "info", keys: "about version data settings file license" },
   ] as const;
@@ -199,7 +199,8 @@
         <p class="muted">The scope chip can search a whole local NTFS drive instead of the folder. Firewol asks first, then Windows asks for administrator approval for a read-only helper that reads the drive's change journal. The drive index lasts for the session and is shared by every window; stop it from the scope chip.</p>
       {:else if section === "transfers"}
         <h2>Transfers</h2>
-        <p class="muted">Copies are verified against the source before they count as done. Pause, resume or cancel the active transfer from the status bar.</p>
+        <p class="muted">Copies are verified against the source before they count as done. The transfer button in the status bar opens a speed graph with Pause, Resume and Cancel, and keeps the last result until you dismiss it.</p>
+        <p class="muted">Drag items onto a folder, the other pane, a tab or a pin to copy them there; hold Shift to move instead, or press Esc to cancel.</p>
         <p class="muted">Ctrl+Z undoes the last move, rename or Recycle Bin operation.</p>
       {:else if section === "about"}
         <h2>About Firewol</h2>

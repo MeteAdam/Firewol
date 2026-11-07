@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory)] [string] $App,
     [Parameter(Mandatory)] [string] $Folder,
-    [ValidateRange(10, 600)] [int] $Seconds = 60
+    [ValidateRange(10, 600)] [int] $Seconds = 60,
+    # Tauri only: open in grid view with 96 px tiles, the most cells per screen.
+    [switch] $Grid
 )
 
 # Opens a large folder, runs Uia-Client.ps1 against the window and samples the private working
@@ -51,6 +53,10 @@ try {
     foreach ($name in $variables.Keys) {
         $saved[$name] = [Environment]::GetEnvironmentVariable($name)
         [Environment]::SetEnvironmentVariable($name, $variables[$name])
+    }
+    if ($Grid) {
+        $settings = New-Item -ItemType Directory -Force -Path (Join-Path $variables.LOCALAPPDATA 'Firewol')
+        Set-Content -LiteralPath (Join-Path $settings.FullName 'explorer.json') -Value '{"version":2,"grid":true,"tile":96}' -Encoding ascii
     }
     $arguments = if ($tauri) { @() } else { @('--open', "`"$folderPath`"") }
     $appProcess = Start-Process -FilePath $appPath -ArgumentList $arguments -PassThru

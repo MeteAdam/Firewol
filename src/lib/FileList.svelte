@@ -26,6 +26,7 @@
     onmenu,
     onrename,
     onrecycle,
+    ondrag,
   }: {
     pane: Pane;
     id: string;
@@ -39,6 +40,8 @@
     onmenu: (x: number, y: number, onRow: boolean) => void;
     onrename: (entry: Entry, name: string) => void;
     onrecycle: () => void;
+    /** A pressed row moved far enough to drag the selection; the window takes over. */
+    ondrag?: (event: PointerEvent) => void;
   } = $props();
 
   // The grid is its own scroll container so assistive technology gets a scrollable table.
@@ -121,9 +124,28 @@
     event.preventDefault();
   }
 
+  // A plain press on a selected row keeps the selection, so it can be dragged; it selects
+  // only that row if the button comes up without a drag.
+  let pressed: { row: number; x: number; y: number; keep: boolean } | undefined;
+
   function press(event: MouseEvent, row: number) {
     if (event.button !== 0) return;
-    pane.select(row, event.ctrlKey ? "toggle" : event.shiftKey ? "range" : "single");
+    const keep = !event.ctrlKey && !event.shiftKey && pane.isSelected(row);
+    if (keep) pane.selected = row;
+    else void pane.select(row, event.ctrlKey ? "toggle" : event.shiftKey ? "range" : "single");
+    pressed = pane.renaming === null ? { row, x: event.clientX, y: event.clientY, keep } : undefined;
+  }
+
+  function pointerMove(event: PointerEvent) {
+    if (!pressed || !ondrag || !(event.buttons & 1)) return;
+    if (Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) < 6) return;
+    pressed = undefined;
+    ondrag(event);
+  }
+
+  function pointerUp() {
+    if (pressed?.keep) void pane.select(pressed.row);
+    pressed = undefined;
   }
 
   function rowMenu(event: MouseEvent, row: number) {
@@ -205,7 +227,7 @@
   />
 {/snippet}
 
-<section class="list" class:tiles class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"}>
+<section data-pane={pane.id} class="list" class:tiles class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"}>
   <div
     class="grid"
     role="grid"
@@ -220,6 +242,8 @@
     bind:clientWidth={width}
     onscroll={() => { scroll = grid.scrollTop; pane.scroll = scroll; }}
     onkeydown={keydown}
+    onpointermove={pointerMove}
+    onpointerup={pointerUp}
     onfocusin={onactivate}
     onmousedown={onactivate}
     oncontextmenu={areaMenu}
@@ -240,6 +264,7 @@
                 class:hidden={entry?.hidden}
                 role="gridcell"
                 id={`${id}-row-${row}`}
+                data-row={row}
                 aria-colindex={(row % columns) + 1}
                 aria-selected={pane.isSelected(row)}
                 title={entry ? (pane.searching ? location(entry) : entry.style?.alias ? entry.name : undefined) : undefined}
@@ -284,6 +309,7 @@
             class:hidden={entry?.hidden}
             role="row"
             id={`${id}-row-${row}`}
+            data-row={row}
             aria-rowindex={row + 2}
             aria-selected={pane.isSelected(row)}
             onmousedown={(event) => press(event, row)}
@@ -406,6 +432,8 @@
   .tile .nm { display: -webkit-box; max-width: 100%; overflow: hidden; line-height: 16px; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   .tile .rename { flex: none; width: 100%; margin: 0; text-align: center; }
   .tile .placeholder { width: 60%; }
+  :global(.drop-target).row, :global(.drop-target).tile { outline: 2px dashed var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .list:global(.drop-target) { outline: 2px dashed var(--accent); outline-offset: -4px; }
   .placeholder { height: 8px; width: 40%; border-radius: 4px; background: var(--sep); }
   .empty { position: absolute; inset: 56px 24px auto 24px; margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

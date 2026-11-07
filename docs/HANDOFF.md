@@ -6,7 +6,7 @@ Details that do not fit in the 25-line `STATE.md`. Read `STATE.md` first; this f
 
 - Branch `m4-interface` (local repository, no remote). `main` still ends at the M3 commit `f8a5659`; the M4 branch fast-forwards onto it.
 - Commits: `4c2cdb0` (M4 plan, NTFS-helper UAC verification, design, M4.1 spike and gate), `a9840cb` (M4.2 session layer, contract, file operations), then one commit per slice (`git log --oneline`).
-- M4.2 and M4.3-a to M4.3-f are done (settings, sorting, tabs, Settings tab, folder styles, search). Next: M4.3-g (drag and drop, grid view, Transfers popover), M4.3-h, then M4.4. The slice plan is `nce-kalan-ad-mlar-i-in-cuddly-harbor.md` in the project root (untracked).
+- M4.2 and M4.3-a to M4.3-g are done (settings, sorting, tabs, Settings tab, folder styles, search, Transfers popover, grid view, drag and drop). Next: M4.3-h (multi-item recycle, breadcrumb collapsing, context-menu icon row and keys, size differences, package name), then M4.4. The slice plan is `nce-kalan-ad-mlar-i-in-cuddly-harbor.md` in the project root (untracked).
 - The Win32 build (`target/release/firewol-win32.exe`, built 2026-11-06 from M3) still has every M3 feature and stays the reference until M4.4. It does not include the M4 core changes until it is rebuilt.
 
 ## Try the new interface
@@ -21,6 +21,8 @@ $env:FIREWOL_OPEN = 'D:\Some\Folder'; .\target\release\firewol-tauri.exe
 File operations are real: cut, paste, rename and Recycle Bin change files on disk. Undo (Ctrl+Z or the toast button) reverses them within the running session. Settings and pins live in `%LOCALAPPDATA%\Firewol\explorer.json`, the same file the Win32 build uses. WebView2 keeps its profile in `%LOCALAPPDATA%\dev.firewol.app`. Search indexes are temporary `search-<pid>-*` folders under `%LOCALAPPDATA%\Firewol`; the next start removes those of processes that ended.
 
 Search: typing searches the folder and its subfolders after a 150 ms pause; while the field is in use, the scope chip switches to a whole local NTFS drive (in-window confirmation, then UAC for the read-only helper; the drive index is shared by all windows until stopped from the chip), `.*` enables regular expressions, and Filters narrows by extension, size and modified date (local days). Esc closes a popover, then clears the search.
+
+Transfers and views: the core samples a running transfer or undo every 250 ms and broadcasts `transfer-progress` (60-sample speed ring, planned bytes and items, last result); the status bar button opens the speed graph with Pause, Resume and Cancel. Drag items (pointer events inside the window, no OLE) onto a folder row or tile, the other pane, a folder tab or a pin to copy; Shift moves, Esc cancels, the list scrolls near its edges. The toolbar switch, the `⋯` menu, Ctrl+Shift+2/3/4 (160/128/96 px tiles), Ctrl+Shift+6 (details) and Ctrl+wheel set the view, which is saved in the core settings (`grid`, `tile`).
 
 Shortcuts: Ctrl+L path, Ctrl+F search, Alt+Left/Right/Up, F5, Ctrl+N new window, Ctrl+\ split view, Ctrl+B sidebar, Ctrl+X/C/V, F2 rename, Del recycle, Ctrl+Z undo, Ctrl or Shift click for multi-selection, Shift+F10 or the Menu key for the context menu. Themes are under `⋯` in the toolbar.
 
@@ -45,11 +47,11 @@ cargo build --release --locked -p firewol-tauri --features custom-protocol
 | Format | `cargo fmt --all -- --check` |
 | Interface types | `npm run check` |
 | Memory and performance gate | `.\scripts\Measure-M4Gate.ps1 -App .\target\release\firewol-tauri.exe -Fixture <M0 fixture>` |
-| UI Automation stress | `.\scripts\Test-UiaStress.ps1 -App <exe> -Folder <100k folder>` |
-| Interface self-test | `.\scripts\Test-Interface.ps1` (disposable fixture, isolated `LOCALAPPDATA`); `main.json` lists 87 steps and the detached tab reports from `window-1.json` |
+| UI Automation stress | `.\scripts\Test-UiaStress.ps1 -App <exe> -Folder <100k folder>` (add `-Grid` for 96 px tiles) |
+| Interface self-test | `.\scripts\Test-Interface.ps1` (disposable fixture, isolated `LOCALAPPDATA`); `main.json` lists 112 steps and the detached tab reports from `window-1.json` |
 | Window screenshot | `powershell.exe -File .\scripts\Capture-Window.ps1 -ProcessId <pid> -OutputPath <png> -TitleLike Firewol` |
 
-The 100,000-file and 1,000,000-record fixture used by every gate run is `target/verify-m3-be5d47eaa6cc4d62b64e597855550377/fixture` (ignored by Git). Recreate one with `firewol-m0.exe prepare 100000 1000000` and `FIREWOL_M0_ROOT` (see README › Reproduce the M0 measurement). The self-test fixture is a folder with `source\note.txt` and an empty `dest`; the folder-style steps style and then clear `source\z-folder`, which also holds `report-2026.log` (4 KB) and `many\item-000.txt` to `item-299.txt` for the search steps. Before it starts the interface, the script checks that an unelevated `--ntfs-helper` call exits without a window or WebView2 profile.
+The 100,000-file and 1,000,000-record fixture used by every gate run is `target/verify-m3-be5d47eaa6cc4d62b64e597855550377/fixture` (ignored by Git). Recreate one with `firewol-m0.exe prepare 100000 1000000` and `FIREWOL_M0_ROOT` (see README › Reproduce the M0 measurement). The self-test fixture is a folder with `source\note.txt` and `dest\big.bin` (512 MiB, zero-filled, for pausing and cancelling a copy); the folder-style steps style and then clear `source\z-folder`, which also holds `report-2026.log` (4 KB) and `many\item-000.txt` to `item-299.txt` for the search steps. Before it starts the interface, the script checks that an unelevated `--ntfs-helper` call exits without a window or WebView2 profile.
 
 The gate and UIA scripts isolate `LOCALAPPDATA` and `WEBVIEW2_USER_DATA_FOLDER` under `target/`, so they never touch your real settings. Their reports land in `target/measure-m4-*` and `target/uia-*`.
 

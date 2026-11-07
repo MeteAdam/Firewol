@@ -216,6 +216,8 @@ export class Pane {
     if (navigation !== this.#navigation) return;
     const view = result.folder;
     const reload = step === "reload" && view.path === (this.folder?.path ?? this.path);
+    // The core reloads an open folder in place; its live index survives under the same id.
+    const sameFolder = reload && view.id === this.folder?.id;
     this.#revision++;
     this.pageVersion++;
     this.#pending.clear();
@@ -239,8 +241,10 @@ export class Pane {
       this.query = "";
       this.#clearResults();
     }
-    this.index = "none";
-    this.indexCount = 0;
+    if (!sameFolder) {
+      this.index = "none";
+      this.indexCount = 0;
+    }
     if (reload) await this.remap();
     else if (view.count > 0) void this.select(0);
     else {

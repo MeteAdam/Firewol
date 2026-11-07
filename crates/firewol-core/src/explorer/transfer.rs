@@ -352,6 +352,54 @@ fn remove(file: &File, ignore_read_only: bool) -> windows::core::Result<()> {
     }
 }
 
+/// Removes staging folders that a transfer left behind when Firewol was closed or killed mid-copy:
+/// `.firewol-XXXXXX` folders holding only a partial `payload`. A running transfer keeps its stage
+/// open, so the exclusive open below fails and that stage stays.
+pub(super) fn sweep_stale_stages(into: &Path) {
+    let Ok(entries) = std::fs::read_dir(into) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let stage_name = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(".firewol-"));
+        if !stage_name.is_some_and(|suffix| {
+            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        }) || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        let stage = entry.path();
+        let Ok(children) = std::fs::read_dir(&stage) else {
+            continue;
+        };
+        let children: Vec<_> = children.flatten().collect();
+        if children.iter().any(|child| {
+            child.file_name() != "payload" || !child.file_type().is_ok_and(|kind| kind.is_file())
+        }) {
+            continue;
+        }
+        let exclusive = |path: &Path, flags: FILE_FLAGS_AND_ATTRIBUTES| {
+            OpenOptions::new()
+                .access_mode((DELETE | FILE_READ_ATTRIBUTES).0)
+                .share_mode(0)
+                .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | flags).0)
+                .open(path)
+        };
+        let Ok(guard) = exclusive(&stage, FILE_FLAG_BACKUP_SEMANTICS) else {
+            continue;
+        };
+        let emptied = children.iter().all(|child| {
+            exclusive(&child.path(), FILE_FLAGS_AND_ATTRIBUTES(0))
+                .is_ok_and(|payload| remove(&payload, true).is_ok())
+        });
+        if emptied {
+            let _ = remove(&guard, false);
+        }
+    }
+}
+
 pub(super) fn place(
     item: &ItemId,
     into: &ItemId,

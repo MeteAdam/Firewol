@@ -12,7 +12,7 @@ use windows::Win32::UI::Shell::{
     FOLDERID_RecycleBinFolder, IContextMenu, IEnumShellItems, IShellItem, ITransferSource,
     KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHCreateItemFromParsingName,
     SHCreateItemFromRelativeName, SHGetKnownFolderItem, SICHINT_TEST_FILESYSPATH_IF_NOT_EQUAL,
-    SIGDN_FILESYSPATH, TSF_NORMAL,
+    SIGDN_FILESYSPATH, SIGDN_PARENTRELATIVEPARSING, TSF_NORMAL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, HMENU, SW_SHOWNORMAL};
 use windows::core::{PCWSTR, s};
@@ -46,22 +46,35 @@ impl Drop for PopupMenu {
 pub(crate) fn shell_item(path: &Path) -> Result<IShellItem> {
     let expected = display_path(path);
     let wide: Vec<_> = expected.encode_wide().chain([0]).collect();
-    let item: IShellItem = if wide.len() > 260 {
+    if wide.len() > 260 {
+        // Beyond MAX_PATH the Shell reports a truncated 8.3 path, so verify each long level by its
+        // parsing name under a parent that was itself verified.
         let parent = shell_item(path.parent().context("Missing Shell parent")?)?;
-        let name: Vec<_> = path
-            .file_name()
-            .context("Missing Shell item name")?
-            .encode_wide()
-            .chain([0])
-            .collect();
-        unsafe { SHCreateItemFromRelativeName(&parent, PCWSTR(name.as_ptr()), None::<&IBindCtx>) }
-    } else {
-        unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>) }
+        let name = path.file_name().context("Missing Shell item name")?;
+        let name_wide: Vec<_> = name.encode_wide().chain([0]).collect();
+        let item: IShellItem = unsafe {
+            SHCreateItemFromRelativeName(&parent, PCWSTR(name_wide.as_ptr()), None::<&IBindCtx>)
+        }
+        .with_context(|| format!("Open Shell item {}", path.display()))?;
+        let parsed = unsafe { item.GetDisplayName(SIGDN_PARENTRELATIVEPARSING) }
+            .context("Read the Shell item's name")?;
+        let parsed_name = unsafe { OsString::from_wide(parsed.as_wide()) };
+        unsafe { CoTaskMemFree(Some(parsed.0.cast())) };
+        ensure!(
+            parsed_name == name,
+            "Windows resolved the path to a different Shell item: {}",
+            parsed_name.to_string_lossy()
+        );
+        return Ok(item);
     }
-    .with_context(|| format!("Open Shell item {}", path.display()))?;
+    let item: IShellItem =
+        unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>) }
+            .with_context(|| format!("Open Shell item {}", path.display()))?;
+    let resolved = display_path(&filesystem_path(&item)?);
     ensure!(
-        display_path(&filesystem_path(&item)?) == expected,
-        "Windows resolved the path to a different Shell item"
+        resolved == expected,
+        "Windows resolved the path to a different Shell item: {}",
+        resolved.to_string_lossy()
     );
     Ok(item)
 }

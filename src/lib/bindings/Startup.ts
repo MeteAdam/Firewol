@@ -6,7 +6,12 @@ export type Startup = { label: string, adopt: TabSnapshot | null, path: string, 
 /**
  * Runs the interface's file-operation self-test (`FIREWOL_SELF_TEST`) and reports it.
  */
-selfTest: boolean, extraWindows: number, idleMs: number, session: SessionState, 
+selfTest: boolean, extraWindows: number, idleMs: number, 
+/**
+ * Gate only (`FIREWOL_SPIKE_COMBINED`): a folder with `source.bin` and `dest`. On the gate's
+ * signal every window loads at once: the main window copies the file, the others index.
+ */
+combined: string | null, session: SessionState, 
 /**
  * The Windows regional format (for example `tr-TR`), which can differ from the display language.
  */

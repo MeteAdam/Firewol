@@ -440,6 +440,9 @@ pub struct Startup {
     pub self_test: bool,
     pub extra_windows: u32,
     pub idle_ms: u32,
+    /// Gate only (`FIREWOL_SPIKE_COMBINED`): a folder with `source.bin` and `dest`. On the gate's
+    /// signal every window loads at once: the main window copies the file, the others index.
+    pub combined: Option<String>,
     pub session: SessionState,
     /// The Windows regional format (for example `tr-TR`), which can differ from the display language.
     pub locale: String,

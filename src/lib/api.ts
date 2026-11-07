@@ -63,5 +63,8 @@ export const api = {
   runAsAdministrator: (target: ItemRef) => invoke<void>("run_as_administrator", { target }),
   togglePin: (path: string) => invoke<SessionState>("toggle_pin", { path }),
   openWindow: (path: string, split: boolean) => invoke<string>("open_window", { path, split }),
-  saveReport: (report: object) => invoke<void>("save_report", { report }),
+  /** `name` saves `<label>-<name>.json` for a later stage of a report run. */
+  saveReport: (report: object, name?: string) => invoke<void>("save_report", { report, name: name ?? null }),
+  /** Report runs only: resolves once the measuring script creates `<name>.go`. */
+  awaitSignal: (name: string) => invoke<void>("await_signal", { name }),
 };

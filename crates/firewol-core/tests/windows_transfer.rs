@@ -232,3 +232,48 @@ fn cross_volume_move_verifies_streams_and_preserves_undo_conflicts() -> Result<(
     assert_eq!(fs::read_dir(target_root)?.count(), 0);
     Ok(())
 }
+
+#[test]
+fn a_transfer_sweeps_stages_left_by_an_interrupted_one() -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let fixture = tempfile::tempdir()?;
+    let root = fixture.path().canonicalize()?;
+    let into = root.join("destination");
+    fs::create_dir(&into)?;
+    let stage = |name: &str, files: &[&str]| -> Result<std::path::PathBuf> {
+        let folder = into.join(name);
+        fs::create_dir(&folder)?;
+        for file in files {
+            fs::write(folder.join(file), b"partial copy")?;
+        }
+        Ok(folder)
+    };
+    let stale = stage(".firewol-Ab12Cd", &["payload"])?;
+    let empty = stage(".firewol-000000", &[])?;
+    let running = stage(".firewol-Zz9999", &["payload"])?;
+    let foreign = stage(".firewol-q1w2e3", &["payload", "notes.txt"])?;
+    let other = stage(".firewol-user", &["payload"])?;
+    // A running transfer holds its stage open without sharing deletion.
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1 | 0x2)
+        .custom_flags(0x0200_0000)
+        .open(&running)?;
+    let source = root.join("source.txt");
+    fs::write(&source, b"fresh")?;
+
+    let mut operations = Operations::open()?;
+    operations.transfer(
+        request(&[&source], &into, false)?,
+        &TransferControl::default(),
+    )?;
+    assert_eq!(fs::read(into.join("source.txt"))?, b"fresh");
+    assert!(
+        !stale.exists() && !empty.exists(),
+        "stale stages are removed"
+    );
+    assert!(running.join("payload").exists(), "a stage in use stays");
+    assert!(foreign.join("notes.txt").exists() && other.join("payload").exists());
+    drop(held);
+    Ok(())
+}

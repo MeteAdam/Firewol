@@ -484,3 +484,26 @@ fn multi_item_recycle_undoes_as_one_batch() -> Result<()> {
     assert!(operations.undo().is_err(), "the batch was one undo record");
     Ok(())
 }
+
+#[test]
+fn recycle_and_restore_beyond_max_path_with_unicode_names() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let mut deep = fixture.path().canonicalize()?.join("Ünïcode 火 😀");
+    for n in 1..=8 {
+        deep = deep.join(format!("uzun-klasör-adı-{n:02}-{}", "x".repeat(20)));
+    }
+    fs::create_dir_all(&deep)?;
+    let file = deep.join("ünïcöde-火.txt");
+    fs::write(&file, b"long path")?;
+    assert!(file.as_os_str().len() > 260);
+    let item = ItemId::at(file.clone())?;
+    let mut operations = Operations::open()?;
+    operations.submit_operation(Operation::Recycle {
+        items: vec![item.clone()],
+    })?;
+    assert!(!file.exists());
+    operations.undo()?;
+    item.verify()?;
+    assert_eq!(fs::read(&file)?, b"long path");
+    Ok(())
+}

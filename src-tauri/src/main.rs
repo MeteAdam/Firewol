@@ -111,6 +111,12 @@ async fn startup(
             0
         },
         idle_ms: setting("FIREWOL_SPIKE_IDLE_MS", 10_000),
+        combined: state
+            .report
+            .as_ref()
+            .and(std::env::var_os("FIREWOL_SPIKE_COMBINED"))
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_string_lossy().into_owned()),
         session,
         locale: user_locale(),
         since_start_ms: started.elapsed().as_secs_f64() * 1000.0,
@@ -694,18 +700,54 @@ fn memory_target(window: &Window, focused: bool) {
     });
 }
 
+/// Report mode only: `<label>.json`, or `<label>-<name>.json` for a later stage of the run.
 #[tauri::command]
 fn save_report(
     window: Window,
     state: State<'_, App>,
     report: serde_json::Value,
+    name: Option<String>,
 ) -> Result<(), String> {
     let dir = state.report.as_ref().ok_or("Report mode is disabled")?;
-    let target = dir.join(format!("{}.json", window.label()));
+    let target = match name {
+        Some(name) if report_name(&name) => dir.join(format!("{}-{name}.json", window.label())),
+        Some(_) => return Err("Report names use lowercase letters and hyphens".into()),
+        None => dir.join(format!("{}.json", window.label())),
+    };
     let staged = target.with_extension("json.tmp");
     serde_json::to_writer_pretty(File::create_new(&staged).map_err(message)?, &report)
         .map_err(message)?;
     fs::rename(staged, target).map_err(message)
+}
+
+fn report_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
+}
+
+/// Report mode only: waits until the measuring script creates `<name>.go` in the report folder.
+#[tauri::command]
+async fn await_signal(state: State<'_, App>, name: String) -> Result<(), String> {
+    let dir = state.report.clone().ok_or("Report mode is disabled")?;
+    if !report_name(&name) {
+        return Err("Signal names use lowercase letters and hyphens".into());
+    }
+    blocking(move || {
+        let signal = dir.join(format!("{name}.go"));
+        let started = Instant::now();
+        while !signal.exists() {
+            anyhow::ensure!(
+                started.elapsed().as_secs() < 600,
+                "No {name} signal within 10 minutes"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Ok(())
+    })
+    .await
 }
 
 fn notifier(app: &AppHandle) -> Notify {
@@ -859,7 +901,8 @@ fn main() {
             run_menu_action,
             run_as_administrator,
             open_window,
-            save_report
+            save_report,
+            await_signal
         ])
         .run(tauri::generate_context!())
         .expect("Firewol failed to start");

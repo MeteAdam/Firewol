@@ -1047,6 +1047,47 @@
       await painted();
       for (let window = 0; window < info.extraWindows; window++) await api.openWindow(info.path, true);
     }
+    if (info.combined) await combinedLoad(info, info.combined);
+  }
+
+  /**
+   * M4.4 worst case: on the gate's signal the main window copies a 256 MiB file through the
+   * session (verified, with progress events) in a new tab while every other window builds the
+   * folder index of its 100k listing.
+   */
+  async function combinedLoad(info: Startup, folder: string) {
+    await api.awaitSignal("combined");
+    const start = performance.now();
+    const report: Record<string, unknown> = { label: info.label };
+    try {
+      if (info.label === "main") {
+        const tab = await newTab(folder, slots[0]);
+        if (tab?.kind !== "folder") throw new Error("No folder tab for the transfer");
+        await waitFor(() => tab.pane.complete && !!tab.pane.pages[0], 10_000, "the transfer folder");
+        const source = tab.pane.pages[0].find((entry) => entry.name === "source.bin");
+        const dest = tab.pane.pages[0].find((entry) => entry.name === "dest");
+        if (!source?.id || !dest?.id) throw new Error("The transfer folder needs source.bin and dest");
+        const done = nextDone();
+        await api.transfer([source.id], dest.id, false);
+        const result = await done;
+        report.transferOk = result.succeeded;
+        report.transferMessage = result.message;
+        report.tabs = slots.reduce((count, slot) => count + slot.tabs.length, 0);
+      } else {
+        const pane = panes[0];
+        const folder = pane.folder?.id;
+        await pane.startIndex();
+        await waitFor(() => pane.index === "ready" || !!pane.error, 120_000, "the folder index");
+        if (pane.error) throw new Error(pane.error);
+        // The main window's finished copy reloads every pane; the index must survive it.
+        report.sameFolder = pane.folder?.id === folder;
+        report.indexedItems = pane.indexCount;
+      }
+    } catch (reason) {
+      report.error = String(reason);
+    }
+    report.ms = performance.now() - start;
+    await api.saveReport(report, "combined");
   }
 
   /**
@@ -1148,6 +1189,64 @@
     document.querySelector<HTMLButtonElement>('.status button[aria-label="Dismiss transfer result"]')!.click();
     await tick();
     check("the result can be dismissed", !pill() && transfer === null);
+    // M4.4: pause, then Resume from the popover until the verified copy lands in `scratch`.
+    await target.up();
+    const scratch = target.pages[0]?.find((entry) => entry.name === "scratch");
+    await target.back();
+    const resumed = nextDone();
+    await start(api.transfer([big!.id!], scratch!.id!, false));
+    await api.pauseTransfer();
+    await waitFor(() => transfer?.phase === "paused", 5000, "the second pause");
+    const pausedAt = transfer!.bytes;
+    await tick();
+    pill()!.click();
+    await tick();
+    const again = document.querySelector('.status [role="dialog"][aria-label="Transfer details"]')!;
+    [...again.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Resume")!.click();
+    const finished = await resumed;
+    check("Resume finishes a paused copy and verifies it", finished.succeeded && /verified/i.test(finished.message) && pausedAt < 512 * 1024 ** 2, `${finished.message} (paused at ${pausedAt} bytes)`);
+    await waitFor(() => transfer?.phase === "finished", 5000, "the finished copy");
+    document.querySelector<HTMLButtonElement>('.status button[aria-label="Dismiss transfer result"]')?.click();
+  }
+
+  /** M4.4: an inaccessible folder, then rename, recycle and copy with undo in a long Unicode path. */
+  async function acceptanceSteps(pane: Pane, root: string, check: Check) {
+    const from = pane.folder!.path;
+    await pane.open(`${root}\\locked`);
+    await painted();
+    check("an inaccessible folder explains itself and keeps the open folder", pane.folder?.path === from && /denied/i.test(pane.error) && document.querySelector(".status .error")?.textContent === pane.error, pane.error);
+    let deep = `${root}\\Ünïcode 火 \u{1F600}`;
+    for (let n = 1; n <= 8; n++) deep += `\\uzun-klasör-adı-${String(n).padStart(2, "0")}-${"x".repeat(20)}`;
+    const file = "ünïcöde-火.txt";
+    const renamed = "yeniden-adlandırıldı-火.txt";
+    await pane.open(deep);
+    check("a path over 260 characters with Unicode names opens", deep.length > 260 && samePath(pane.folder?.path ?? "", deep) && names(pane).join() === file && !pane.error, `${pane.folder?.path.length} · ${names(pane).join()} · ${pane.error}`);
+    const step = async (action: () => void) => {
+      const done = nextDone();
+      action();
+      const result = await done;
+      await pane.refresh();
+      return result;
+    };
+    await pane.select(0);
+    let result = await step(() => rename(pane.focusedEntry!, renamed));
+    check("rename inside the long Unicode path", result.succeeded && names(pane).join() === renamed, result.message);
+    result = await step(undo);
+    check("undo the rename there", result.succeeded && names(pane).join() === file, result.message);
+    await pane.select(0);
+    recycle();
+    await painted();
+    result = await step(() => recycleButton("Move to Recycle Bin").click());
+    check("recycle inside the long Unicode path", result.succeeded && pane.rows === 0, result.message);
+    result = await step(undo);
+    check("undo restores the exact item into the long path", result.succeeded && names(pane).join() === file, result.message);
+    const item = pane.entry(0)!.id!;
+    await pane.up();
+    result = await step(() => void start(api.transfer([item], pane.folder!.item!, false)));
+    check("copy out of the long Unicode path", result.succeeded && names(pane).includes(file), result.message);
+    result = await step(undo);
+    check("undo removes that copy", result.succeeded && !names(pane).includes(file), result.message);
+    await pane.open(from);
   }
 
   /** M4.3-g: grid view through its shortcuts, 2D keys, large Shell icons and Ctrl+wheel. */
@@ -1518,6 +1617,7 @@
       await waitFor(() => tabs().length === count && shown(), 5000, "closing Settings again");
       await folderStyleSelfTest(check, active!, sourcePath);
       await layoutSteps(active!, check);
+      await acceptanceSteps(active!, parentPath(sourcePath), check);
       const sidebarBefore = sidebar;
       press("b");
       await waitFor(() => sidebar !== sidebarBefore, 5000, "Ctrl+B");

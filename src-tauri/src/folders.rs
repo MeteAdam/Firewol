@@ -45,7 +45,10 @@ pub struct Folders {
 struct Folder {
     owner: String,
     path: PathBuf,
+    /// Stops the folder index and every request when the folder closes.
     cancel: Cancellation,
+    /// Stops the current listing pass; a reload starts a new pass but keeps the folder index.
+    listing: Mutex<Cancellation>,
     directory: Mutex<Directory>,
     sort: Mutex<Sort>,
     search: Mutex<Search>,
@@ -98,7 +101,7 @@ impl Folders {
         sort: SortView,
         notify: Notify,
     ) -> Result<Navigation> {
-        let (target, position, sequence) = {
+        let (target, position, sequence, reuse) = {
             let mut panes = lock(&self.panes);
             let state = panes.entry(pane.to_owned()).or_default();
             ensure!(
@@ -107,6 +110,11 @@ impl Folders {
             );
             state.owner = owner.to_owned();
             state.sequence += 1;
+            // A reload re-reads the open folder in place, so its live search index survives.
+            let reuse = match step {
+                Step::Reload => state.folder,
+                _ => None,
+            };
             let (target, position) = match step {
                 Step::New => (PathBuf::from(path.context("Enter a folder")?), None),
                 Step::Back | Step::Forward => {
@@ -126,9 +134,12 @@ impl Folders {
                     None,
                 ),
             };
-            (target, position, state.sequence)
+            (target, position, state.sequence, reuse)
         };
-        let folder = self.open(owner, &target, sort, notify)?;
+        let folder = match reuse.and_then(|id| self.get(id).ok().map(|folder| (id, folder))) {
+            Some((id, folder)) => self.reopen(id, &folder, sort, notify)?,
+            None => self.open(owner, &target, sort, notify)?,
+        };
         let mut panes = lock(&self.panes);
         let state = panes.get_mut(pane);
         if state
@@ -136,7 +147,10 @@ impl Folders {
             .is_none_or(|state| state.sequence != sequence || state.owner != owner)
         {
             drop(panes);
-            self.close(folder.id);
+            // A reused folder still belongs to the pane; the newer navigation replaces it.
+            if reuse != Some(folder.id) {
+                self.close(folder.id);
+            }
             anyhow::bail!("A newer navigation replaced this one");
         }
         let state = state.context("The tab was closed")?;
@@ -148,7 +162,10 @@ impl Folders {
             }
             _ => {}
         }
-        let previous = state.folder.replace(folder.id);
+        let previous = state
+            .folder
+            .replace(folder.id)
+            .filter(|id| *id != folder.id);
         let navigation = Navigation {
             can_back: state.history.peek(false).is_some(),
             can_forward: state.history.peek(true).is_some(),
@@ -198,10 +215,11 @@ impl Folders {
 
     fn open(&self, owner: &str, path: &Path, sort: SortView, notify: Notify) -> Result<FolderView> {
         let cancel = Cancellation::default();
+        let listing = Cancellation::default();
         let mut directory = Directory::open(path)?;
-        directory.advance(PAGE_SIZE, &cancel)?;
+        directory.advance(PAGE_SIZE, &listing)?;
         let sort = sort_core(sort);
-        directory.sort(sort, &cancel)?;
+        directory.sort(sort, &listing)?;
         let sort_ms = directory.sort_ms();
         let first = directory.list_dir(page(0), &cancel)?;
         let path = directory.path().to_owned();
@@ -211,6 +229,7 @@ impl Folders {
             owner: owner.to_owned(),
             path: path.clone(),
             cancel,
+            listing: Mutex::new(listing.clone()),
             directory: Mutex::new(directory),
             sort: Mutex::new(sort),
             search: Mutex::default(),
@@ -218,13 +237,57 @@ impl Folders {
         });
         lock(&self.open).insert(id, folder.clone());
         if !complete {
-            thread::spawn(move || enumerate(id, &folder, &notify));
+            thread::spawn(move || enumerate(id, &folder, &listing, &notify));
         }
-        Ok(FolderView {
+        Ok(self.view(id, &path, count, complete, sort_ms, first))
+    }
+
+    /// Re-reads an open folder under the same id: the listing restarts, the folder index and its
+    /// watcher keep running.
+    fn reopen(
+        &self,
+        id: u64,
+        folder: &Arc<Folder>,
+        sort: SortView,
+        notify: Notify,
+    ) -> Result<FolderView> {
+        let listing = Cancellation::default();
+        let mut directory = Directory::open(&folder.path)?;
+        directory.advance(PAGE_SIZE, &listing)?;
+        let sort = sort_core(sort);
+        directory.sort(sort, &listing)?;
+        let sort_ms = directory.sort_ms();
+        let first = directory.list_dir(page(0), &listing)?;
+        let (count, complete) = (directory.count(), directory.is_complete());
+        // The previous pass stops before it can touch the new listing.
+        std::mem::replace(&mut *lock(&folder.listing), listing.clone()).cancel();
+        *lock(&folder.directory) = directory;
+        *lock(&folder.sort) = sort;
+        if folder.cancel.is_cancelled() {
+            listing.cancel();
+            anyhow::bail!("The folder was closed");
+        }
+        if !complete {
+            let folder = folder.clone();
+            thread::spawn(move || enumerate(id, &folder, &listing, &notify));
+        }
+        Ok(self.view(id, &folder.path, count, complete, sort_ms, first))
+    }
+
+    fn view(
+        &self,
+        id: u64,
+        path: &Path,
+        count: u32,
+        complete: bool,
+        sort_ms: f64,
+        first: ItemPage,
+    ) -> FolderView {
+        FolderView {
             id,
-            item: ItemId::at(path.clone()).ok().as_ref().map(item_ref),
-            path: text(&path),
-            segments: segments(&path),
+            item: ItemId::at(path.to_owned()).ok().as_ref().map(item_ref),
+            path: text(path),
+            segments: segments(path),
             count,
             complete,
             sort_ms,
@@ -232,7 +295,7 @@ impl Folders {
                 sorted: complete,
                 ..convert(first, &self.styles())
             },
-        })
+        }
     }
 
     pub fn page(&self, id: u64, offset: u32, sort: SortView) -> Result<Page> {
@@ -407,6 +470,7 @@ impl Folders {
     fn close(&self, id: u64) {
         if let Some(folder) = lock(&self.open).remove(&id) {
             folder.cancel.cancel();
+            lock(&folder.listing).cancel();
             if let Some((_, query)) = lock(&folder.query).take() {
                 query.cancel();
             }
@@ -419,6 +483,7 @@ impl Folders {
             let keep = folder.owner != owner;
             if !keep {
                 folder.cancel.cancel();
+                lock(&folder.listing).cancel();
             }
             keep
         });
@@ -432,15 +497,15 @@ impl Folders {
     }
 }
 
-fn enumerate(id: u64, folder: &Folder, notify: &Notify) {
+fn enumerate(id: u64, folder: &Folder, listing: &Cancellation, notify: &Notify) {
     let mut last = Instant::now();
     loop {
         let sort = *lock(&folder.sort);
         let (count, complete, sort_ms, result) = {
             let mut directory = lock(&folder.directory);
             let result = directory
-                .advance(PAGE_SIZE * 4, &folder.cancel)
-                .and_then(|_| directory.sort(sort, &folder.cancel));
+                .advance(PAGE_SIZE * 4, listing)
+                .and_then(|_| directory.sort(sort, listing));
             (
                 directory.count(),
                 directory.is_complete(),
@@ -448,7 +513,7 @@ fn enumerate(id: u64, folder: &Folder, notify: &Notify) {
                 result,
             )
         };
-        if folder.cancel.is_cancelled() {
+        if listing.is_cancelled() {
             return;
         }
         let error = result.err().map(|error| format!("{error:#}"));
@@ -607,6 +672,38 @@ mod tests {
         assert_eq!(lock(&folders.open).len(), 1);
         folders.close_pane("detached", "main:1");
         assert!(lock(&folders.open).is_empty() && lock(&folders.panes).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_reload_rereads_the_open_folder_and_keeps_its_index_state() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        std::fs::write(fixture.path().join("one.txt"), "1")?;
+        let folders = Folders::default();
+        let notify: Notify = Arc::new(|_| {});
+        let path = text(fixture.path());
+        let go = |step| {
+            folders.navigate(
+                "main",
+                "main:1",
+                Some(&path),
+                step,
+                SortView::default(),
+                notify.clone(),
+            )
+        };
+        let first = go(Step::New)?.folder;
+        // Stands in for a built folder index, which lives in the folder's search state.
+        lock(&folders.get(first.id)?.search).ready = Some(1);
+        std::fs::write(fixture.path().join("two.txt"), "2")?;
+        let reloaded = go(Step::Reload)?.folder;
+        assert_eq!(reloaded.id, first.id);
+        assert_eq!(reloaded.count, 2);
+        assert_eq!(lock(&folders.get(first.id)?.search).ready, Some(1));
+        assert_eq!(lock(&folders.open).len(), 1);
+        let other = go(Step::New)?.folder;
+        assert_ne!(other.id, first.id, "a new navigation opens a new folder");
+        assert!(folders.get(first.id).is_err());
         Ok(())
     }
 

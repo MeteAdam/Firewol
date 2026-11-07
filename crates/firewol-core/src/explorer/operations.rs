@@ -207,6 +207,7 @@ impl Operations {
             names.len() == items.len(),
             "A transfer contains the same path twice"
         );
+        transfer::sweep_stale_stages(into.path());
         // Only CopyFile2 transfers report bytes: copies and cross-volume moves of regular files.
         let planned_bytes = items
             .iter()

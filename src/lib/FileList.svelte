@@ -2,6 +2,7 @@
   import { untrack } from "svelte";
   import type { Entry } from "./contract";
   import FolderIcon from "./FolderIcon.svelte";
+  import FileIcon from "./FileIcon.svelte";
   import { formatDate, formatSize, location, typeName } from "./format";
   import Icon from "./Icon.svelte";
   import { PAGE, type Pane } from "./pane.svelte";
@@ -206,7 +207,7 @@
           >
             {#if entry}
               <div role="gridcell" class="name">
-                {#if entry.directory}<FolderIcon />{:else}<span class="ficon"><Icon name="file" /></span>{/if}
+                {#if entry.directory}<FolderIcon />{:else}<FileIcon icon={entry.icon} />{/if}
                 {#if row === pane.renaming}
                   <input
                     class="rename"
@@ -299,7 +300,6 @@
   .dim { color: var(--muted); }
   .row.sel .dim { color: inherit; opacity: .85; }
   .size { text-align: right; }
-  .ficon { display: flex; flex: none; color: var(--muted); }
   .rename {
     flex: 1;
     min-width: 0;

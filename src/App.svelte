@@ -381,6 +381,11 @@
       const sourcePath = info.path;
       const destPath = `${source.folder?.segments.at(-2)?.path}\\dest`;
       pick(source, "note.txt");
+      await waitFor(() => {
+        const icon = document.querySelector<HTMLImageElement>('img[src^="http://icon.localhost/"]');
+        return !!icon?.complete && icon.naturalWidth >= 16;
+      }, 5000, "Shell icon");
+      check("Shell file icon loaded through CSP", true);
       await clip(true);
       check("cut", session.clipboard?.cut === true && session.clipboard.count === 1);
       await source.open(destPath);

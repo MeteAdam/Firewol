@@ -34,6 +34,8 @@ pub struct Entry {
     pub name: String,
     pub path: String,
     pub directory: bool,
+    /// Shell cache key; folders keep the theme's vector icon.
+    pub icon: Option<String>,
     /// File length in bytes; `null` for folders.
     #[ts(type = "number | null")]
     pub size: Option<u64>,

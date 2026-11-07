@@ -1,5 +1,6 @@
 mod directory;
 pub mod elevation;
+pub mod icons;
 mod operations;
 mod search;
 mod session;

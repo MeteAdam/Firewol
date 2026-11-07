@@ -2,6 +2,7 @@
 
 mod contract;
 mod folders;
+mod icons;
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -377,7 +378,11 @@ fn main() {
     STARTED.get_or_init(Instant::now);
     let folders = Arc::new(Folders::default());
     let closing = folders.clone();
+    let icons = firewol_core::explorer::icons::Icons::start().expect("Start Shell icon worker");
     tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("icon", move |_context, request, responder| {
+            icons::respond(&icons, request, responder);
+        })
         .manage(App {
             folders,
             windows: Mutex::default(),

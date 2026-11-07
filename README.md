@@ -102,6 +102,10 @@ It drives the real interface functions through cut, paste, rename, both undos, b
 
 ## M2 navigation and appearance
 
+M4.2 Shell icons (2026-11-07): files use Windows associations through an asynchronous `icon` protocol. A dedicated STA worker has a 64-request queue, a two-second request deadline and an LRU capped at 256 entries / 8 MiB. Extension icons are shared; EXE, LNK, ICO and URL icons use the file path. Folders retain theme SVGs. Failed or timed-out requests show the generic file glyph. Shell extensions still execute inside the process; the deadline isolates UI waits, not native extension crashes.
+
+The release interface self-test (`scripts/Test-Interface.ps1`, isolated settings and fixture) passes all 19 steps including an actual image load through CSP. The repeated 100,000-row/four-window gate measured 152.4 MB idle, 198.0 MB peak, 24.2 ms median navigation, 164 FPS and 24.1 ms search p95. Cold start remains the accepted WebView2 trade-off at 550 ms. PNG extraction at 16–256 px and path-specific executable icons are covered by Windows core tests.
+
 - **Tabs.** Press Ctrl+T to open a tab in the current folder, Ctrl+Tab to switch, and Ctrl+W to close. Drag a tab along the strip to reorder it or outside the window to detach it. Ctrl+Shift+N also detaches the active tab. A session supports four windows with shared clipboard and undo history. A tab restores its folder history and rebuilds any resumed folder search.
 - **Split view.** Open a second pane with its own folder, tabs and search. Drop selected items on the other pane to copy them into the displayed folder. Hold Shift to move them. The context menu also offers both actions. Returning to a single pane keeps the open tabs.
 - **Sidebar.** Toggle the sidebar from the toolbar. Pin and unpin folders from either pane. The sidebar opens a selected pin in the active pane.

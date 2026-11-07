@@ -347,6 +347,7 @@ fn entry(item: &Item) -> Entry {
         name: item.name().to_string_lossy().into_owned(),
         path: text(&item.path),
         directory: item.directory,
+        icon: (!item.directory).then(|| firewol_core::explorer::icons::key(&item.path)),
         size: item.size,
         modified: item.modified,
         hidden: item

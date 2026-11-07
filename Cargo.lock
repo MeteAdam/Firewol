@@ -783,6 +783,7 @@ name = "firewol-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "png",
  "regex",
  "rusqlite",
  "serde",

@@ -252,6 +252,45 @@ fn directory_pages_preserve_long_unicode_paths() -> Result<()> {
 }
 
 #[test]
+fn directory_pages_report_size_time_and_attributes() -> Result<()> {
+    const HIDDEN: u32 = 0x2;
+    let fixture = tempfile::tempdir()?;
+    let root = fixture.path().canonicalize()?;
+    fs::create_dir(root.join("folder"))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .attributes(HIDDEN)
+        .open(root.join("hidden.txt"))?;
+    std::io::Write::write_all(&mut file, b"12345")?;
+    drop(file);
+    let cancel = Cancellation::default();
+    let mut view = Directory::open(&root)?;
+    view.advance(128, &cancel)?;
+    let items = view.list_dir(page(0), &cancel)?.items;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let folder = items
+        .iter()
+        .find(|item| item.directory)
+        .expect("the folder");
+    let hidden = items.iter().find(|item| !item.directory).expect("the file");
+    assert_eq!(folder.size, None);
+    assert_eq!(hidden.size, Some(5));
+    assert!(
+        hidden
+            .attributes
+            .is_some_and(|attributes| attributes & HIDDEN != 0)
+    );
+    for item in [folder, hidden] {
+        let modified = item.modified.expect("a modification time");
+        assert!((now - modified).abs() < 600, "unexpected time {modified}");
+    }
+    Ok(())
+}
+
+#[test]
 fn legacy_settings_preserve_pins_and_store_folder_styles_by_identity() -> Result<()> {
     let fixture = tempfile::tempdir()?;
     let profile = fixture.path().join("profile");

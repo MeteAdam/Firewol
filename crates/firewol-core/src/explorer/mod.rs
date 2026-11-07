@@ -2,6 +2,7 @@ mod directory;
 pub mod elevation;
 mod operations;
 mod search;
+mod session;
 mod settings;
 pub mod volume;
 mod watch;
@@ -12,6 +13,7 @@ pub use operations::{
     TransferRequest, TransferState,
 };
 pub use search::{Filters, SearchIndex, SearchQuery, SearchReader};
+pub use session::{Clipboard, Completion, History, Session};
 pub use settings::{
     Appearance, CaptionShape, FolderKey, FolderStyle, MenuAction, MenuEntry, Preset, Rgb, Settings,
     default_menu,
@@ -80,21 +82,50 @@ impl ItemId {
         let file = open_item(&path)?;
         Self::from_file(path, &file)
     }
+
+    /// The volume serial number and file index that identify the item.
+    pub fn identity(&self) -> (u32, u64) {
+        (self.identity.volume, self.identity.index)
+    }
+
+    /// Rebuilds an identity an interface received earlier. Operations still call
+    /// [`ItemId::verify`], so a stale or altered identity cannot reach another file.
+    pub fn from_parts(path: PathBuf, volume: u32, index: u64) -> Self {
+        Self {
+            path,
+            identity: FileIdentity { volume, index },
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct Item {
     pub path: PathBuf,
     pub directory: bool,
+    /// File length in bytes; `None` for folders.
+    pub size: Option<u64>,
+    /// Last write time in Unix seconds.
+    pub modified: Option<i64>,
+    /// Win32 file attributes, when the source records them.
+    pub attributes: Option<u32>,
     pub id: Option<ItemId>,
 }
 
 impl Item {
-    fn from_path(path: PathBuf, directory: bool) -> Self {
+    fn listed(
+        path: PathBuf,
+        directory: bool,
+        size: Option<u64>,
+        modified: i64,
+        attributes: u32,
+    ) -> Self {
         let id = ItemId::at(path.clone()).ok();
         Self {
             path,
             directory,
+            size,
+            modified: Some(modified),
+            attributes: Some(attributes),
             id,
         }
     }
@@ -161,6 +192,11 @@ fn attributes(file: &File) -> Result<(bool, bool, u64, i64)> {
         size,
         (modified / 10_000_000) as i64 - 11_644_473_600,
     ))
+}
+
+/// Converts a FILETIME (100 ns ticks since 1601) to Unix seconds.
+fn unix_seconds(filetime: u64) -> i64 {
+    (filetime / 10_000_000) as i64 - 11_644_473_600
 }
 
 fn encode(value: &OsStr) -> Vec<u8> {

@@ -10,9 +10,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use contract::{FolderView, IndexState, Page, Startup};
-use firewol_core::explorer::{Settings, data_dir, home};
-use folders::{Folders, Notice, Notify, lock, segment, text};
+use contract::{
+    ClipboardState, IndexState, ItemRef, Navigation, OperationDone, Page, SessionState, Startup,
+    Step, TransferPhase, TransferStatus,
+};
+use firewol_core::explorer::{Operation, Session, TransferState, data_dir, home};
+use folders::{Folders, Notice, Notify, item_id, lock, segment, text};
 use tauri::{
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
     WindowEvent,
@@ -37,6 +40,9 @@ struct App {
     report: Option<PathBuf>,
 }
 
+/// The clipboard, file operations and settings shared by every window.
+struct Files(Session);
+
 #[derive(Clone)]
 struct WindowRequest {
     path: String,
@@ -45,7 +51,11 @@ struct WindowRequest {
 }
 
 #[tauri::command]
-fn startup(window: Window, state: State<'_, App>) -> Result<Startup, String> {
+fn startup(
+    window: Window,
+    state: State<'_, App>,
+    files: State<'_, Files>,
+) -> Result<Startup, String> {
     let label = window.label().to_owned();
     let request = lock(&state.windows).get(&label).cloned();
     let main = request.is_none();
@@ -56,12 +66,6 @@ fn startup(window: Window, state: State<'_, App>) -> Result<Startup, String> {
             None => text(&home().map_err(message)?),
         },
     };
-    let pins = Settings::load(&data_dir().map_err(message)?)
-        .map_err(message)?
-        .pins
-        .iter()
-        .map(|pin| segment(pin))
-        .collect();
     let started = request.as_ref().map_or_else(
         || *STARTED.get_or_init(Instant::now),
         |request| request.requested,
@@ -71,13 +75,16 @@ fn startup(window: Window, state: State<'_, App>) -> Result<Startup, String> {
         path,
         split: request.map_or_else(|| std::env::var_os("FIREWOL_SPLIT").is_some(), |r| r.split),
         report: state.report.is_some(),
+        self_test: main
+            && state.report.is_some()
+            && std::env::var_os("FIREWOL_SELF_TEST").is_some(),
         extra_windows: if main {
             setting("FIREWOL_SPIKE_WINDOWS", 1).saturating_sub(1)
         } else {
             0
         },
         idle_ms: setting("FIREWOL_SPIKE_IDLE_MS", 10_000),
-        pins,
+        session: session_state(&files.0),
         locale: user_locale(),
         since_start_ms: started.elapsed().as_secs_f64() * 1000.0,
     })
@@ -96,16 +103,23 @@ fn user_locale() -> String {
 }
 
 #[tauri::command]
-async fn open_folder(
+async fn navigate(
     app: AppHandle,
     window: Window,
     state: State<'_, App>,
-    path: String,
-) -> Result<FolderView, String> {
+    pane: String,
+    path: Option<String>,
+    step: Step,
+) -> Result<Navigation, String> {
     let folders = state.folders.clone();
     let notify = notifier(&app);
     let owner = window.label().to_owned();
-    blocking(move || folders.open(&owner, Path::new(&path), notify)).await
+    blocking(move || folders.navigate(&owner, &pane, path.as_deref(), step, notify)).await
+}
+
+#[tauri::command]
+fn close_pane(state: State<'_, App>, pane: String) {
+    state.folders.close_pane(&pane);
 }
 
 #[tauri::command]
@@ -128,8 +142,131 @@ async fn search(state: State<'_, App>, id: u64, text: String, offset: u32) -> Re
 }
 
 #[tauri::command]
-fn close_folder(state: State<'_, App>, id: u64) {
-    state.folders.close(id);
+fn session(files: State<'_, Files>) -> SessionState {
+    session_state(&files.0)
+}
+
+#[tauri::command]
+fn set_clipboard(
+    app: AppHandle,
+    files: State<'_, Files>,
+    items: Vec<ItemRef>,
+    cut: bool,
+) -> Result<SessionState, String> {
+    let items = items.iter().map(item_id).collect::<anyhow::Result<_>>();
+    files
+        .0
+        .set_clipboard(items.map_err(message)?, cut)
+        .map_err(message)?;
+    Ok(broadcast(&app, &files.0))
+}
+
+#[tauri::command]
+fn paste(files: State<'_, Files>, into: ItemRef) -> Result<(), String> {
+    files
+        .0
+        .paste(item_id(&into).map_err(message)?)
+        .map(drop)
+        .map_err(message)
+}
+
+#[tauri::command]
+fn transfer(
+    files: State<'_, Files>,
+    items: Vec<ItemRef>,
+    into: ItemRef,
+    move_items: bool,
+) -> Result<(), String> {
+    let items = items.iter().map(item_id).collect::<anyhow::Result<_>>();
+    let into = item_id(&into).map_err(message)?;
+    files
+        .0
+        .transfer(items.map_err(message)?, into, move_items)
+        .map(drop)
+        .map_err(message)
+}
+
+#[tauri::command]
+fn rename(files: State<'_, Files>, item: ItemRef, name: String) -> Result<(), String> {
+    let item = item_id(&item).map_err(message)?;
+    files
+        .0
+        .run(Operation::Rename {
+            item,
+            name: name.into(),
+        })
+        .map_err(message)
+}
+
+#[tauri::command]
+fn recycle(files: State<'_, Files>, item: ItemRef) -> Result<(), String> {
+    let item = item_id(&item).map_err(message)?;
+    files.0.run(Operation::Recycle { item }).map_err(message)
+}
+
+#[tauri::command]
+fn undo(files: State<'_, Files>) -> Result<(), String> {
+    files.0.undo().map(drop).map_err(message)
+}
+
+#[tauri::command]
+fn transfer_status(files: State<'_, Files>) -> Option<TransferStatus> {
+    files.0.progress().map(|progress| TransferStatus {
+        phase: match progress.state {
+            TransferState::Running => TransferPhase::Running,
+            TransferState::Paused => TransferPhase::Paused,
+            TransferState::Cancelled => TransferPhase::Cancelled,
+        },
+        bytes: progress.bytes,
+        finished: progress.finished as u32,
+        verifying: progress.verifying as u32,
+    })
+}
+
+#[tauri::command]
+fn pause_transfer(files: State<'_, Files>) {
+    if let Some(control) = files.0.control() {
+        control.toggle_pause();
+    }
+}
+
+#[tauri::command]
+fn cancel_transfer(files: State<'_, Files>) {
+    if let Some(control) = files.0.control() {
+        control.cancel();
+    }
+}
+
+#[tauri::command]
+fn toggle_pin(
+    app: AppHandle,
+    files: State<'_, Files>,
+    path: String,
+) -> Result<SessionState, String> {
+    files.0.toggle_pin(Path::new(&path)).map_err(message)?;
+    Ok(broadcast(&app, &files.0))
+}
+
+fn session_state(session: &Session) -> SessionState {
+    SessionState {
+        pins: session
+            .settings()
+            .pins
+            .iter()
+            .map(|pin| segment(pin))
+            .collect(),
+        clipboard: session.clipboard().map(|clipboard| ClipboardState {
+            count: clipboard.items.len() as u32,
+            cut: clipboard.cut,
+        }),
+    }
+}
+
+/// Sends the session state to every window and returns it.
+fn broadcast(app: &AppHandle, session: &Session) -> SessionState {
+    let state = session_state(session);
+    let _ = app.emit(contract::SESSION_CHANGED, state.clone());
+    state
 }
 
 // Building a window from a synchronous command deadlocks on Windows, so this one is async.
@@ -233,7 +370,7 @@ fn setting(name: &str, default: u32) -> u32 {
 }
 
 fn message(error: impl std::fmt::Display) -> String {
-    error.to_string()
+    format!("{error:#}")
 }
 
 fn main() {
@@ -248,6 +385,18 @@ fn main() {
             report: std::env::var_os("FIREWOL_SPIKE_REPORT").map(PathBuf::from),
         })
         .setup(|app| {
+            let handle = app.handle().clone();
+            let session = Session::open(data_dir()?, move |done| {
+                let _ = handle.emit(
+                    contract::OPERATION_DONE,
+                    OperationDone {
+                        message: done.message,
+                        succeeded: done.succeeded,
+                        refresh: done.refresh,
+                    },
+                );
+            })?;
+            app.manage(Files(session));
             build_window(app.handle(), "main")?;
             Ok(())
         })
@@ -258,11 +407,22 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             startup,
-            open_folder,
+            navigate,
+            close_pane,
             list_page,
             start_index,
             search,
-            close_folder,
+            session,
+            set_clipboard,
+            paste,
+            transfer,
+            rename,
+            recycle,
+            undo,
+            transfer_status,
+            pause_transfer,
+            cancel_transfer,
+            toggle_pin,
             open_window,
             save_report
         ])

@@ -1,14 +1,35 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { FolderView, IndexState, Page, Startup } from "./contract";
+import type {
+  IndexState,
+  ItemRef,
+  Navigation,
+  Page,
+  SessionState,
+  Startup,
+  Step,
+  TransferStatus,
+} from "./contract";
 
 export const api = {
   startup: () => invoke<Startup>("startup"),
-  openFolder: (path: string) => invoke<FolderView>("open_folder", { path }),
+  navigate: (pane: string, path: string | null, step: Step) =>
+    invoke<Navigation>("navigate", { pane, path, step }),
+  closePane: (pane: string) => invoke<void>("close_pane", { pane }),
   listPage: (id: number, offset: number) => invoke<Page>("list_page", { id, offset }),
   startIndex: (id: number) => invoke<IndexState>("start_index", { id }),
-  search: (id: number, text: string, offset: number) =>
-    invoke<Page>("search", { id, text, offset }),
-  closeFolder: (id: number) => invoke<void>("close_folder", { id }),
+  search: (id: number, text: string, offset: number) => invoke<Page>("search", { id, text, offset }),
+  session: () => invoke<SessionState>("session"),
+  setClipboard: (items: ItemRef[], cut: boolean) => invoke<SessionState>("set_clipboard", { items, cut }),
+  paste: (into: ItemRef) => invoke<void>("paste", { into }),
+  transfer: (items: ItemRef[], into: ItemRef, moveItems: boolean) =>
+    invoke<void>("transfer", { items, into, moveItems }),
+  rename: (item: ItemRef, name: string) => invoke<void>("rename", { item, name }),
+  recycle: (item: ItemRef) => invoke<void>("recycle", { item }),
+  undo: () => invoke<void>("undo"),
+  transferStatus: () => invoke<TransferStatus | null>("transfer_status"),
+  pauseTransfer: () => invoke<void>("pause_transfer"),
+  cancelTransfer: () => invoke<void>("cancel_transfer"),
+  togglePin: (path: string) => invoke<SessionState>("toggle_pin", { path }),
   openWindow: (path: string, split: boolean) => invoke<void>("open_window", { path, split }),
   saveReport: (report: object) => invoke<void>("save_report", { report }),
 };

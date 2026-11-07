@@ -1,28 +1,46 @@
 import { api } from "./api";
-import type { Entry, FolderProgress, FolderView, IndexState, Page } from "./contract";
+import type {
+  Entry,
+  FolderProgress,
+  FolderView,
+  IndexState,
+  ItemRef,
+  Navigation,
+  Page,
+  Step,
+} from "./contract";
 
 export const PAGE = 128;
 // Pages farther than this from the newest page are dropped to bound memory.
 const KEEP = PAGE * 6;
 
-/** One folder view: navigation history, paged listing and folder search. */
+/** One folder view. Navigation history lives in the core; this keeps what the list renders. */
 export class Pane {
+  readonly id: string;
   // Listing data is replaced, never mutated, so it skips Svelte's per-field deep proxies.
   folder = $state.raw<FolderView>();
   count = $state(0);
   complete = $state(false);
   pages = $state.raw<Record<number, Entry[]>>({});
+  canBack = $state(false);
+  canForward = $state(false);
+  /** The focused row; selection holds every selected row. */
   selected = $state(-1);
+  selection = $state.raw<Set<number>>(new Set());
+  renaming = $state<number | null>(null);
   query = $state("");
   results = $state.raw<Page>();
   index = $state<"none" | "building" | "ready">("none");
   indexCount = $state(0);
   error = $state("");
-  history = $state.raw<string[]>([]);
-  future = $state.raw<string[]>([]);
+  #anchor = -1;
   #pending = new Set<number>();
   #navigation = 0;
   #search = 0;
+
+  constructor(id: string) {
+    this.id = id;
+  }
 
   get searching() {
     return this.query.trim().length > 0;
@@ -37,54 +55,47 @@ export class Pane {
     return this.pages[Math.floor(row / PAGE) * PAGE]?.[row % PAGE];
   }
 
-  async open(path: string, record = true) {
-    const navigation = ++this.#navigation;
-    let view: FolderView;
-    try {
-      view = await api.openFolder(path);
-    } catch (reason) {
-      if (navigation === this.#navigation) this.error = String(reason);
-      return;
+  /** Loaded entries in the selection, in row order. */
+  selectedEntries(): Entry[] {
+    return [...this.selection]
+      .sort((a, b) => a - b)
+      .map((row) => this.entry(row))
+      .filter((entry): entry is Entry => entry !== undefined);
+  }
+
+  selectedRefs(): ItemRef[] {
+    return this.selectedEntries().flatMap((entry) => (entry.id ? [entry.id] : []));
+  }
+
+  select(row: number, mode: "single" | "toggle" | "range" = "single") {
+    if (this.rows === 0) return;
+    row = Math.max(0, Math.min(this.rows - 1, row));
+    if (mode === "toggle") {
+      const next = new Set(this.selection);
+      if (next.has(row)) next.delete(row);
+      else next.add(row);
+      this.selection = next;
+      this.#anchor = row;
+    } else if (mode === "range" && this.#anchor >= 0) {
+      const [from, to] = this.#anchor < row ? [this.#anchor, row] : [row, this.#anchor];
+      this.selection = new Set(Array.from({ length: to - from + 1 }, (_, index) => from + index));
+    } else {
+      this.selection = new Set([row]);
+      this.#anchor = row;
     }
-    if (navigation !== this.#navigation) {
-      void api.closeFolder(view.id);
-      return;
-    }
-    const previous = this.folder;
-    if (previous) {
-      void api.closeFolder(previous.id);
-      if (record) {
-        this.history = [...this.history, previous.path];
-        this.future = [];
-      }
-    }
-    this.#pending.clear();
-    this.folder = view;
-    this.count = view.count;
-    this.complete = view.complete;
-    this.pages = { 0: view.page.items };
-    this.selected = view.count > 0 ? 0 : -1;
-    this.query = "";
-    this.results = undefined;
-    this.index = "none";
-    this.indexCount = 0;
-    this.error = "";
+    this.selected = row;
+  }
+
+  open(path: string) {
+    return this.#go("new", path);
   }
 
   back() {
-    const path = this.history.at(-1);
-    if (!path || !this.folder) return;
-    this.future = [this.folder.path, ...this.future];
-    this.history = this.history.slice(0, -1);
-    return this.open(path, false);
+    return this.canBack ? this.#go("back") : undefined;
   }
 
   forward() {
-    const [path, ...rest] = this.future;
-    if (!path || !this.folder) return;
-    this.history = [...this.history, this.folder.path];
-    this.future = rest;
-    return this.open(path, false);
+    return this.canForward ? this.#go("forward") : undefined;
   }
 
   up() {
@@ -93,7 +104,45 @@ export class Pane {
   }
 
   refresh() {
-    return this.folder ? this.open(this.folder.path, false) : undefined;
+    return this.folder ? this.#go("reload", this.folder.path) : undefined;
+  }
+
+  async #go(step: Step, path: string | null = null) {
+    const navigation = ++this.#navigation;
+    let result: Navigation;
+    try {
+      result = await api.navigate(this.id, path, step);
+    } catch (reason) {
+      if (navigation === this.#navigation && !String(reason).includes("newer navigation")) {
+        this.error = String(reason);
+      }
+      return;
+    }
+    if (navigation !== this.#navigation) return;
+    const view = result.folder;
+    const reload = step === "reload" && view.path === this.folder?.path;
+    const keep = reload ? this.selected : 0;
+    this.#pending.clear();
+    this.folder = view;
+    this.count = view.count;
+    this.complete = view.complete;
+    this.pages = { 0: view.page.items };
+    this.canBack = result.canBack;
+    this.canForward = result.canForward;
+    this.renaming = null;
+    this.error = "";
+    if (!reload) {
+      this.query = "";
+      this.results = undefined;
+    }
+    this.index = "none";
+    this.indexCount = 0;
+    if (view.count > 0) this.select(Math.min(keep, view.count - 1));
+    else {
+      this.selected = -1;
+      this.selection = new Set();
+    }
+    if (reload && this.searching) void this.search(this.query);
   }
 
   progress(event: FolderProgress) {
@@ -153,8 +202,10 @@ export class Pane {
     const id = ++this.#search;
     this.query = text;
     this.selected = -1;
+    this.selection = new Set();
     if (!text.trim()) {
       this.results = undefined;
+      if (this.count > 0) this.select(0);
       return;
     }
     if (this.index === "none") void this.startIndex();
@@ -167,7 +218,7 @@ export class Pane {
       const page = await api.search(folder.id, text, offset);
       if (id === this.#search) {
         this.results = page;
-        this.selected = page.items.length > 0 ? 0 : -1;
+        if (page.items.length > 0) this.select(0);
       }
     } catch (reason) {
       if (id === this.#search) this.error = String(reason);
@@ -175,6 +226,6 @@ export class Pane {
   }
 
   close() {
-    if (this.folder) void api.closeFolder(this.folder.id);
+    void api.closePane(this.id);
   }
 }

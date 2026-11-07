@@ -1,58 +1,21 @@
-// Mirrors src-tauri/src/contract.rs. Change both files together.
+// Types come from src-tauri/src/contract.rs; `cargo test -p firewol-tauri` regenerates ./bindings.
+export type { ClipboardState } from "./bindings/ClipboardState";
+export type { Entry } from "./bindings/Entry";
+export type { FolderProgress } from "./bindings/FolderProgress";
+export type { FolderView } from "./bindings/FolderView";
+export type { IndexState } from "./bindings/IndexState";
+export type { ItemRef } from "./bindings/ItemRef";
+export type { Navigation } from "./bindings/Navigation";
+export type { OperationDone } from "./bindings/OperationDone";
+export type { Page } from "./bindings/Page";
+export type { Segment } from "./bindings/Segment";
+export type { SessionState } from "./bindings/SessionState";
+export type { Startup } from "./bindings/Startup";
+export type { Step } from "./bindings/Step";
+export type { TransferStatus } from "./bindings/TransferStatus";
 
+// Event names mirror the constants in contract.rs.
 export const FOLDER_PROGRESS = "folder-progress";
 export const INDEX_STATE = "index-state";
-
-export interface Segment {
-  name: string;
-  path: string;
-}
-
-export interface Entry {
-  name: string;
-  path: string;
-  directory: boolean;
-  size: number | null;
-  modified: number | null;
-}
-
-export interface Page {
-  offset: number;
-  items: Entry[];
-  hasMore: boolean;
-}
-
-export interface FolderView {
-  id: number;
-  path: string;
-  segments: Segment[];
-  count: number;
-  complete: boolean;
-  page: Page;
-}
-
-export interface FolderProgress {
-  id: number;
-  count: number;
-  complete: boolean;
-  error: string | null;
-}
-
-export interface IndexState {
-  id: number;
-  ready: boolean;
-  count: number;
-  error: string | null;
-}
-
-export interface Startup {
-  label: string;
-  path: string;
-  split: boolean;
-  report: boolean;
-  extraWindows: number;
-  idleMs: number;
-  pins: Segment[];
-  locale: string;
-  sinceStartMs: number;
-}
+export const OPERATION_DONE = "operation-done";
+export const SESSION_CHANGED = "session-changed";

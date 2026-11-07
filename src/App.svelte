@@ -6,14 +6,19 @@
   import {
     FOLDER_PROGRESS,
     INDEX_STATE,
+    OPERATION_DONE,
+    SESSION_CHANGED,
     type Entry,
     type FolderProgress,
     type IndexState,
+    type OperationDone,
+    type SessionState,
     type Startup,
+    type TransferStatus,
   } from "./lib/contract";
   import FileList from "./lib/FileList.svelte";
   import FolderIcon from "./lib/FolderIcon.svelte";
-  import { formatCount, useLocale } from "./lib/format";
+  import { formatCount, formatSize, useLocale } from "./lib/format";
   import Icon from "./lib/Icon.svelte";
   import { Pane } from "./lib/pane.svelte";
 
@@ -30,22 +35,31 @@
 
   const appWindow = getCurrentWindow();
   let startup = $state<Startup>();
+  let session = $state.raw<SessionState>({ pins: [], clipboard: null });
   let panes = $state<Pane[]>([]);
   let lists = $state<FileList[]>([]);
+  let paneCounter = 0;
   let activeIndex = $state(0);
   let sidebar = $state(true);
   let preset = $state(stored("preset", "light"));
   let dark = $state(stored("dark", "false") === "true");
   let editing = $state(false);
   let address = $state("");
-  let menu = $state<{ kind: "item" | "more"; x: number; y: number }>();
+  let menu = $state<{ kind: "item" | "area" | "more"; x: number; y: number }>();
+  let toast = $state<{ message: string; undo: boolean; error: boolean }>();
+  let transfer = $state.raw<TransferStatus | null>(null);
   let fatal = $state("");
   let searchField: HTMLInputElement;
   let addressField: HTMLInputElement | undefined = $state();
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  let transferTimer: ReturnType<typeof setInterval> | undefined;
 
   const active = $derived(panes[activeIndex] ?? panes[0]);
+  const other = $derived(panes.length > 1 ? panes[activeIndex === 0 ? 1 : 0] : undefined);
   const title = $derived(active?.folder?.segments.at(-1)?.name ?? "Firewol");
-  const selectedEntry = $derived(active?.entry(active.selected));
+  const focused = $derived(active?.entry(active.selected));
+  const selectedCount = $derived(active?.selection.size ?? 0);
+  const pinned = $derived(session.pins.some((pin) => pin.path === active?.folder?.path));
 
   $effect(() => {
     document.title = `${title} – Firewol`;
@@ -77,11 +91,119 @@
     store("dark", String(dark));
   }
 
+  function newPane() {
+    return new Pane(`${startup?.label ?? "main"}:${++paneCounter}`);
+  }
+
+  function notify(message: string, options: { undo?: boolean; error?: boolean } = {}) {
+    clearTimeout(toastTimer);
+    toast = { message, undo: options.undo ?? false, error: options.error ?? false };
+    toastTimer = setTimeout(() => (toast = undefined), options.error ? 8000 : 6000);
+  }
+
+  /** Runs a command that starts a file operation; failures to start show at once. */
+  async function start(action: Promise<void>, transfers = false) {
+    menu = undefined;
+    try {
+      await action;
+      if (transfers) watchTransfer();
+    } catch (reason) {
+      notify(String(reason), { error: true });
+    }
+  }
+
+  function watchTransfer() {
+    clearInterval(transferTimer);
+    transferTimer = setInterval(async () => {
+      transfer = await api.transferStatus().catch(() => null);
+    }, 300);
+  }
+
+  function stopTransferWatch() {
+    clearInterval(transferTimer);
+    transferTimer = undefined;
+    transfer = null;
+  }
+
+  let doneWaiters: ((done: OperationDone) => void)[] = [];
+
+  /** Resolves with the next operation result (used by the self-test). */
+  function nextDone() {
+    return new Promise<OperationDone>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("No operation result within 30 s")), 30_000);
+      doneWaiters.push((done) => {
+        clearTimeout(timer);
+        resolve(done);
+      });
+    });
+  }
+
+  function finished(done: OperationDone) {
+    const waiters = doneWaiters;
+    doneWaiters = [];
+    waiters.forEach((resolve) => resolve(done));
+    stopTransferWatch();
+    if (done.refresh) for (const pane of panes) void pane.refresh();
+    notify(done.message, { undo: done.succeeded, error: !done.succeeded });
+    void api.session().then((state) => (session = state));
+  }
+
   function open(entry: Entry, newWindow: boolean) {
     menu = undefined;
     if (!entry.directory) return;
     if (newWindow) void api.openWindow(entry.path, false);
     else void active?.open(entry.path);
+  }
+
+  async function clip(cut: boolean) {
+    menu = undefined;
+    const items = active?.selectedRefs() ?? [];
+    if (items.length === 0) return;
+    try {
+      session = await api.setClipboard(items, cut);
+      notify(`${cut ? "Cut" : "Copied"} ${items.length} item${items.length === 1 ? "" : "s"}`);
+    } catch (reason) {
+      notify(String(reason), { error: true });
+    }
+  }
+
+  function paste() {
+    const into = active?.folder?.item;
+    if (into && session.clipboard) void start(api.paste(into), true);
+  }
+
+  function toOtherPane(moveItems: boolean) {
+    const into = other?.folder?.item;
+    const items = active?.selectedRefs() ?? [];
+    if (into && items.length > 0) void start(api.transfer(items, into, moveItems), true);
+  }
+
+  function rename(entry: Entry, name: string) {
+    if (entry.id) void start(api.rename(entry.id, name));
+  }
+
+  function recycle() {
+    const entries = active?.selectedEntries() ?? [];
+    if (entries.length !== 1 || !entries[0].id) {
+      notify("Select one item to move to the Recycle Bin", { error: true });
+      return;
+    }
+    void start(api.recycle(entries[0].id));
+  }
+
+  function undo() {
+    toast = undefined;
+    void start(api.undo(), true);
+  }
+
+  async function togglePin(path: string | undefined) {
+    menu = undefined;
+    if (!path) return;
+    try {
+      session = await api.togglePin(path);
+    } catch (reason) {
+      notify(String(reason), { error: true });
+    }
   }
 
   async function toggleSplit() {
@@ -93,7 +215,7 @@
       activeIndex = 0;
       return;
     }
-    const pane = new Pane();
+    const pane = newPane();
     panes = [...panes, pane];
     if (active?.folder) await pane.open(active.folder.path);
   }
@@ -116,12 +238,13 @@
     if (address.trim()) void active?.open(address.trim());
   }
 
-  function showMenu(kind: "item" | "more", x: number, y: number) {
-    menu = { kind, x: Math.min(x, window.innerWidth - 268), y: Math.min(y, window.innerHeight - 220) };
+  function showMenu(kind: "item" | "area" | "more", x: number, y: number) {
+    menu = { kind, x: Math.min(x, window.innerWidth - 268), y: Math.min(y, window.innerHeight - 380) };
   }
 
   function shortcut(event: KeyboardEvent) {
     const key = event.key.toLowerCase();
+    const typing = event.target instanceof HTMLInputElement;
     if (event.key === "Escape" && menu) menu = undefined;
     else if (event.key === "Escape" && editing) editing = false;
     else if (event.ctrlKey && key === "l") editAddress();
@@ -133,14 +256,13 @@
     else if (event.altKey && event.key === "ArrowRight") void active?.forward();
     else if (event.altKey && event.key === "ArrowUp") void active?.up();
     else if (event.key === "F5") void active?.refresh();
+    else if (typing) return;
+    else if (event.ctrlKey && key === "c") void clip(false);
+    else if (event.ctrlKey && key === "x") void clip(true);
+    else if (event.ctrlKey && key === "v") paste();
+    else if (event.ctrlKey && key === "z") undo();
     else return;
     event.preventDefault();
-  }
-
-  // Chromium-only, rounded heap figures that let the gate separate JavaScript from the rest.
-  function heap() {
-    const memory = (performance as Performance & { memory?: { usedJSHeapSize: number; totalJSHeapSize: number } }).memory;
-    return memory ? { used: memory.usedJSHeapSize, total: memory.totalJSHeapSize } : null;
   }
 
   const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
@@ -158,6 +280,12 @@
       if (performance.now() - start > timeout) throw new Error(`Timed out waiting for ${what}`);
       await sleep(25);
     }
+  }
+
+  // Chromium-only, rounded heap figures that let the gate separate JavaScript from the rest.
+  function heap() {
+    const memory = (performance as Performance & { memory?: { usedJSHeapSize: number; totalJSHeapSize: number } }).memory;
+    return memory ? { used: memory.usedJSHeapSize, total: memory.totalJSHeapSize } : null;
   }
 
   async function benchmark(info: Startup, firstListMs: number) {
@@ -226,28 +354,116 @@
     }
   }
 
+  /**
+   * Drives the real interface functions against a fixture with `source\note.txt` and an
+   * empty `dest` folder next to it, then saves each step's result.
+   */
+  async function selfTest(info: Startup) {
+    const steps: { step: string; ok: boolean; detail?: string }[] = [];
+    const check = (step: string, ok: boolean, detail?: string) => {
+      steps.push({ step, ok, detail });
+      if (!ok) throw new Error(`${step}: ${detail ?? "failed"}`);
+    };
+    const names = (pane: Pane) => (pane.pages[0] ?? []).map((entry) => entry.name);
+    const pick = (pane: Pane, name: string) => {
+      const row = names(pane).indexOf(name);
+      check(`find ${name}`, row >= 0, names(pane).join(", "));
+      pane.select(row);
+    };
+    const settle = async (pane: Pane, done: Promise<OperationDone>) => {
+      const result = await done;
+      await pane.refresh();
+      session = await api.session();
+      return result;
+    };
+    const source = panes[0];
+    try {
+      const sourcePath = info.path;
+      const destPath = `${source.folder?.segments.at(-2)?.path}\\dest`;
+      pick(source, "note.txt");
+      await clip(true);
+      check("cut", session.clipboard?.cut === true && session.clipboard.count === 1);
+      await source.open(destPath);
+      let done = nextDone();
+      paste();
+      let result = await settle(source, done);
+      check("paste moves the file", result.succeeded && names(source).includes("note.txt"), result.message);
+      check("a finished move empties the clipboard", session.clipboard === null);
+      pick(source, "note.txt");
+      done = nextDone();
+      rename(source.entry(source.selected)!, "renamed.txt");
+      result = await settle(source, done);
+      check("rename", result.succeeded && names(source).includes("renamed.txt"), result.message);
+      done = nextDone();
+      undo();
+      result = await settle(source, done);
+      check("undo rename", result.succeeded && names(source).includes("note.txt"), result.message);
+      done = nextDone();
+      undo();
+      result = await settle(source, done);
+      check("undo move", result.succeeded && !names(source).includes("note.txt"), result.message);
+      check("back is available", source.canBack);
+      await source.back();
+      check("back returns to the source", source.folder?.path === sourcePath && names(source).includes("note.txt"));
+      check("forward is available", source.canForward);
+      await toggleSplit();
+      const target = panes[1];
+      await target.open(destPath);
+      activeIndex = 0;
+      pick(source, "note.txt");
+      done = nextDone();
+      toOtherPane(false);
+      result = await settle(target, done);
+      check("copy to the other pane", result.succeeded && names(target).includes("note.txt"), result.message);
+      activeIndex = 1;
+      pick(target, "note.txt");
+      done = nextDone();
+      recycle();
+      result = await settle(target, done);
+      check("move to the Recycle Bin", result.succeeded && !names(target).includes("note.txt"), result.message);
+      done = nextDone();
+      undo();
+      result = await settle(target, done);
+      check("undo recycle", result.succeeded && names(target).includes("note.txt"), result.message);
+      await togglePin(destPath);
+      check("pin", session.pins.some((pin) => pin.path === destPath));
+      await togglePin(destPath);
+      check("unpin", !session.pins.some((pin) => pin.path === destPath));
+    } catch (reason) {
+      if (steps.every((step) => step.ok)) steps.push({ step: "error", ok: false, detail: String(reason) });
+    }
+    await api.saveReport({ steps, passed: steps.every((step) => step.ok) });
+  }
+
   onMount(() => {
     const unlisten = [
       listen<FolderProgress>(FOLDER_PROGRESS, (event) => panes.forEach((pane) => pane.progress(event.payload))),
       listen<IndexState>(INDEX_STATE, (event) => panes.forEach((pane) => pane.indexed(event.payload))),
+      listen<OperationDone>(OPERATION_DONE, (event) => finished(event.payload)),
+      listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
     ];
     void (async () => {
       const info = await api.startup();
       const start = performance.now();
       useLocale(info.locale);
       startup = info;
-      panes = info.split ? [new Pane(), new Pane()] : [new Pane()];
+      session = info.session;
+      panes = info.split ? [newPane(), newPane()] : [newPane()];
       await Promise.all(panes.map((pane) => pane.open(info.path)));
       await painted();
       const firstListMs = info.sinceStartMs + performance.now() - start;
       lists[0]?.focus();
-      if (info.report) {
+      if (info.selfTest) await selfTest(info);
+      else if (info.report) {
         await benchmark(info, firstListMs).catch((reason) =>
           api.saveReport({ label: info.label, error: String(reason) }),
         );
       }
     })().catch((reason) => (fatal = String(reason)));
-    return () => unlisten.forEach((promise) => void promise.then((stop) => stop()));
+    return () => {
+      clearInterval(transferTimer);
+      unlisten.forEach((promise) => void promise.then((stop) => stop()));
+    };
   });
 </script>
 
@@ -275,8 +491,8 @@
 
     <div class="toolbar">
       <button class="ib" class:on={sidebar} aria-pressed={sidebar} aria-label="Sidebar (Ctrl+B)" title="Sidebar (Ctrl+B)" onclick={() => (sidebar = !sidebar)}><Icon name="sidebar" /></button>
-      <button class="ib" aria-label="Back (Alt+Left)" title="Back (Alt+Left)" disabled={!active?.history.length} onclick={() => active?.back()}><Icon name="back" /></button>
-      <button class="ib" aria-label="Forward (Alt+Right)" title="Forward (Alt+Right)" disabled={!active?.future.length} onclick={() => active?.forward()}><Icon name="forward" /></button>
+      <button class="ib" aria-label="Back (Alt+Left)" title="Back (Alt+Left)" disabled={!active?.canBack} onclick={() => active?.back()}><Icon name="back" /></button>
+      <button class="ib" aria-label="Forward (Alt+Right)" title="Forward (Alt+Right)" disabled={!active?.canForward} onclick={() => active?.forward()}><Icon name="forward" /></button>
       <button class="ib" aria-label="Up one level (Alt+Up)" title="Up one level (Alt+Up)" disabled={(active?.folder?.segments.length ?? 0) < 2} onclick={() => active?.up()}><Icon name="up" /></button>
       {#if editing}
         <form class="field address" onsubmit={submitAddress}>
@@ -317,13 +533,23 @@
     <div class="body">
       {#if sidebar}
         <nav class="sidebar" aria-label="Pinned folders">
-          <div class="side-title">Pinned</div>
-          {#each startup?.pins ?? [] as pin (pin.path)}
+          <div class="side-head">
+            <span class="side-title">Pinned</span>
+            <button
+              class="ib sm"
+              class:on={pinned}
+              aria-pressed={pinned}
+              aria-label={pinned ? "Unpin current folder" : "Pin current folder"}
+              title={pinned ? "Unpin current folder" : "Pin current folder"}
+              onclick={() => togglePin(active?.folder?.path)}
+            ><Icon name="pin" size={14} /></button>
+          </div>
+          {#each session.pins as pin (pin.path)}
             <button class="pin" class:on={pin.path === active?.folder?.path} onclick={() => active?.open(pin.path)}>
               <FolderIcon /><span>{pin.name}</span>
             </button>
           {:else}
-            <p class="muted side-empty">No pinned folders yet.</p>
+            <p class="muted side-empty">Pin folders you use often. They stay here until you unpin them.</p>
           {/each}
         </nav>
       {/if}
@@ -336,7 +562,9 @@
             marked={panes.length > 1 && index === activeIndex}
             onactivate={() => (activeIndex = index)}
             onopen={open}
-            onmenu={(x, y) => showMenu("item", x, y)}
+            onmenu={(x, y, onRow) => showMenu(onRow ? "item" : "area", x, y)}
+            onrename={rename}
+            onrecycle={recycle}
           />
         {/each}
       </div>
@@ -346,9 +574,20 @@
       {#if fatal || active?.error}
         <span class="error">{fatal || active?.error}</span>
       {:else if active}
-        <span>{formatCount(active.rows)} {active.searching ? "results" : "items"}{active.complete ? "" : " · reading…"}{selectedEntry ? " · 1 selected" : ""}</span>
+        <span>{formatCount(active.rows)} {active.searching ? (active.rows === 1 ? "result" : "results") : active.rows === 1 ? "item" : "items"}{active.complete ? "" : " · reading…"}{selectedCount > 0 ? ` · ${selectedCount} selected` : ""}</span>
+      {/if}
+      {#if session.clipboard}
+        <span>· {session.clipboard.count} {session.clipboard.cut ? "cut" : "copied"}</span>
       {/if}
       <span class="grow"></span>
+      {#if transfer}
+        <span class="pill">
+          <span class="accent icon"><Icon name="transfer" size={14} /></span>
+          <span>{transfer.phase === "paused" ? "Paused" : transfer.phase === "cancelled" ? "Cancelling" : "Transferring"} · {formatSize(transfer.bytes)} · {transfer.finished} done</span>
+          <button class="ib xs" aria-label={transfer.phase === "paused" ? "Resume transfer" : "Pause transfer"} onclick={() => api.pauseTransfer()}><Icon name={transfer.phase === "paused" ? "play" : "pause"} size={12} /></button>
+          <button class="ib xs" aria-label="Cancel transfer" onclick={() => api.cancelTransfer()}><Icon name="close" size={12} /></button>
+        </span>
+      {/if}
       {#if active?.index === "building"}
         <span>Indexing folder…</span>
       {:else if active?.index === "ready"}
@@ -357,13 +596,42 @@
     </footer>
   </div>
 
+  {#if toast}
+    <div class="toast" class:error={toast.error} role="alert">
+      <span>{toast.message}</span>
+      {#if toast.undo}<button class="toast-action" onclick={undo}>Undo <kbd class="kbd">Ctrl Z</kbd></button>{/if}
+      <button class="ib xs" aria-label="Dismiss" onclick={() => (toast = undefined)}><Icon name="close" size={12} /></button>
+    </div>
+  {/if}
+
   {#if menu}
     <div class="menu" role="menu" tabindex="-1" style:left={`${menu.x}px`} style:top={`${menu.y}px`} onmousedown={(event) => event.stopPropagation()}>
       {#if menu.kind === "item"}
-        <button class="mi" role="menuitem" disabled={!selectedEntry?.directory} onclick={() => selectedEntry && open(selectedEntry, false)}><Icon name="open" /><span class="label">Open</span><span class="sc">Enter</span></button>
-        <button class="mi" role="menuitem" disabled={!selectedEntry?.directory} onclick={() => selectedEntry && open(selectedEntry, true)}><Icon name="window" /><span class="label">Open in new window</span><span class="sc">Ctrl+Enter</span></button>
+        <button class="mi" role="menuitem" disabled={!focused?.directory} onclick={() => focused && open(focused, false)}><Icon name="open" /><span class="label">Open</span><span class="sc">Enter</span></button>
+        <button class="mi" role="menuitem" disabled={!focused?.directory} onclick={() => focused && open(focused, true)}><Icon name="window" /><span class="label">Open in new window</span><span class="sc">Ctrl+Enter</span></button>
         <div class="sep"></div>
-        <button class="mi" role="menuitem" onclick={() => { if (selectedEntry) void navigator.clipboard.writeText(selectedEntry.path); menu = undefined; }}><Icon name="copy" /><span class="label">Copy path</span></button>
+        <button class="mi" role="menuitem" onclick={() => clip(true)}><Icon name="cut" /><span class="label">Cut</span><span class="sc">Ctrl+X</span></button>
+        <button class="mi" role="menuitem" onclick={() => clip(false)}><Icon name="copy" /><span class="label">Copy</span><span class="sc">Ctrl+C</span></button>
+        {#if other?.folder?.item}
+          <button class="mi" role="menuitem" onclick={() => toOtherPane(false)}><Icon name="toPane" /><span class="label">Copy to other pane</span></button>
+          <button class="mi" role="menuitem" onclick={() => toOtherPane(true)}><Icon name="transfer" /><span class="label">Move to other pane</span></button>
+        {/if}
+        <div class="sep"></div>
+        <button class="mi" role="menuitem" disabled={selectedCount !== 1} onclick={() => { menu = undefined; if (active) active.renaming = active.selected; }}><Icon name="rename" /><span class="label">Rename</span><span class="sc">F2</span></button>
+        <button class="mi" role="menuitem" disabled={selectedCount !== 1} onclick={recycle}><Icon name="trash" /><span class="label">Move to Recycle Bin</span><span class="sc">Del</span></button>
+        <div class="sep"></div>
+        {#if focused?.directory && selectedCount === 1}
+          <button class="mi" role="menuitem" onclick={() => togglePin(focused?.path)}><Icon name="pin" /><span class="label">{session.pins.some((pin) => pin.path === focused?.path) ? "Unpin from sidebar" : "Pin to sidebar"}</span></button>
+        {/if}
+        <button class="mi" role="menuitem" onclick={() => { if (focused) void navigator.clipboard.writeText(focused.path); menu = undefined; }}><Icon name="copy" /><span class="label">Copy path</span></button>
+        <div class="sep"></div>
+        <button class="mi" role="menuitem" onclick={undo}><Icon name="undo" /><span class="label">Undo</span><span class="sc">Ctrl+Z</span></button>
+        <button class="mi" role="menuitem" onclick={() => { menu = undefined; void active?.refresh(); }}><Icon name="refresh" /><span class="label">Refresh</span><span class="sc">F5</span></button>
+      {:else if menu.kind === "area"}
+        <button class="mi" role="menuitem" disabled={!session.clipboard} onclick={paste}><Icon name="paste" /><span class="label">Paste{session.clipboard ? ` ${session.clipboard.count} item${session.clipboard.count === 1 ? "" : "s"}` : ""}</span><span class="sc">Ctrl+V</span></button>
+        <button class="mi" role="menuitem" onclick={() => togglePin(active?.folder?.path)}><Icon name="pin" /><span class="label">{pinned ? "Unpin this folder" : "Pin this folder"}</span></button>
+        <div class="sep"></div>
+        <button class="mi" role="menuitem" onclick={undo}><Icon name="undo" /><span class="label">Undo</span><span class="sc">Ctrl+Z</span></button>
         <button class="mi" role="menuitem" onclick={() => { menu = undefined; void active?.refresh(); }}><Icon name="refresh" /><span class="label">Refresh</span><span class="sc">F5</span></button>
       {:else}
         <div class="menu-title">Theme</div>
@@ -395,6 +663,7 @@
   .toolbar { display: flex; align-items: center; gap: 4px; flex: none; min-height: 52px; padding: 6px 12px 8px 10px; }
   .address { flex: 1 1 360px; min-width: 0; margin-left: 6px; overflow: hidden; }
   .icon { display: flex; flex: none; }
+  .accent { color: var(--accent); }
   .crumb { flex: none; padding: 3px 6px; border: 0; border-radius: 6px; background: transparent; font-size: 13px; }
   .crumb:hover { background: var(--hover); }
   .crumb.cur { font-weight: 600; }
@@ -402,14 +671,22 @@
   .search { flex: 0 1 280px; min-width: 180px; margin: 0 6px; }
   .body { display: flex; flex: 1; min-height: 0; gap: 8px; padding: 0 12px 0 8px; }
   .sidebar { display: flex; flex-direction: column; gap: 2px; flex: 0 0 216px; padding: 2px 0; overflow: auto; }
-  .side-title { padding: 4px 12px 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
-  .side-empty { margin: 0; padding: 4px 12px; font-size: 12px; }
+  .side-head { display: flex; align-items: center; justify-content: space-between; padding: 0 4px 4px 12px; }
+  .side-title { font-size: 12px; font-weight: 600; color: var(--muted); }
+  .side-empty { margin: 0; padding: 4px 12px; font-size: 12px; line-height: 18px; }
   .pin { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 12px; border: 0; border-radius: var(--radius-s); background: transparent; font-size: 13px; text-align: left; }
   .pin span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pin:hover { background: var(--hover); }
   .pin.on { background: var(--sel); color: var(--sel-text); box-shadow: var(--sel-shadow); font-weight: 600; }
   .panes { display: flex; flex: 1; min-width: 0; gap: 12px; }
-  .status { display: flex; align-items: center; gap: 16px; flex: none; height: 36px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
+  .status { display: flex; align-items: center; gap: 12px; flex: none; height: 36px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
   .grow { flex-grow: 1; }
   .error { color: var(--text); }
+  .pill { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 4px 0 10px; border: var(--border-w) solid var(--border); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow-s); backdrop-filter: var(--blur); color: var(--text); }
+  :global(.ib.xs) { width: 22px; height: 22px; border-radius: 999px; }
+  .toast { position: fixed; left: 50%; bottom: 52px; z-index: 30; display: flex; align-items: center; gap: 12px; max-width: min(640px, calc(100% - 32px)); padding: 8px 8px 8px 16px; transform: translateX(-50%); border: var(--border-w) solid var(--border); border-radius: var(--radius); background: var(--surface-2); box-shadow: var(--shadow-pop); backdrop-filter: var(--blur); font-size: 13px; }
+  .toast.error { border-color: #c42b1c; }
+  .toast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toast-action { display: flex; align-items: center; gap: 8px; flex: none; height: 28px; padding: 0 10px; border: 0; border-radius: var(--radius-s); background: var(--sel); color: var(--sel-text); font-size: 13px; font-weight: 600; }
+  .toast-action:hover { background: var(--hover); }
 </style>

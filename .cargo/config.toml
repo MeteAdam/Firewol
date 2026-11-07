@@ -1,0 +1,3 @@
+[env]
+# `cargo test -p firewol-tauri` writes the interface's TypeScript contract here.
+TS_RS_EXPORT_DIR = { value = "src/lib/bindings", relative = true }

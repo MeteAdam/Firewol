@@ -1,10 +1,11 @@
 use std::fs::{self, ReadDir};
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
-use super::{Cancellation, Item, ItemPage, decode, encode, resolve_directory};
+use super::{Cancellation, Item, ItemPage, decode, encode, resolve_directory, unix_seconds};
 use crate::PageRequest;
 
 /// A directory snapshot whose row numbers stay stable while enumeration proceeds.
@@ -24,7 +25,10 @@ impl Directory {
         // Pages are read in row order, so a small cache keeps each open pane cheap.
         db.execute_batch(
             "PRAGMA cache_size = -1024;
-             CREATE TABLE listing (row INTEGER PRIMARY KEY, name BLOB, directory INTEGER)",
+             CREATE TABLE listing (
+                row INTEGER PRIMARY KEY, name BLOB, directory INTEGER,
+                size INTEGER, modified INTEGER, attributes INTEGER
+             )",
         )?;
         Ok(Self {
             path,
@@ -54,17 +58,25 @@ impl Directory {
         let mut next = self.count;
         let mut complete = false;
         {
-            let mut insert = tx.prepare("INSERT INTO listing VALUES (?1, ?2, ?3)")?;
+            let mut insert = tx.prepare("INSERT INTO listing VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
             for _ in 0..batch {
                 cancel.check()?;
                 let Some(entry) = source.next().transpose()? else {
                     complete = true;
                     break;
                 };
+                // On Windows the entry's metadata comes from the enumeration itself.
+                let metadata = entry.metadata()?;
+                let directory = entry.file_type()?.is_dir();
                 insert.execute(params![
                     next,
                     encode(&entry.file_name()),
-                    entry.file_type()?.is_dir()
+                    directory,
+                    (!directory)
+                        .then(|| i64::try_from(metadata.file_size()))
+                        .transpose()?,
+                    unix_seconds(metadata.last_write_time()),
+                    metadata.file_attributes(),
                 ])?;
                 next = next.checked_add(1).context("Folder is too large")?;
             }
@@ -79,14 +91,22 @@ impl Directory {
 
     pub fn list_dir(&self, page: PageRequest, cancel: &Cancellation) -> Result<ItemPage> {
         let mut statement = self.db.prepare_cached(
-            "SELECT name, directory FROM listing WHERE row >= ?1 ORDER BY row LIMIT ?2",
+            "SELECT name, directory, size, modified, attributes FROM listing
+             WHERE row >= ?1 ORDER BY row LIMIT ?2",
         )?;
         let mut rows = statement.query(params![page.offset, page.limit()])?;
         let mut items = Vec::new();
         while let Some(row) = rows.next()? {
             cancel.check()?;
             let name: Vec<u8> = row.get(0)?;
-            items.push(Item::from_path(self.path.join(decode(&name)), row.get(1)?));
+            let size: Option<i64> = row.get(2)?;
+            items.push(Item::listed(
+                self.path.join(decode(&name)),
+                row.get(1)?,
+                size.map(u64::try_from).transpose()?,
+                row.get(3)?,
+                row.get(4)?,
+            ));
         }
         let end = page.offset.saturating_add(items.len() as u32);
         Ok(ItemPage {

@@ -189,7 +189,7 @@ impl SearchReader {
             }
         };
         let sql = format!(
-            "SELECT path, directory, file_ref, file_volume FROM {source} WHERE {term_predicate}
+            "SELECT path, directory, file_ref, file_volume, size, modified FROM {source} WHERE {term_predicate}
              AND (?2 IS NULL OR extension = ?2)
              AND (?3 IS NULL OR size >= ?3) AND (?4 IS NULL OR size <= ?4)
              AND (?5 IS NULL OR modified >= ?5) AND (?6 IS NULL OR modified <= ?6)
@@ -223,7 +223,8 @@ impl SearchReader {
             }
             let path: Vec<u8> = row.get(0)?;
             let path = PathBuf::from(decode(&path));
-            let directory = row.get(1)?;
+            let directory: bool = row.get(1)?;
+            let size: i64 = row.get(4)?;
             let file_ref: Option<i64> = row.get(2)?;
             let Ok(id) = ItemId::at(path.clone()) else {
                 continue;
@@ -238,6 +239,9 @@ impl SearchReader {
             items.push(Item {
                 path,
                 directory,
+                size: (!directory).then(|| u64::try_from(size)).transpose()?,
+                modified: Some(row.get(5)?),
+                attributes: None,
                 id: Some(id),
             });
         }

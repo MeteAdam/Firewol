@@ -1,18 +1,21 @@
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use firewol_core::explorer::{
-    Cancellation, Directory, Filters, Item, ItemPage, PAGE_SIZE, SearchIndex, SearchQuery,
-    SearchReader, data_dir, display_path, page,
+    Cancellation, Directory, Filters, History, Item, ItemId, ItemPage, PAGE_SIZE, SearchIndex,
+    SearchQuery, SearchReader, data_dir, display_path, page,
 };
 
-use crate::contract::{Entry, FolderProgress, FolderView, IndexState, Page, Segment};
+use crate::contract::{
+    Entry, FolderProgress, FolderView, IndexState, ItemRef, Navigation, Page, Segment, Step,
+};
+
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 
 pub enum Notice {
     Progress(FolderProgress),
@@ -21,11 +24,12 @@ pub enum Notice {
 
 pub type Notify = Arc<dyn Fn(Notice) + Send + Sync>;
 
-/// Open folder snapshots, keyed by the id the interface holds.
+/// Open folder snapshots, keyed by the id the interface holds, and the panes showing them.
 #[derive(Default)]
 pub struct Folders {
     next: AtomicU64,
     open: Mutex<HashMap<u64, Arc<Folder>>>,
+    panes: Mutex<HashMap<String, Pane>>,
 }
 
 struct Folder {
@@ -44,8 +48,87 @@ struct Search {
     reader: Option<SearchReader>,
 }
 
+#[derive(Default)]
+struct Pane {
+    owner: String,
+    history: History,
+    folder: Option<u64>,
+    // Bumped by every navigation, so a slower earlier one cannot replace a later one.
+    sequence: u64,
+}
+
 impl Folders {
-    pub fn open(&self, owner: &str, path: &Path, notify: Notify) -> Result<FolderView> {
+    /// Opens `path` (or the history entry `step` names) in `pane` and updates its history.
+    pub fn navigate(
+        &self,
+        owner: &str,
+        pane: &str,
+        path: Option<&str>,
+        step: Step,
+        notify: Notify,
+    ) -> Result<Navigation> {
+        let (target, position, sequence) = {
+            let mut panes = lock(&self.panes);
+            let state = panes.entry(pane.to_owned()).or_default();
+            state.owner = owner.to_owned();
+            state.sequence += 1;
+            let (target, position) = match step {
+                Step::New => (PathBuf::from(path.context("Enter a folder")?), None),
+                Step::Back | Step::Forward => {
+                    let (position, target) = state
+                        .history
+                        .peek(matches!(step, Step::Forward))
+                        .context("There is no folder in that direction")?;
+                    (target.to_owned(), Some(position))
+                }
+                Step::Reload => (
+                    state
+                        .history
+                        .current()
+                        .map(Path::to_owned)
+                        .or_else(|| path.map(PathBuf::from))
+                        .context("Open a folder first")?,
+                    None,
+                ),
+            };
+            (target, position, state.sequence)
+        };
+        let folder = self.open(owner, &target, notify)?;
+        let mut panes = lock(&self.panes);
+        let state = panes.entry(pane.to_owned()).or_default();
+        if state.sequence != sequence {
+            drop(panes);
+            self.close(folder.id);
+            anyhow::bail!("A newer navigation replaced this one");
+        }
+        match (step, position) {
+            (Step::Back | Step::Forward, Some(position)) => state.history.go(position),
+            (Step::New, _) => state.history.visit(PathBuf::from(&folder.path)),
+            _ => {}
+        }
+        let previous = state.folder.replace(folder.id);
+        let navigation = Navigation {
+            can_back: state.history.peek(false).is_some(),
+            can_forward: state.history.peek(true).is_some(),
+            folder,
+        };
+        drop(panes);
+        if let Some(previous) = previous {
+            self.close(previous);
+        }
+        Ok(navigation)
+    }
+
+    pub fn close_pane(&self, pane: &str) {
+        if let Some(folder) = lock(&self.panes)
+            .remove(pane)
+            .and_then(|state| state.folder)
+        {
+            self.close(folder);
+        }
+    }
+
+    fn open(&self, owner: &str, path: &Path, notify: Notify) -> Result<FolderView> {
         let cancel = Cancellation::default();
         let mut directory = Directory::open(path)?;
         directory.advance(PAGE_SIZE, &cancel)?;
@@ -67,6 +150,7 @@ impl Folders {
         }
         Ok(FolderView {
             id,
+            item: ItemId::at(path.clone()).ok().as_ref().map(item_ref),
             path: text(&path),
             segments: segments(&path),
             count,
@@ -155,13 +239,14 @@ impl Folders {
         Ok(convert(reader.search(&query, &cancel)?))
     }
 
-    pub fn close(&self, id: u64) {
+    fn close(&self, id: u64) {
         if let Some(folder) = lock(&self.open).remove(&id) {
             folder.cancel.cancel();
         }
     }
 
     pub fn close_owned(&self, owner: &str) {
+        lock(&self.panes).retain(|_, pane| pane.owner != owner);
         lock(&self.open).retain(|_, folder| {
             let keep = folder.owner != owner;
             if !keep {
@@ -231,6 +316,24 @@ fn segments(path: &Path) -> Vec<Segment> {
     segments
 }
 
+/// Keeps the core's own path (which may carry the `\\?\` prefix) so long paths still verify.
+pub fn item_ref(id: &ItemId) -> ItemRef {
+    let (volume, index) = id.identity();
+    ItemRef {
+        path: id.path().to_string_lossy().into_owned(),
+        volume,
+        index: index.to_string(),
+    }
+}
+
+pub fn item_id(item: &ItemRef) -> Result<ItemId> {
+    Ok(ItemId::from_parts(
+        PathBuf::from(&item.path),
+        item.volume,
+        item.index.parse().context("Invalid item identity")?,
+    ))
+}
+
 fn convert(page: ItemPage) -> Page {
     Page {
         offset: page.offset,
@@ -240,18 +343,15 @@ fn convert(page: ItemPage) -> Page {
 }
 
 fn entry(item: &Item) -> Entry {
-    let metadata = fs::symlink_metadata(&item.path).ok();
     Entry {
         name: item.name().to_string_lossy().into_owned(),
         path: text(&item.path),
         directory: item.directory,
-        size: metadata
-            .as_ref()
-            .filter(|metadata| !metadata.is_dir())
-            .map(fs::Metadata::len),
-        modified: metadata
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|elapsed| elapsed.as_secs() as i64),
+        size: item.size,
+        modified: item.modified,
+        hidden: item
+            .attributes
+            .is_some_and(|attributes| attributes & FILE_ATTRIBUTE_HIDDEN != 0),
+        id: item.id.as_ref().map(item_ref),
     }
 }

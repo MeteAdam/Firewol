@@ -80,7 +80,25 @@ Without tuning, the same run peaked at 520,949,760 bytes and one idle window use
 
 `scripts/Test-UiaStress.ps1` opens the same folder and runs `scripts/Uia-Client.ps1`. Every 250 ms the client walks all descendants of the window, scrolls the first scrollable element by 7 % and listens to structure and name events for 60 s. The Win32 build completed one walk in 43.8 s and returned 500,037 elements. Its window did not hang in that run; the 555 MB stall above remains unreproduced, but it shows that the owner-data list exposes every row. The spike completed 182 walks with a median of 59 ms and at most 235 elements, scrolled 181 times and never hung. Under this deliberately slow, event-heavy client, the WebView2 browser process queued UI Automation events and the total briefly peaked at 267,722,752 bytes before falling back to 121 MB.
 
-Open items: cold start misses the 300 ms target because WebView2 startup takes about 0.37 s (the Win32 build shows its list in about 0.1 s), and a heavy UI Automation client can push memory above the budget for a short time.
+Open items: cold start misses the 300 ms target because WebView2 startup takes about 0.37 s (the Win32 build shows its list in about 0.1 s), and a heavy UI Automation client can push memory above the budget for a short time. The user accepted both trade-offs on 2026-11-07, and M4 continues with Tauri.
+
+## M4.2 contracts and session layer
+
+- **Listing metadata.** Folder pages carry size, modification time and Win32 attributes from the directory enumeration itself, with no extra file open. Search results carry size and time from the index. Hidden items appear dimmed.
+- **Session layer.** `firewol_core::explorer::Session` holds what every window shares: the clipboard, one file operation at a time on its own COM thread, completion notices, transfer pause and cancel, and settings with pins. `History` keeps each pane's back and forward list; the Tauri side keeps one per pane and closes superseded navigations. The Win32 build keeps its own copies until it is retired in M4.4.
+- **Contract.** `src-tauri/src/contract.rs` is the single definition. `cargo test -p firewol-tauri` regenerates `src/lib/bindings/` through ts-rs. Item identities cross the boundary as path, volume serial and file index; the index is a decimal string because NTFS file indexes can exceed JavaScript's safe integers. Every operation still verifies the identity before it acts.
+- **Interface.** Ctrl and Shift select several items. The context menu and shortcuts cover Cut (Ctrl+X), Copy (Ctrl+C), Paste (Ctrl+V), Copy or Move to the other pane, inline Rename (F2), Move to Recycle Bin (Del) and Undo (Ctrl+Z, also from the result toast). The status bar shows a running transfer with Pause, Resume and Cancel. Pins persist and update in every window.
+
+Verification on 2026-11-07: the core tests pass, including three new session tests (history, cut and paste with clipboard consumption, rename, two-step undo, conflict preservation and persisted pins). Rust formatting, release Clippy for all three crates and Svelte checks are clean. Run the interface self-test against a folder that holds `source\note.txt` and an empty `dest`:
+
+```powershell
+$env:FIREWOL_OPEN = 'C:\path\to\fixture\source'
+$env:FIREWOL_SPIKE_REPORT = 'C:\path\to\reports'
+$env:FIREWOL_SELF_TEST = '1'
+.\target\release\firewol-tauri.exe
+```
+
+It drives the real interface functions through cut, paste, rename, both undos, back and forward, copying to the other pane, recycling and restoring the exact item, and pinning. All 18 steps passed. A repeated gate run measured 134,860,800 bytes for one idle window, a 200,929,280-byte peak with four windows, indexing and copying, 15 ms navigation into the 100,000-row folder, 164 FPS and an 18 ms search p95.
 
 ## M2 navigation and appearance
 

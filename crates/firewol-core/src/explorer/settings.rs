@@ -176,6 +176,7 @@ pub fn default_menu() -> Vec<MenuEntry> {
     .collect()
 }
 
+#[derive(Clone)]
 pub struct Settings {
     pub last_folder: Option<PathBuf>,
     pub pins: Vec<PathBuf>,

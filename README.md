@@ -28,6 +28,22 @@ Firewol uses Windows Shell operations for same-volume moves, folder copies and o
 
 The Windows release tests cover native pause, resume and cancellation, batches with a conflict, long Unicode paths, settings migration, executable replacement, cross-volume moves with named streams, and undo conflicts. To run both extended M3 tests, set `FIREWOL_M3_OTHER_VOLUME` to a writable folder on a second fixed NTFS volume and run `cargo test --release --locked -p firewol-core --test windows_transfer -- --include-ignored`.
 
+## Current verification and release blocker
+
+On 2026-11-07, the existing MSVC x64 toolchain and Windows SDK were verified. Rust formatting, release Clippy, nine standard Windows release tests, the extended native pause/resume/cancel test and Svelte checks passed. The cross-volume test was not rerun in this session.
+
+The release UI copied two 4 GiB files in parallel, completed verification, and reported success. A second transfer was paused at 5,385 MiB with no published files, resumed beyond 7,232 MiB, and cancelled before publication. Cancellation removed both staging directories and preserved both sources. The exact-identity Recycle Bin restore and destination-conflict probe also passed. All fixtures and settings were isolated under `target/verify-m3-be5d47eaa6cc4d62b64e597855550377` on the local NTFS drive.
+
+**Release remains blocked.** A 100,000-row list initially presented in 103 ms, scrolled at 88 FPS and verified its last row, but later became unresponsive with desktop UI Automation active. A fresh single-window process reached **555,610,112 bytes of private working set**. Samples of its busy thread ran through Windows accessibility routines. This suggests an accessibility-related enumeration problem; its root cause has not been isolated. The attempted four-window M3 run was stopped, and these results supersede any inference that the earlier memory measurements cover this scenario. Explicit user-driven UAC denial is also pending.
+
+The fixture's `list.json`, `memory.json`, `large-list-blocker.json` and `large-list-stack.txt` retain the observations locally. Large transfer payloads were removed after verification; the directory fixture and reports remain. `STATE.md` identifies the next investigation.
+
+For subsequent interactive measurements, `scripts/Measure-Session.ps1` reuses the M0 private-working-set sampler. Supply the app PID, a control JSON path and an output JSON path. Control JSON has `phase` (a nonempty label), `process_ids` (additional helper roots) and `stop` (boolean). Start with `stop: false`, change phase or helper roots as workloads change, and set `stop: true` to finish. Replace the control file atomically from a temporary file in the same directory. Detached Firewol windows share one process; process trees and repeated roots are deduplicated. The report includes phase peaks, sample counts, the largest sampling gap, timeout status and the 150,000,000-byte check. A run with no samples fails.
+
+```powershell
+.\scripts\Measure-Session.ps1 -AppProcessId 12345 -ControlPath .\target\session-control.json -OutputPath .\target\session-memory.json
+```
+
 ## M2 navigation and appearance
 
 - **Tabs.** Press Ctrl+T to open a tab in the current folder, Ctrl+Tab to switch, and Ctrl+W to close. Drag a tab along the strip to reorder it or outside the window to detach it. Ctrl+Shift+N also detaches the active tab. A session supports four windows with shared clipboard and undo history. A tab restores its folder history and rebuilds any resumed folder search.

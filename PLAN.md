@@ -1,46 +1,36 @@
-# Firewol — Windows dosya yöneticisi planı
+# Firewol — Windows File Manager Plan
 
-## İlk sürüm
+## First usable release
 
-Windows 11 x64 için açık kaynaklı, standart kullanıcı yetkisiyle çalışan bir dosya yöneticisi geliştir. İlk kullanılabilir sürümde sade gezinme, sanal dosya listesi, güvenli temel dosya işlemleri, seçili klasör araması ve **UAC onayıyla seçilen NTFS bölümünün tamamında arama** yer alsın. İlk açılışta kullanıcı klasörünü göster, sonraki açılışlarda son geçerli konumu kullan. Kenar çubuğunu kullanıcının elle eklediği sabitlerle oluştur.
+Build an open-source Windows 11 x64 file manager that runs with standard user permissions. Include minimal navigation, a virtual file list, safe basic file operations, folder search, and **opt-in NTFS volume search through a read-only helper approved by UAC**. Open the user folder on first launch and the last accessible folder thereafter. Populate the sidebar only with manually pinned folders.
 
-Ana görünüm ve Firewol içi sağ tık menüsü için Nilesoft ekran görüntülerindeki nötr yüzeyleri, kompakt ikonlu satırları, ince grup ayraçlarını ve hizalı klavye kısayollarını referans al. Sağ tık özelleştirmesinin kapsamı Firewol içiyle sınırlı. [Koyu görünüm](https://nilesoft.org/images/screenshots/s1.png) · [Açık menü](https://nilesoft.org/images/screenshots/light/goto.png)
+Use Nilesoft's neutral surfaces, compact icon rows, fine group separators and aligned shortcuts as visual references for the main view and the in-app context menu. Context-menu customization is limited to Firewol. [Dark reference](https://nilesoft.org/images/screenshots/s1.png) · [Light menu reference](https://nilesoft.org/images/screenshots/light/goto.png)
 
-## Uygulama sırası
+## Implementation order
 
-1. **M0 — Windows prototipi ve bellek kararı.** Rust çekirdeğini arayüzden ayır. Tek WebView2 kullanan Tauri v2, Svelte ve TypeScript ile listeleme, indeks sorgusu ve NTFS yardımcısını içeren bir ölçüm prototipi kur. Toplam bellek 150 MB sınırına ulaşırsa aynı çekirdeği `windows-rs`, Win32 sanal liste ve Direct2D ile kullan. Bu makinede Rust, Node ve WebView2 bulundu. MSVC x64 ve Windows SDK, ilk derlemeden önce doğrulanacak. Bu aşamada Geri Dönüşüm Kutusu’na gönderme ve aynı öğeyi geri yükleme de gerçek Windows üzerinde sınanacak. [Tauri önkoşulları](https://v2.tauri.app/start/prerequisites/) · [WebView2 süreç modeli](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-model)
-2. **M1 — İlk kullanılabilir sürüm.** Adres çubuğu, klasör gezinmesi, temel sağ tık menüsü, arama ve dosya işlemlerini birleştir. Arayüz `list_dir`, `search`, `submit_operation` ve `undo` için tipli Rust sözleşmelerini kullansın. Liste ve sonuçlar sayfalı, sorgular iptal edilebilir olsun. Dosya işlemleri ekrandaki metin yerine çekirdeğin verdiği öğe kimliğini kullansın.
-3. **M2 — Gezinme ve görünüm.** Sürüklenebilir sekmeleri, çift paneli, paneller arası aktarımı, gizlenebilir kenar çubuğunu ve düzenlenebilir sağ tık menüsünü ekle. Renk çemberini, yedi temayı ve özelleştirilebilir pencere düğmelerini ortak tema değerleriyle kur. Klasör takma adı, renk, simge ve etiketleri `%LOCALAPPDATA%\Firewol` altında, arama indeksinden ayrı sakla. Ayrı pencereye taşınan sekmeleri de bellek ölçümüne dahil et.
-4. **M3 — Transfer ve yetki seçenekleri.** Düzenli yerel dosyalar için sınırlı paralellik, hız grafiği ve `CopyFile2` ile duraklatma/devam ekle. Geçici hedefi sağlama toplamıyla doğruladıktan sonra yayımla. Diskler arası taşımada kaynağı ancak doğrulama ve hedefe yerleştirme tamamlanınca kaldır. Yönetici işlem ayarları, izin listesi veya uyarılı geniş kapsam üzerinden hangi eylemlerin UAC isteyebileceğini belirlesin. [CopyFile2](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-copyfile2) · [Duraklatma ve devam](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ne-winbase-copyfile2_message_action)
+1. **M0 — Windows prototype and memory decision.** Separate the Rust core from the interface. Build a measurement prototype using Tauri v2, one WebView2, Svelte and TypeScript, including directory listing, index queries and the NTFS helper. If combined memory reaches 150,000,000 bytes, reuse the core with `windows-rs`, a Win32 virtual list and Direct2D. Verify the MSVC x64 tools and Windows SDK before building. Prove recycling and restoring the exact item on real Windows using synthetic NTFS data. [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) · [WebView2 process model](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/process-model)
+2. **M1 — First usable release.** Combine an address bar, folder navigation, basic context menu, search and file operations. Use typed Rust contracts for `list_dir`, `search`, `submit_operation` and `undo`. Page directory listings and results; support cancellation of queries. File operations must use core-issued item identities rather than displayed text.
+3. **M2 — Navigation and appearance.** Add draggable tabs, split panes, transfers between panes, a hideable sidebar and an editable in-app menu. Build the color wheel, seven presets and configurable caption buttons on shared theme values. Store folder aliases, colors, icons and tags under `%LOCALAPPDATA%\Firewol`, separately from search indexes. Include detached windows in memory measurements.
+4. **M3 — Transfers and elevation options.** Use bounded parallelism, speed graphs and `CopyFile2` pause/resume for regular local files. Verify staged destinations by checksum before publishing them. For cross-volume moves, remove the source only after verification and publication. Administrator settings determine which actions may request UAC, through an allowlist or an explicitly warned broad policy. [CopyFile2](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-copyfile2) · [Pause and resume](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ne-winbase-copyfile2_message_action)
 
-## Arama ve dosya işlemleri
+## Search and file operations
 
-- **İndeks.** Disk tabanlı SQLite FTS5 kullan. Bellek içi denemede üç karakterlik alt dize, uzantı filtresi ve iki karakterlik önek sorgusu doğrulandı. Bir ve iki karakterde önek, üç ve üzerindeyse dosya adı içinde eşleşme kullan. Boyut, uzantı ve tarih filtrelerini SQL’de uygula. Regex sonuçlarını iptal edilebilir gruplar halinde göster. [SQLite FTS5](https://www.sqlite.org/fts5.html)
-- **NTFS.** Yalnızca kullanıcı etkinleştirdiğinde, salt okunur ve oturuma bağlı bir UAC yardımcısı `FSCTL_ENUM_USN_DATA` ile MFT kayıtlarını alsın. Yardımcı, istemcinin kullanıcı yetkileriyle görünürlüğü doğrulanan girdileri yerel, erişimi kısıtlı bir kanal üzerinden iletsin. İlk taramadan önce USN konumunu al, tarama sırasında gelen değişiklikleri uygula ve indeksle imleci aynı işlemde kaydet. Journal sıfırlanırsa veya kayıtlar kaçırılırsa ilgili kapsamı yeniden kur. Standart klasör araması dizin taraması ve değişiklik bildirimleriyle çalışsın. [Win32 bölüm erişimi](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew) · [MFT numaralandırma](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_enum_usn_data) · [USN günlüğü](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_read_usn_journal)
-- **Geri al.** Kopyalama, taşıma ve yeniden adlandırmada `IFileOperation`, silmede Geri Dönüşüm Kutusu’na taşıyan `ITransferSource::RecycleItem` kullan. `Ctrl+Z`, oturumda başarıyla tamamlandığı doğrulanmış ve güvenle tersine çevrilebilen öğeleri işlesin. Geri yüklemede tam öğe kimliğini doğrula. Çakışma veya geri dönüşüm hatasında işlemi durdur ve kullanıcıya bildir. [IFileOperation](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ifileoperation) · [RecycleItem](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-itransfersource-recycleitem)
+- **Index.** Use disk-backed SQLite FTS5. The research prototype verified three-character substring matching, extension filters and two-character prefix queries. Match prefixes for one or two characters and substrings for three or more. Apply size, extension and date filters in SQL. Return regex results in cancellable batches. [SQLite FTS5](https://www.sqlite.org/fts5.html)
+- **NTFS.** Only after explicit user opt-in, a read-only, session-bound UAC helper enumerates MFT references with `FSCTL_ENUM_USN_DATA`. Use a restricted local channel; the standard-user client verifies path visibility and access before accepting entries. Capture the USN position before the initial scan, replay changes made during enumeration, and commit the index and cursor together. Rebuild the scope after journal resets or missed history. Ordinary folder search uses directory enumeration and change notifications. [Volume access](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew) · [MFT enumeration](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_enum_usn_data) · [USN journal](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_read_usn_journal)
+- **Undo.** Use `IFileOperation` for copying, moving and renaming, and `ITransferSource::RecycleItem` for recycling. Ctrl+Z reverses verified, successfully completed and safely reversible items from the current session. Verify exact item identity when restoring. Stop and report destination conflicts or recycle failures. M3 regular-file transfers use their verified transfer engine for both forward operations and undo. [IFileOperation](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ifileoperation) · [RecycleItem](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-itransfersource-recycleitem)
 
-## Kabul ölçütleri
+## Acceptance criteria
 
-- Release derlemesini 100.000 öğeli tek klasör ve 1 milyon indeks kaydı içeren sentetik NTFS diskte ölç. Firewol, WebView2 ve yardımcı süreçlerin **toplam tepe özel çalışma kümesi 150.000.000 baytın altında** kalmalı. Başlangıç, boşta, kaydırma, indeksleme ve transfer sırasında ölç. Boşta 40–70 MB hedefle. Hazır indekste ilk görünür arama sonucu p95 `<100 ms`, büyük dizinde ilk görünür liste p95 `<300 ms` ve kaydırma en az 60 FPS olmalı. İlk indeksleme ve tam sıralama sürelerini ayrı kaydet. [Windows bellek sayacı](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex2)
-- Windows üzerinde UAC reddini, erişilemeyen klasörleri, journal kaybını, uzun ve Unicode yolları, kesilen transferi ve geri alma çakışmasını dene. Rust biçim kontrolü, Clippy, testler ve seçilen arayüzün tip kontrolü temiz geçsin. Başlangıç lisansı olarak MIT kullan.
+- Measure release builds with a 100,000-item folder and 1,000,000 index records on synthetic NTFS data. Combined peak private working set across Firewol, WebView2 and helpers must stay **below 150,000,000 bytes** during startup, idle, scrolling, indexing and transfers. Target 40–70 MB idle, ready-index first-result p95 below 100 ms, first visible large-directory listing p95 below 300 ms, and at least 60 FPS scrolling. Report initial indexing and full sorting separately. [Windows memory counters](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex2)
+- On Windows, exercise UAC denial, inaccessible folders, lost journal history, long and Unicode paths, interrupted transfers and undo conflicts. Rust formatting, Clippy, tests and the selected interface's type checking must be clean. Start with the MIT license.
 
-## Sohbet devri
+## Handoff
 
-Plan Modu nedeniyle dosyaların kaydı uygulama turuna kaldı. İlk adım bu planı kaynaklarıyla birlikte İngilizce `PLAN.md` olarak kaydetmek ve Firewol köküne aşağıdaki `STATE.md` dosyasını eklemek.
+The original planning handoff requested saving this plan in English and creating a root `STATE.md` whose next step was M0. Repository history now contains completed M0, M1, M2 and M3 deliveries; the current state supersedes that bootstrap instruction. Preserve the implementation and continue from the single root `STATE.md`.
 
-```markdown
-# Firewol State
-
-## Purpose
-Build a lightweight, customizable Windows 11 file manager with instant local search.
-
-## Currently Working State & Constraints
-- PROMPT.md holds the product spec. PLAN.md holds the execution plan and sources.
-- Research is complete. Bootstrap and runtime measurements are pending.
-- The first usable release includes folder search and opt-in, read-only NTFS volume indexing.
-- Keep the total private working set below 150 MB. Try Tauri first and switch to native Win32 if it exceeds the cap.
-- Nilesoft screenshots guide the default appearance and in-app menu. Store customization in local app data.
-
-## Next Immediate Step
-Run M0 from PLAN.md. Verify MSVC and the Windows SDK, then measure the prototype and prove recycle/restore on synthetic NTFS data.
-```
+- M0 selected native Win32 after the Tauri measurement exceeded the memory cap.
+- M1–M3 implemented browsing, search, identity-checked operations, undo, tabs, split panes, appearance, verified parallel transfers and elevation policies.
+- Interactive transfer pause, resume, cancellation and staged-file cleanup were verified on Windows on 2026-11-07. Recycle/restore was also rechecked.
+- A 100,000-row list became unresponsive with UI Automation active and reached 555,610,112 bytes of private working set in one window. Stacks point into Windows accessibility code; the root cause needs isolation before accepting a four-window M3 run.
+- Explicit UAC cancellation and the four-window transfer/indexing measurement remain pre-release requirements.
+- Keep current findings and the next immediate step in `STATE.md` (at most 25 lines). See `README.md` for reproduction commands and completed measurements.

@@ -60,7 +60,7 @@
   const active = $derived(panes[activeIndex] ?? panes[0]);
   const other = $derived(panes.length > 1 ? panes[activeIndex === 0 ? 1 : 0] : undefined);
   const title = $derived(active?.folder?.segments.at(-1)?.name ?? "Firewol");
-  const focused = $derived(active?.entry(active.selected));
+  const focused = $derived(active?.focusedEntry);
   const selectedCount = $derived(active?.selection.size ?? 0);
   const pinned = $derived(session.pins.some((pin) => pin.path === active?.folder?.path));
 
@@ -311,6 +311,7 @@
     const report: Record<string, unknown> = {
       label: info.label,
       panes: panes.length,
+      sortMs: main.sortMs,
       rows: main.count,
       firstListMs,
       scrollFps,
@@ -451,6 +452,14 @@
       const persisted = await api.getSettings();
       check("settings persist through the core", !persisted.sidebar && persisted.appearance.accent?.join() === "18,52,86" && persisted.version === 2);
       await saveSettings({ sidebar: original.sidebar, appearance: original.appearance });
+      await source.refresh();
+      pick(source, "file2.txt");
+      check("folders precede naturally sorted file names", names(source).join() === "z-folder,file2.txt,file10.txt,note.txt");
+      const identity = source.selectedRefs()[0];
+      const oldRow = source.selected;
+      await source.sortBy("name");
+      await source.refresh();
+      check("sort and refresh preserve selected identity", source.selected !== oldRow && source.selectedRefs()[0]?.index === identity.index && source.selectedRefs()[0]?.path === identity.path);
     } catch (reason) {
       if (steps.every((step) => step.ok)) steps.push({ step: "error", ok: false, detail: String(reason) });
     }

@@ -3,4 +3,4 @@
 /**
  * Emitted as `folder-progress` while a folder is still being enumerated.
  */
-export type FolderProgress = { id: number, count: number, complete: boolean, error: string | null, };
+export type FolderProgress = { id: number, count: number, complete: boolean, sort_ms: number, error: string | null, };

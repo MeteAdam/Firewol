@@ -1,12 +1,30 @@
 use std::fs::{self, ReadDir};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
+use windows::Win32::Globalization::{CompareStringEx, NORM_IGNORECASE, SORT_DIGITSASNUMBERS};
+use windows::core::PCWSTR;
 
 use super::{Cancellation, Item, ItemPage, decode, encode, resolve_directory, unix_seconds};
 use crate::PageRequest;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SortColumn {
+    #[default]
+    Name,
+    Modified,
+    Type,
+    Size,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sort {
+    pub column: SortColumn,
+    pub descending: bool,
+}
 
 /// A directory snapshot whose row numbers stay stable while enumeration proceeds.
 pub struct Directory {
@@ -14,6 +32,8 @@ pub struct Directory {
     source: Option<ReadDir>,
     db: Connection,
     count: u32,
+    sort: Option<Sort>,
+    sort_ms: f64,
 }
 
 impl Directory {
@@ -22,19 +42,45 @@ impl Directory {
         let source = fs::read_dir(&path).with_context(|| format!("List {}", path.display()))?;
         let db = Connection::open("")?;
         crate::index::configure(&db)?;
+        db.create_collation("windows_natural", |left, right| {
+            let left_wide: Vec<u16> = left.encode_utf16().collect();
+            let right_wide: Vec<u16> = right.encode_utf16().collect();
+            let result = unsafe {
+                CompareStringEx(
+                    PCWSTR::null(),
+                    NORM_IGNORECASE | SORT_DIGITSASNUMBERS,
+                    &left_wide,
+                    &right_wide,
+                    None,
+                    None,
+                    None,
+                )
+            };
+            match result.0 {
+                1 => std::cmp::Ordering::Less,
+                2 => std::cmp::Ordering::Equal,
+                3 => std::cmp::Ordering::Greater,
+                _ => left.cmp(right),
+            }
+        })?;
         // Pages are read in row order, so a small cache keeps each open pane cheap.
         db.execute_batch(
             "PRAGMA cache_size = -1024;
              CREATE TABLE listing (
                 row INTEGER PRIMARY KEY, name BLOB, directory INTEGER,
-                size INTEGER, modified INTEGER, attributes INTEGER
-             )",
+                size INTEGER, modified INTEGER, attributes INTEGER,
+                sort_name TEXT, extension TEXT
+             );
+             CREATE TABLE ordering (position INTEGER PRIMARY KEY, row INTEGER UNIQUE);
+             CREATE UNIQUE INDEX listing_name ON listing(name)",
         )?;
         Ok(Self {
             path,
             source: Some(source),
             db,
             count: 0,
+            sort: None,
+            sort_ms: 0.0,
         })
     }
 
@@ -50,6 +96,57 @@ impl Directory {
         self.source.is_none()
     }
 
+    pub fn is_sorted(&self) -> bool {
+        self.sort.is_some()
+    }
+    pub fn sort_ms(&self) -> f64 {
+        self.sort_ms
+    }
+
+    pub fn position(&self, name: &std::ffi::OsStr) -> Result<Option<u32>> {
+        let sql = if self.is_sorted() {
+            "SELECT o.position - 1 FROM listing AS l JOIN ordering AS o ON o.row = l.row WHERE name = ?1"
+        } else {
+            "SELECT row FROM listing WHERE name = ?1"
+        };
+        Ok(self
+            .db
+            .query_row(sql, [encode(name)], |row| row.get(0))
+            .optional()?)
+    }
+
+    /// Builds the row permutation only once enumeration is complete. The underlying
+    /// names stay byte-exact; the text collation affects display order only.
+    pub fn sort(&mut self, sort: Sort, cancel: &Cancellation) -> Result<()> {
+        if !self.is_complete() || self.sort == Some(sort) {
+            return Ok(());
+        }
+        cancel.check()?;
+        let start = Instant::now();
+        let column = match sort.column {
+            SortColumn::Name => "sort_name COLLATE windows_natural",
+            SortColumn::Modified => "modified",
+            SortColumn::Type => "extension COLLATE windows_natural",
+            SortColumn::Size => "size",
+        };
+        let direction = if sort.descending { "DESC" } else { "ASC" };
+        let interrupted = cancel.clone();
+        self.db
+            .progress_handler(1000, Some(move || interrupted.is_cancelled()))?;
+        let result = (|| -> Result<()> {
+            let tx = self.db.transaction()?;
+            tx.execute("DELETE FROM ordering", [])?;
+            tx.execute(&format!("INSERT INTO ordering(row) SELECT row FROM listing ORDER BY directory DESC, {column} {direction}, sort_name COLLATE windows_natural ASC, row ASC"), [])?;
+            tx.commit()?;
+            Ok(())
+        })();
+        self.db.progress_handler(0, None::<fn() -> bool>)?;
+        result?;
+        self.sort = Some(sort);
+        self.sort_ms = start.elapsed().as_secs_f64() * 1000.0;
+        Ok(())
+    }
+
     pub fn advance(&mut self, batch: u32, cancel: &Cancellation) -> Result<()> {
         let Some(source) = &mut self.source else {
             return Ok(());
@@ -58,7 +155,8 @@ impl Directory {
         let mut next = self.count;
         let mut complete = false;
         {
-            let mut insert = tx.prepare("INSERT INTO listing VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
+            let mut insert =
+                tx.prepare("INSERT INTO listing VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?;
             for _ in 0..batch {
                 cancel.check()?;
                 let Some(entry) = source.next().transpose()? else {
@@ -77,6 +175,13 @@ impl Directory {
                         .transpose()?,
                     unix_seconds(metadata.last_write_time()),
                     metadata.file_attributes(),
+                    entry.file_name().to_string_lossy(),
+                    entry
+                        .path()
+                        .extension()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_lowercase(),
                 ])?;
                 next = next.checked_add(1).context("Folder is too large")?;
             }
@@ -90,10 +195,12 @@ impl Directory {
     }
 
     pub fn list_dir(&self, page: PageRequest, cancel: &Cancellation) -> Result<ItemPage> {
-        let mut statement = self.db.prepare_cached(
-            "SELECT name, directory, size, modified, attributes FROM listing
-             WHERE row >= ?1 ORDER BY row LIMIT ?2",
-        )?;
+        let sql = if self.is_sorted() {
+            "SELECT name, directory, size, modified, attributes FROM ordering AS o JOIN listing AS l ON l.row = o.row WHERE o.position >= ?1 + 1 ORDER BY o.position LIMIT ?2"
+        } else {
+            "SELECT name, directory, size, modified, attributes FROM listing WHERE row >= ?1 ORDER BY row LIMIT ?2"
+        };
+        let mut statement = self.db.prepare_cached(sql)?;
         let mut rows = statement.query(params![page.offset, page.limit()])?;
         let mut items = Vec::new();
         while let Some(row) = rows.next()? {

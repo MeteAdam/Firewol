@@ -1,5 +1,52 @@
 #![cfg(windows)]
 
+#[test]
+fn natural_sort_keeps_folders_first_and_pages_stable() -> anyhow::Result<()> {
+    use firewol_core::explorer::{Cancellation, Directory, Sort, SortColumn, page};
+    let fixture = tempfile::tempdir()?;
+    for (name, size) in [("file10.txt", 10), ("file2.txt", 2), ("İzmir火.txt", 1)] {
+        std::fs::write(fixture.path().join(name), vec![0u8; size])?;
+    }
+    std::fs::create_dir(fixture.path().join("z-folder"))?;
+    let cancel = Cancellation::default();
+    let mut directory = Directory::open(fixture.path())?;
+    directory.advance(2, &cancel)?;
+    directory.sort(Sort::default(), &cancel)?;
+    assert!(
+        !directory.is_sorted(),
+        "first pages do not wait for full sorting"
+    );
+    while !directory.is_complete() {
+        directory.advance(128, &cancel)?;
+    }
+    directory.sort(Sort::default(), &cancel)?;
+    let items = directory.list_dir(page(0), &cancel)?.items;
+    assert!(items[0].directory);
+    let names: Vec<_> = items
+        .iter()
+        .map(|item| item.name().to_string_lossy())
+        .collect();
+    assert!(
+        names.iter().position(|name| name == "file2.txt")
+            < names.iter().position(|name| name == "file10.txt")
+    );
+    directory.sort(
+        Sort {
+            column: SortColumn::Size,
+            descending: true,
+        },
+        &cancel,
+    )?;
+    let items = directory.list_dir(page(0), &cancel)?.items;
+    assert!(items[0].directory);
+    assert_eq!(items[1].name(), "file10.txt");
+    assert_eq!(
+        directory.position(std::ffi::OsStr::new("file2.txt"))?,
+        Some(2)
+    );
+    Ok(())
+}
+
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;

@@ -46,6 +46,7 @@
   );
 
   $effect(() => {
+    void pane.pageVersion;
     if (pane.searching) return;
     const start = Math.floor(first / PAGE) * PAGE;
     const stop = end;
@@ -70,8 +71,8 @@
     else if (position + ROW > grid.scrollTop + height) grid.scrollTop = position + ROW - height;
   }
 
-  function move(row: number, extend: boolean) {
-    pane.select(row, extend ? "range" : "single");
+  async function move(row: number, extend: boolean) {
+    await pane.select(row, extend ? "range" : "single");
     reveal(pane.selected);
   }
 
@@ -79,7 +80,7 @@
     if (event.target instanceof HTMLInputElement) return;
     const step = Math.max(1, Math.floor((height - HEADER) / ROW) - 1);
     const moves: Record<string, number> = { ArrowDown: 1, ArrowUp: -1, PageDown: step, PageUp: -step };
-    const entry = pane.entry(pane.selected);
+    const entry = pane.focusedEntry;
     if (event.key in moves && !event.altKey) move(pane.selected + moves[event.key], event.shiftKey);
     else if (event.key === "Home") move(0, event.shiftKey);
     else if (event.key === "End") move(rows - 1, event.shiftKey);
@@ -102,7 +103,7 @@
   function rowMenu(event: MouseEvent, row: number) {
     event.preventDefault();
     event.stopPropagation();
-    if (!pane.selection.has(row)) pane.select(row);
+    if (!pane.isSelected(row)) void pane.select(row);
     else pane.selected = row;
     onmenu(event.clientX, event.clientY, true);
   }
@@ -179,11 +180,11 @@
     oncontextmenu={areaMenu}
   >
     <div class="cols hdr" role="row" aria-rowindex="1">
-      <div role="columnheader" aria-sort="ascending" class="sort">Name <Icon name="sortUp" size={12} weight={2} /></div>
+      <div role="columnheader" aria-sort={pane.sort.column === "name" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("name")}>Name {#if pane.sort.column === "name"}<span class:descending={pane.sort.descending}><Icon name="sortUp" size={12} weight={2} /></span>{/if}</button></div>
       {#if pane.searching}<div role="columnheader">Location</div>{/if}
-      <div role="columnheader">Date modified</div>
-      {#if !pane.searching}<div role="columnheader">Type</div>{/if}
-      <div role="columnheader" class="size">Size</div>
+      <div role="columnheader" aria-sort={pane.sort.column === "modified" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("modified")}>Date modified</button></div>
+      {#if !pane.searching}<div role="columnheader" aria-sort={pane.sort.column === "type" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" onclick={() => pane.sortBy("type")}>Type</button></div>{/if}
+      <div role="columnheader" class="size" aria-sort={pane.sort.column === "size" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("size")}>Size</button></div>
     </div>
     <div class="spacer" role="rowgroup" style:height={`${rows * ROW}px`}>
       <div class="rows" style:transform={`translateY(${first * ROW}px)`}>
@@ -194,13 +195,13 @@
           <!-- svelte-ignore a11y_interactive_supports_focus -->
           <div
             class="cols row"
-            class:sel={pane.selection.has(row)}
+            class:sel={pane.isSelected(row)}
             class:focus={row === pane.selected}
             class:hidden={entry?.hidden}
             role="row"
             id={`${id}-row-${row}`}
             aria-rowindex={row + 2}
-            aria-selected={pane.selection.has(row)}
+            aria-selected={pane.isSelected(row)}
             onmousedown={(event) => press(event, row)}
             ondblclick={() => entry && onopen(entry, false)}
             oncontextmenu={(event) => rowMenu(event, row)}
@@ -291,7 +292,8 @@
     border-bottom: 1px solid var(--sep);
     border-radius: 0;
   }
-  .sort { display: flex; align-items: center; gap: 4px; }
+  .sort { display: flex; align-items: center; gap: 4px; padding: 0; border: 0; background: transparent; font: inherit; }
+  .descending { transform: rotate(180deg); }
   .row:hover { background: var(--hover); }
   .row.sel { background: var(--sel); color: var(--sel-text); box-shadow: var(--sel-shadow); }
   .row.hidden .name { opacity: .6; }

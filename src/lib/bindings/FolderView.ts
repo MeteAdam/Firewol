@@ -3,4 +3,4 @@ import type { ItemRef } from "./ItemRef";
 import type { Page } from "./Page";
 import type { Segment } from "./Segment";
 
-export type FolderView = { id: number, path: string, item: ItemRef | null, segments: Array<Segment>, count: number, complete: boolean, page: Page, };
+export type FolderView = { id: number, path: string, item: ItemRef | null, segments: Array<Segment>, count: number, complete: boolean, sort_ms: number, page: Page, };

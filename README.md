@@ -100,11 +100,13 @@ $env:FIREWOL_SELF_TEST = '1'
 
 It drives the real interface functions through cut, paste, rename, both undos, back and forward, copying to the other pane, recycling and restoring the exact item, and pinning. All 18 steps passed. A repeated gate run measured 134,860,800 bytes for one idle window, a 200,929,280-byte peak with four windows, indexing and copying, 15 ms navigation into the 100,000-row folder, 164 FPS and an 18 ms search p95.
 
-## M2 navigation and appearance
-
 M4.2 Shell icons (2026-11-07): files use Windows associations through an asynchronous `icon` protocol. A dedicated STA worker has a 64-request queue, a two-second request deadline and an LRU capped at 256 entries / 8 MiB. Extension icons are shared; EXE, LNK, ICO and URL icons use the file path. Folders retain theme SVGs. Failed or timed-out requests show the generic file glyph. Shell extensions still execute inside the process; the deadline isolates UI waits, not native extension crashes.
 
 The release interface self-test (`scripts/Test-Interface.ps1`, isolated settings and fixture) passes all 19 steps including an actual image load through CSP. The repeated 100,000-row/four-window gate measured 152.4 MB idle, 198.0 MB peak, 24.2 ms median navigation, 164 FPS and 24.1 ms search p95. Cold start remains the accepted WebView2 trade-off at 550 ms. PNG extraction at 16–256 px and path-specific executable icons are covered by Windows core tests.
+
+M4.3-a/b adds shared versioned settings, appearance migration from localStorage, live updates across windows, persistent sidebar visibility, the last accessible folder and a busy-close sheet. Columns sort naturally through Windows `CompareStringEx`, always with folders first. Enumeration provides the first page before SQLite builds the final row order. Selections retain item identities across sorting and refresh. A 100,000-file sort took 320 ms separately from 24.2 ms median navigation; the four-window gate peaked at 210.0 MB (134.8 MB idle), with 164 FPS and 18.2 ms search p95. The isolated interface test checks natural order and preserves the same selected identity after it moves to another row.
+
+## M2 navigation and appearance
 
 - **Tabs.** Press Ctrl+T to open a tab in the current folder, Ctrl+Tab to switch, and Ctrl+W to close. Drag a tab along the strip to reorder it or outside the window to detach it. Ctrl+Shift+N also detaches the active tab. A session supports four windows with shared clipboard and undo history. A tab restores its folder history and rebuilds any resumed folder search.
 - **Split view.** Open a second pane with its own folder, tabs and search. Drop selected items on the other pane to copy them into the displayed folder. Hold Shift to move them. The context menu also offers both actions. Returning to a single pane keeps the open tabs.

@@ -11,6 +11,24 @@ pub const OPERATION_DONE: &str = "operation-done";
 pub const SESSION_CHANGED: &str = "session-changed";
 pub const SETTINGS_CHANGED: &str = "settings-changed";
 
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum SortColumn {
+    #[default]
+    Name,
+    Modified,
+    Type,
+    Size,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[ts(export)]
+pub struct SortView {
+    pub column: SortColumn,
+    pub descending: bool,
+}
+
 #[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AppearanceView {
@@ -165,6 +183,7 @@ pub struct Page {
     pub offset: u32,
     pub items: Vec<Entry>,
     pub has_more: bool,
+    pub sorted: bool,
 }
 
 #[derive(Serialize, TS)]
@@ -177,6 +196,7 @@ pub struct FolderView {
     pub segments: Vec<Segment>,
     pub count: u32,
     pub complete: bool,
+    pub sort_ms: f64,
     pub page: Page,
 }
 
@@ -208,6 +228,7 @@ pub struct FolderProgress {
     pub id: u64,
     pub count: u32,
     pub complete: bool,
+    pub sort_ms: f64,
     pub error: Option<String>,
 }
 

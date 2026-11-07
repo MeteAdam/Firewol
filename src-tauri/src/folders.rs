@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use firewol_core::explorer::{
     Cancellation, Directory, Filters, History, Item, ItemId, ItemPage, PAGE_SIZE, SearchIndex,
-    SearchQuery, SearchReader, data_dir, display_path, page,
+    SearchQuery, SearchReader, Sort, SortColumn, data_dir, display_path, page,
 };
 
 use crate::contract::{
-    Entry, FolderProgress, FolderView, IndexState, ItemRef, Navigation, Page, Segment, Step,
+    Entry, FolderProgress, FolderView, IndexState, ItemRef, Navigation, Page, Segment, SortView,
+    Step,
 };
 
 const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
@@ -37,6 +38,7 @@ struct Folder {
     path: PathBuf,
     cancel: Cancellation,
     directory: Mutex<Directory>,
+    sort: Mutex<Sort>,
     search: Mutex<Search>,
     query: Mutex<Option<Cancellation>>,
 }
@@ -65,6 +67,7 @@ impl Folders {
         pane: &str,
         path: Option<&str>,
         step: Step,
+        sort: SortView,
         notify: Notify,
     ) -> Result<Navigation> {
         let (target, position, sequence) = {
@@ -93,7 +96,7 @@ impl Folders {
             };
             (target, position, state.sequence)
         };
-        let folder = self.open(owner, &target, notify)?;
+        let folder = self.open(owner, &target, sort, notify)?;
         let mut panes = lock(&self.panes);
         let state = panes.entry(pane.to_owned()).or_default();
         if state.sequence != sequence {
@@ -128,10 +131,13 @@ impl Folders {
         }
     }
 
-    fn open(&self, owner: &str, path: &Path, notify: Notify) -> Result<FolderView> {
+    fn open(&self, owner: &str, path: &Path, sort: SortView, notify: Notify) -> Result<FolderView> {
         let cancel = Cancellation::default();
         let mut directory = Directory::open(path)?;
         directory.advance(PAGE_SIZE, &cancel)?;
+        let sort = sort_core(sort);
+        directory.sort(sort, &cancel)?;
+        let sort_ms = directory.sort_ms();
         let first = directory.list_dir(page(0), &cancel)?;
         let path = directory.path().to_owned();
         let (count, complete) = (directory.count(), directory.is_complete());
@@ -141,6 +147,7 @@ impl Folders {
             path: path.clone(),
             cancel,
             directory: Mutex::new(directory),
+            sort: Mutex::new(sort),
             search: Mutex::default(),
             query: Mutex::default(),
         });
@@ -155,14 +162,52 @@ impl Folders {
             segments: segments(&path),
             count,
             complete,
-            page: convert(first),
+            sort_ms,
+            page: Page {
+                sorted: complete,
+                ..convert(first)
+            },
         })
     }
 
-    pub fn page(&self, id: u64, offset: u32) -> Result<Page> {
+    pub fn page(&self, id: u64, offset: u32, sort: SortView) -> Result<Page> {
         let folder = self.get(id)?;
-        let items = lock(&folder.directory).list_dir(page(offset), &folder.cancel)?;
-        Ok(convert(items))
+        let sort = sort_core(sort);
+        *lock(&folder.sort) = sort;
+        let mut directory = lock(&folder.directory);
+        directory.sort(sort, &folder.cancel)?;
+        let items = directory.list_dir(page(offset), &folder.cancel)?;
+        Ok(Page {
+            sorted: directory.is_sorted(),
+            ..convert(items)
+        })
+    }
+
+    pub fn progress(&self, id: u64) -> Result<FolderProgress> {
+        let folder = self.get(id)?;
+        let directory = lock(&folder.directory);
+        Ok(FolderProgress {
+            id,
+            count: directory.count(),
+            complete: directory.is_complete(),
+            sort_ms: directory.sort_ms(),
+            error: None,
+        })
+    }
+
+    pub fn locate(&self, id: u64, items: &[ItemRef]) -> Result<Vec<Option<u32>>> {
+        let folder = self.get(id)?;
+        let directory = lock(&folder.directory);
+        items
+            .iter()
+            .map(|reference| {
+                let item = item_id(reference)?;
+                if item.verify().is_err() || item.path().parent() != Some(folder.path.as_path()) {
+                    return Ok(None);
+                }
+                directory.position(item.path().file_name().unwrap_or_default())
+            })
+            .collect()
     }
 
     pub fn index(&self, id: u64, notify: Notify) -> Result<IndexState> {
@@ -267,10 +312,18 @@ impl Folders {
 fn enumerate(id: u64, folder: &Folder, notify: &Notify) {
     let mut last = Instant::now();
     loop {
-        let (count, complete, result) = {
+        let sort = *lock(&folder.sort);
+        let (count, complete, sort_ms, result) = {
             let mut directory = lock(&folder.directory);
-            let result = directory.advance(PAGE_SIZE * 4, &folder.cancel);
-            (directory.count(), directory.is_complete(), result)
+            let result = directory
+                .advance(PAGE_SIZE * 4, &folder.cancel)
+                .and_then(|_| directory.sort(sort, &folder.cancel));
+            (
+                directory.count(),
+                directory.is_complete(),
+                directory.sort_ms(),
+                result,
+            )
         };
         if folder.cancel.is_cancelled() {
             return;
@@ -282,6 +335,7 @@ fn enumerate(id: u64, folder: &Folder, notify: &Notify) {
                 id,
                 count,
                 complete: done,
+                sort_ms,
                 error,
             }));
             last = Instant::now();
@@ -289,6 +343,19 @@ fn enumerate(id: u64, folder: &Folder, notify: &Notify) {
         if done {
             return;
         }
+    }
+}
+
+fn sort_core(sort: SortView) -> Sort {
+    use crate::contract::SortColumn as Column;
+    Sort {
+        column: match sort.column {
+            Column::Name => SortColumn::Name,
+            Column::Modified => SortColumn::Modified,
+            Column::Type => SortColumn::Type,
+            Column::Size => SortColumn::Size,
+        },
+        descending: sort.descending,
     }
 }
 
@@ -338,6 +405,7 @@ fn convert(page: ItemPage) -> Page {
     Page {
         offset: page.offset,
         has_more: page.has_more,
+        sorted: false,
         items: page.items.iter().map(entry).collect(),
     }
 }

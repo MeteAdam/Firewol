@@ -8,7 +8,7 @@ mod settings;
 pub mod volume;
 mod watch;
 
-pub use directory::Directory;
+pub use directory::{Directory, Sort, SortColumn};
 pub use operations::{
     MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations, TransferControl, TransferProgress,
     TransferRequest, TransferState,

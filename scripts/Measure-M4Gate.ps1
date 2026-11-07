@@ -27,6 +27,8 @@ $variables = [ordered]@{
     FIREWOL_SPIKE_WINDOWS = "$Windows"
     FIREWOL_SPIKE_IDLE_MS = "$($IdleSeconds * 1000)"
     FIREWOL_M0_ROOT = $work.FullName
+    FIREWOL_SELF_TEST = '0'
+    FIREWOL_SPLIT = ''
 }
 $phases = [ordered]@{}
 $appProcess = $null
@@ -83,14 +85,15 @@ try {
         $saved[$name] = [Environment]::GetEnvironmentVariable($name)
         [Environment]::SetEnvironmentVariable($name, $variables[$name])
     }
-    $appProcess = Start-Process -FilePath $appPath -PassThru
+    $appProcess = Start-Process -FilePath $appPath -WindowStyle Hidden -PassThru
     Measure-Phase -Name 'startup_scroll_index_search' -Done { Test-Report 'main' } -TimeoutSeconds 300
     $main = Get-Content -LiteralPath (Join-Path $reports.FullName 'main.json') -Raw | ConvertFrom-Json
     if ($main.error) { throw "The main window benchmark failed: $($main.error)" }
+    if ($null -eq $main.scrollFps -or $null -eq $main.searchP95Ms) { throw 'The app did not return a benchmark report' }
     $idle = [System.Diagnostics.Stopwatch]::StartNew()
     Measure-Phase -Name 'idle_one_window' -Done { $idle.Elapsed.TotalSeconds -ge ($IdleSeconds - 2) } -TimeoutSeconds ($IdleSeconds + 10)
 
-    $labels = @(1..($Windows - 1) | ForEach-Object { "window-$_" })
+    $labels = @(if ($Windows -gt 1) { 1..($Windows - 1) | ForEach-Object { "window-$_" } })
     if ($labels.Count -gt 0) {
         Measure-Phase -Name 'open_windows_split' -Done { @($labels | Where-Object { -not (Test-Report $_) }).Count -eq 0 } -TimeoutSeconds 240
         $settle = [System.Diagnostics.Stopwatch]::StartNew()
@@ -138,5 +141,8 @@ try {
         $appProcess.Kill($true)
         $null = $appProcess.WaitForExit(5000)
     }
-    foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+    foreach ($name in $saved.Keys) {
+        if ($null -eq $saved[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+    }
 }

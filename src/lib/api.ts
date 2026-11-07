@@ -10,6 +10,8 @@ import type {
   TransferStatus,
   SettingsView,
   SettingsPatch,
+  SortView,
+  FolderProgress,
 } from "./contract";
 
 export const api = {
@@ -17,10 +19,12 @@ export const api = {
   getSettings: () => invoke<SettingsView>("get_settings"),
   updateSettings: (patch: SettingsPatch) => invoke<SettingsView>("update_settings", { patch }),
   operationBusy: () => invoke<boolean>("operation_busy"),
-  navigate: (pane: string, path: string | null, step: Step) =>
-    invoke<Navigation>("navigate", { pane, path, step }),
+  navigate: (pane: string, path: string | null, step: Step, sort: SortView) =>
+    invoke<Navigation>("navigate", { pane, path, step, sort }),
   closePane: (pane: string) => invoke<void>("close_pane", { pane }),
-  listPage: (id: number, offset: number) => invoke<Page>("list_page", { id, offset }),
+  listPage: (id: number, offset: number, sort: SortView) => invoke<Page>("list_page", { id, offset, sort }),
+  folderProgress: (id: number) => invoke<FolderProgress>("folder_progress", { id }),
+  locateSelection: (id: number, items: ItemRef[]) => invoke<(number | null)[]>("locate_selection", { id, items }),
   startIndex: (id: number) => invoke<IndexState>("start_index", { id }),
   search: (id: number, text: string, offset: number) => invoke<Page>("search", { id, text, offset }),
   session: () => invoke<SessionState>("session"),

@@ -7,6 +7,9 @@ $source = New-Item -ItemType Directory -Path (Join-Path $run.FullName 'source')
 $null = New-Item -ItemType Directory -Path (Join-Path $run.FullName 'dest')
 $reports = New-Item -ItemType Directory -Path (Join-Path $run.FullName 'reports')
 Set-Content -LiteralPath (Join-Path $source.FullName 'note.txt') -Value 'Firewol disposable interface fixture.'
+Set-Content -LiteralPath (Join-Path $source.FullName 'file2.txt') -Value 'two'
+Set-Content -LiteralPath (Join-Path $source.FullName 'file10.txt') -Value 'ten'
+$null = New-Item -ItemType Directory -Path (Join-Path $source.FullName 'z-folder')
 $variables = @{
     LOCALAPPDATA = Join-Path $run.FullName 'local'
     WEBVIEW2_USER_DATA_FOLDER = Join-Path $run.FullName 'webview'
@@ -35,5 +38,8 @@ try {
     if (-not $result.passed) { throw 'Interface self-test failed' }
 } finally {
     if ($process -and -not $process.HasExited) { $process.Kill($true); $null = $process.WaitForExit(5000) }
-    foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+    foreach ($name in $saved.Keys) {
+        if ($null -eq $saved[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        else { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
+    }
 }

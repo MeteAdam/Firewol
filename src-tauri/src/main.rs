@@ -63,7 +63,7 @@ async fn startup(
     let main = request.is_none();
     let path = match &request {
         Some(request) => request.path.clone(),
-        None => match std::env::var_os("FIREWOL_OPEN") {
+        None => match std::env::var_os("FIREWOL_OPEN").filter(|value| !value.is_empty()) {
             Some(path) => path.to_string_lossy().into_owned(),
             None => {
                 let files = files.0.clone();
@@ -85,11 +85,14 @@ async fn startup(
     Ok(Startup {
         label,
         path,
-        split: request.map_or_else(|| std::env::var_os("FIREWOL_SPLIT").is_some(), |r| r.split),
+        split: request.map_or_else(
+            || std::env::var_os("FIREWOL_SPLIT").is_some_and(|value| !value.is_empty()),
+            |r| r.split,
+        ),
         report: state.report.is_some(),
         self_test: main
             && state.report.is_some()
-            && std::env::var_os("FIREWOL_SELF_TEST").is_some(),
+            && std::env::var("FIREWOL_SELF_TEST").is_ok_and(|value| value == "1"),
         extra_windows: if main {
             setting("FIREWOL_SPIKE_WINDOWS", 1).saturating_sub(1)
         } else {
@@ -116,20 +119,20 @@ fn user_locale() -> String {
 
 #[tauri::command]
 async fn navigate(
-    app: AppHandle,
     window: Window,
     state: State<'_, App>,
     files: State<'_, Files>,
     pane: String,
     path: Option<String>,
     step: Step,
+    sort: contract::SortView,
 ) -> Result<Navigation, String> {
     let folders = state.folders.clone();
-    let notify = notifier(&app);
+    let notify = notifier(window.app_handle());
     let owner = window.label().to_owned();
     let files = files.0.clone();
     blocking(move || {
-        let navigation = folders.navigate(&owner, &pane, path.as_deref(), step, notify)?;
+        let navigation = folders.navigate(&owner, &pane, path.as_deref(), step, sort, notify)?;
         let path = PathBuf::from(&navigation.folder.path);
         if files.settings().last_folder.as_ref() != Some(&path) {
             files.update_settings(|settings| settings.last_folder = Some(path))?;
@@ -145,9 +148,33 @@ fn close_pane(state: State<'_, App>, pane: String) {
 }
 
 #[tauri::command]
-async fn list_page(state: State<'_, App>, id: u64, offset: u32) -> Result<Page, String> {
+async fn list_page(
+    state: State<'_, App>,
+    id: u64,
+    offset: u32,
+    sort: contract::SortView,
+) -> Result<Page, String> {
     let folders = state.folders.clone();
-    blocking(move || folders.page(id, offset)).await
+    blocking(move || folders.page(id, offset, sort)).await
+}
+
+#[tauri::command]
+async fn folder_progress(
+    state: State<'_, App>,
+    id: u64,
+) -> Result<contract::FolderProgress, String> {
+    let folders = state.folders.clone();
+    blocking(move || folders.progress(id)).await
+}
+
+#[tauri::command]
+async fn locate_selection(
+    state: State<'_, App>,
+    id: u64,
+    items: Vec<ItemRef>,
+) -> Result<Vec<Option<u32>>, String> {
+    let folders = state.folders.clone();
+    blocking(move || folders.locate(id, &items)).await
 }
 
 #[tauri::command]
@@ -438,7 +465,9 @@ fn main() {
             folders,
             windows: Mutex::default(),
             next_window: AtomicU32::new(0),
-            report: std::env::var_os("FIREWOL_SPIKE_REPORT").map(PathBuf::from),
+            report: std::env::var_os("FIREWOL_SPIKE_REPORT")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
         })
         .setup(|app| {
             let handle = app.handle().clone();
@@ -466,6 +495,8 @@ fn main() {
             navigate,
             close_pane,
             list_page,
+            folder_progress,
+            locate_selection,
             start_index,
             search,
             session,

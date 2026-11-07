@@ -4,4 +4,8 @@ import type { ElevationView } from "./ElevationView";
 import type { MenuEntryView } from "./MenuEntryView";
 import type { StyledFolder } from "./StyledFolder";
 
-export type SettingsView = { version: number, theme_migrated: boolean, sidebar: boolean, grid: boolean, tile: number, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, };
+export type SettingsView = { version: number, theme_migrated: boolean, sidebar: boolean, grid: boolean, tile: number, 
+/**
+ * Pixels, 180 to 360 (default 232).
+ */
+sidebar_width: number, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, };

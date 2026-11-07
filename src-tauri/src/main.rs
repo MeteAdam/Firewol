@@ -16,9 +16,9 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use contract::{
-    ClipboardState, FolderStyleView, IndexState, ItemRef, Navigation, OperationDone, Page, Pin,
-    SearchCount, SearchRequest, SessionState, SettingsView, Startup, Step, TransferStatus,
-    VolumeState,
+    ClipboardState, DriveSpace, FolderStyleView, IndexState, ItemRef, Navigation, OperationDone,
+    Page, Pin, SearchCount, SearchRequest, SessionState, SettingsView, Startup, Step, Subfolders,
+    TransferStatus, VolumeState,
 };
 use firewol_core::explorer::{ItemId, MenuAction, Operation, Session, actions, data_dir, home};
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
@@ -364,10 +364,38 @@ fn rename(files: State<'_, Files>, item: ItemRef, name: String) -> Result<(), St
         .map_err(message)
 }
 
+/// Recycles the selection as one batch; a single undo restores every item.
 #[tauri::command]
-fn recycle(files: State<'_, Files>, item: ItemRef) -> Result<(), String> {
-    let item = item_id(&item).map_err(message)?;
-    files.0.run(Operation::Recycle { item }).map_err(message)
+fn recycle(files: State<'_, Files>, items: Vec<ItemRef>) -> Result<(), String> {
+    let items = items
+        .iter()
+        .map(item_id)
+        .collect::<anyhow::Result<_>>()
+        .map_err(message)?;
+    files.0.run(Operation::Recycle { items }).map_err(message)
+}
+
+/// The folders inside `path`, for a breadcrumb chevron; at most 256 in natural order.
+#[tauri::command]
+async fn subfolders(path: String) -> Result<Subfolders, String> {
+    blocking(move || {
+        let (folders, more) = firewol_core::explorer::subfolders(Path::new(&path), 256)?;
+        Ok(Subfolders {
+            folders: folders.iter().map(|folder| segment(folder)).collect(),
+            more,
+        })
+    })
+    .await
+}
+
+/// Free space of the drive holding `path`, for the status bar.
+#[tauri::command]
+async fn drive_space(path: String) -> Result<DriveSpace, String> {
+    blocking(move || {
+        let (free, total) = firewol_core::explorer::free_space(Path::new(&path))?;
+        Ok(DriveSpace { free, total })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -817,6 +845,8 @@ fn main() {
             transfer,
             rename,
             recycle,
+            subfolders,
+            drive_space,
             undo,
             transfer_status,
             pause_transfer,

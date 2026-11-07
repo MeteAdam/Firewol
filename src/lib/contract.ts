@@ -30,6 +30,8 @@ export type { SearchScope } from "./bindings/SearchScope";
 export type { SearchRequest } from "./bindings/SearchRequest";
 export type { SearchCount } from "./bindings/SearchCount";
 export type { VolumeState } from "./bindings/VolumeState";
+export type { Subfolders } from "./bindings/Subfolders";
+export type { DriveSpace } from "./bindings/DriveSpace";
 
 // Event names mirror the constants in contract.rs.
 export const FOLDER_PROGRESS = "folder-progress";

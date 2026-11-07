@@ -115,7 +115,7 @@
     else if (event.key === "Enter" && entry) onopen(entry, event.ctrlKey);
     else if (event.key === "Backspace") void pane.up();
     else if (event.key === "F2" && entry?.id) pane.renaming = pane.selected;
-    else if (event.key === "Delete" && entry?.id) onrecycle();
+    else if (event.key === "Delete" && pane.selection.size > 0) onrecycle();
     else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       const bounds = grid.getBoundingClientRect();
       const column = pane.selected % columns;

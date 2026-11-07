@@ -25,15 +25,17 @@
     type Startup,
     type TransferStatus,
     type VolumeState,
+    type DriveSpace,
   } from "./lib/contract";
   import FileList from "./lib/FileList.svelte";
   import FolderIcon from "./lib/FolderIcon.svelte";
   import FolderStyleSheet from "./lib/FolderStyleSheet.svelte";
   import { formatCount, formatSize, useLocale } from "./lib/format";
   import Icon from "./lib/Icon.svelte";
-  import { NO_FILTERS, Pane } from "./lib/pane.svelte";
+  import { NO_FILTERS, Pane, SELECT_ALL_LIMIT } from "./lib/pane.svelte";
   import { PRESETS, colors, hex, presetClass } from "./lib/appearance";
-  import { details, isCustom, labelOf, menuRows, parentPath, type MenuContext, type MenuRow } from "./lib/menu";
+  import { details, isCustom, labelOf, menuRows, parentPath, splitRows, type MenuContext, type MenuRow } from "./lib/menu";
+  import Breadcrumb from "./lib/Breadcrumb.svelte";
   import SearchBox from "./lib/SearchBox.svelte";
   import Sheet from "./lib/Sheet.svelte";
   import Settings from "./lib/Settings.svelte";
@@ -79,6 +81,19 @@
   let volumeAsk = $state<{ drive: string; pane: Pane }>();
   let settingsSection = $state("appearance");
   let folderSheet = $state<{ item: ItemRef; name: string; path: string }>();
+  /** Items waiting for the in-window Recycle Bin confirmation. */
+  let recycleAsk = $state.raw<Entry[]>();
+  let menuElement: HTMLElement | undefined = $state();
+  /** Where focus returns when Escape closes the context menu. */
+  let menuReturn: HTMLElement | null = null;
+  // Sidebar width: dragged live, saved to the core when the drag ends (DESIGN: 232, 180–360).
+  const SIDEBAR_MIN = 180;
+  const SIDEBAR_MAX = 360;
+  let sidebarDrag = $state<number>();
+  const sidebarWidth = $derived(sidebarDrag ?? settings?.sidebar_width ?? 232);
+  /** Free space of the open folder's drive, for the status bar. */
+  let space = $state.raw<DriveSpace & { path: string }>();
+  let spaceRequest = 0;
   let addressField: HTMLInputElement | undefined = $state();
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -101,6 +116,22 @@
   $effect(() => {
     document.title = `${title} – Firewol`;
   });
+
+  // The status bar's free space follows the open folder and every finished file operation.
+  const spacePath = $derived(active?.folder?.path);
+  $effect(() => {
+    if (spacePath) void loadSpace(spacePath);
+  });
+
+  async function loadSpace(path: string) {
+    const request = ++spaceRequest;
+    try {
+      const result = await api.driveSpace(path);
+      if (request === spaceRequest) space = { ...result, path };
+    } catch {
+      if (request === spaceRequest) space = undefined;
+    }
+  }
 
   // Listed rows carry their style from the core, so shown pages are re-read when styles change.
   let stylesSeen: string | undefined;
@@ -162,6 +193,46 @@
   }
 
   function toggleSidebar() { void saveSettings({ sidebar: !sidebar }); }
+
+  const clampSidebar = (width: number) => Math.round(Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, width)));
+
+  async function saveSidebarWidth(width: number) {
+    sidebarDrag = width;
+    if (width !== settings?.sidebar_width) await saveSettings({ sidebar_width: width });
+    if (sidebarDrag === width) sidebarDrag = undefined;
+  }
+
+  /** Drags the sidebar edge; the width is saved once, when the button comes up. */
+  function resizeSidebar(event: PointerEvent) {
+    if (event.button !== 0) return;
+    const handle = event.currentTarget as HTMLElement;
+    const from = event.clientX;
+    const start = sidebarWidth;
+    try { handle.setPointerCapture(event.pointerId); } catch { /* Synthetic pointers have no capture. */ }
+    const move = (next: PointerEvent) => (sidebarDrag = clampSidebar(start + next.clientX - from));
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      if (sidebarDrag !== undefined) void saveSidebarWidth(sidebarDrag);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+    event.preventDefault();
+  }
+
+  function sidebarKey(event: KeyboardEvent) {
+    const step = event.shiftKey ? 32 : 8;
+    const next = event.key === "ArrowLeft" ? sidebarWidth - step
+      : event.key === "ArrowRight" ? sidebarWidth + step
+      : event.key === "Home" ? SIDEBAR_MIN
+      : event.key === "End" ? SIDEBAR_MAX
+      : undefined;
+    if (next === undefined) return;
+    event.preventDefault();
+    void saveSidebarWidth(clampSidebar(next));
+  }
   /** Details, or tiles of `size` pixels; saved for every folder tab and window. */
   function setView(grid: boolean, size = tile) {
     menu = undefined;
@@ -258,6 +329,7 @@
     doneWaiters = [];
     waiters.forEach((resolve) => resolve(done));
     if (done.refresh) for (const pane of panes) void pane.refresh();
+    if (spacePath) void loadSpace(spacePath);
     notify(done.message, { undo: done.succeeded, error: !done.succeeded });
     void api.session().then((state) => (session = state));
   }
@@ -295,7 +367,8 @@
   // In-window drag and drop, as in the Win32 build: pointer events, not HTML5 or OLE, so
   // virtual rows can leave the DOM mid-drag. Drop on a folder row or tile, another pane,
   // a folder tab or a pin; Shift moves, Esc cancels.
-  const MAX_DRAG = 32;
+  /** The core's limit for one transfer or recycle (`MAX_TRANSFER_ITEMS`). */
+  const MAX_ITEMS = 32;
   type DropTarget = { item: ItemRef; name: string; path: string; element: HTMLElement };
   let drag = $state<{ entries: Entry[]; from: string; x: number; y: number; move: boolean; target?: DropTarget; refusal: string }>();
   let dragFrame = 0;
@@ -331,7 +404,7 @@
     const refusal = !target ? "Drop on a folder, a pane, a tab or a pin"
       : samePath(target.path, drag.from) ? "Already in this folder"
       : drag.entries.some((entry) => within(target.path, entry.path)) ? "A folder cannot go into itself"
-      : drag.entries.length > MAX_DRAG ? `Drag at most ${MAX_DRAG} items`
+      : drag.entries.length > MAX_ITEMS ? `Drag at most ${MAX_ITEMS} items`
       : "";
     if (drag.target?.element !== target?.element || !!drag.refusal !== !!refusal) {
       drag.target?.element.classList.remove("drop-target");
@@ -412,13 +485,43 @@
     if (entry.id) void start(api.rename(entry.id, name));
   }
 
+  /** Asks in the window first; the core recycles the whole selection as one undoable batch. */
   function recycle() {
-    const entries = active?.selectedEntries() ?? [];
-    if (entries.length !== 1 || !entries[0].id) {
-      notify("Select one item to move to the Recycle Bin", { error: true });
+    menu = undefined;
+    const entries = (active?.selectedEntries() ?? []).filter((entry) => entry.id);
+    if (entries.length === 0) {
+      notify("Select the items to move to the Recycle Bin", { error: true });
       return;
     }
-    void start(api.recycle(entries[0].id));
+    if (entries.length > MAX_ITEMS) {
+      notify(`Move at most ${MAX_ITEMS} items to the Recycle Bin at a time`, { error: true });
+      return;
+    }
+    recycleAsk = entries;
+  }
+
+  function confirmRecycle() {
+    const items = (recycleAsk ?? []).flatMap((entry) => (entry.id ? [entry.id] : []));
+    recycleAsk = undefined;
+    lists[activeIndex]?.focus();
+    if (items.length > 0) void start(api.recycle(items));
+  }
+
+  function cancelRecycle() {
+    recycleAsk = undefined;
+    lists[activeIndex]?.focus();
+  }
+
+  /** Focuses a sheet's primary button, so Enter confirms and Esc cancels. */
+  function initialFocus(node: HTMLElement) {
+    void tick().then(() => node.focus());
+  }
+
+  async function selectAll() {
+    const pane = active;
+    if (!pane || pane.rows === 0) return;
+    const all = await pane.selectAll();
+    if (!all) notify(`Selected the first ${formatCount(SELECT_ALL_LIMIT)} of ${formatCount(pane.rows)} items`);
   }
 
   function undo() {
@@ -602,8 +705,53 @@
     if (address.trim()) void active?.open(address.trim());
   }
 
-  function showMenu(kind: "item" | "area" | "more", x: number, y: number) {
-    menu = { kind, x: Math.min(x, window.innerWidth - 268), y: Math.min(y, window.innerHeight - 380) };
+  /** Opens a menu that fits the window, with focus on its first enabled item. */
+  async function showMenu(kind: "item" | "area" | "more", x: number, y: number) {
+    if (!menu) menuReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    menu = { kind, x, y };
+    await tick();
+    if (!menuElement || !menu) return;
+    const box = menuElement.getBoundingClientRect();
+    menu.x = Math.max(8, Math.min(x, window.innerWidth - box.width - 8));
+    menu.y = Math.max(8, Math.min(y, window.innerHeight - box.height - 8));
+    menuItems()[0]?.focus();
+  }
+
+  const menuItems = () => [...(menuElement?.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)') ?? [])];
+
+  function closeMenu(restoreFocus: boolean) {
+    menu = undefined;
+    if (restoreFocus && menuReturn?.isConnected) menuReturn.focus();
+    menuReturn = null;
+  }
+
+  /** Arrow keys move through the menu; Left and Right move along the icon row. */
+  function menuKey(event: KeyboardEvent) {
+    const items = menuItems();
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const row = (item?: Element) => !!item?.closest(".quick");
+    const to = (index: number) => items[(index + items.length) % items.length]?.focus();
+    if (event.key === "ArrowDown") {
+      // From the icon row, Down leaves the row instead of walking along it.
+      if (row(items[at])) {
+        const below = items.findIndex((item, index) => index > at && !row(item));
+        if (below >= 0) to(below);
+      } else to(at + 1);
+    } else if (event.key === "ArrowUp") {
+      if (row(items[at])) to(-1);
+      else if (at > 0 && row(items[at - 1])) to(items.findIndex((item) => row(item)));
+      else to(at - 1);
+    } else if ((event.key === "ArrowRight" || event.key === "ArrowLeft") && row(items[at])) {
+      const quick = items.filter((item) => row(item));
+      const next = quick[(quick.indexOf(items[at]) + (event.key === "ArrowRight" ? 1 : -1) + quick.length) % quick.length];
+      next?.focus();
+    } else if (event.key === "Home") to(0);
+    else if (event.key === "End") to(items.length - 1);
+    else if (event.key === "Escape") closeMenu(true);
+    else if (event.key === "Tab") { closeMenu(true); }
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   function shortcut(event: KeyboardEvent) {
@@ -634,6 +782,7 @@
     else if (event.ctrlKey && key === "x") void clip(true);
     else if (event.ctrlKey && key === "v") paste();
     else if (event.ctrlKey && key === "z") undo();
+    else if (event.ctrlKey && key === "a" && active) void selectAll();
     else return;
     event.preventDefault();
   }
@@ -1092,6 +1241,113 @@
     await source.refresh();
   }
 
+  const recycleSheet = () => document.querySelector<HTMLDialogElement>('dialog[aria-label*="Recycle Bin"]');
+  const recycleButton = (text: string) => [...(recycleSheet()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((item) => item.textContent?.trim() === text)!;
+
+  /** M4.3-h: Ctrl+A, a multi-item recycle through Delete and the sheet, and one undo for all. */
+  async function recycleBatchSteps(source: Pane, check: Check) {
+    activeIndex = slots.findIndex((slot) => slot.active?.kind === "folder" && slot.active.pane === source);
+    lists[activeIndex]?.focus();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, cancelable: true }));
+    await waitFor(() => source.rows > 0 && source.selection.size === source.rows, 5000, "Ctrl+A");
+    check("Ctrl+A selects every item", source.selection.size === 4, names(source).join());
+    await source.select(names(source).indexOf("z-folder"), "toggle");
+    const files = source.selectedEntries().map((entry) => entry.name).sort().join();
+    check("Ctrl+click leaves three files selected", files === "file10.txt,file2.txt,note.txt", files);
+    const grid = document.querySelector<HTMLElement>(`[data-pane="${source.id}"] [role="grid"]`)!;
+    grid.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true }));
+    await waitFor(() => !!recycleSheet(), 5000, "the Recycle Bin sheet");
+    const listed = [...recycleSheet()!.querySelectorAll(".recycle-list li")].map((item) => item.textContent).sort().join();
+    check("Delete asks once for the whole selection", recycleSheet()!.getAttribute("aria-label") === "Move 3 items to the Recycle Bin?" && listed === files, listed);
+    let done = nextDone();
+    recycleButton("Move to Recycle Bin").click();
+    let result = await done;
+    await source.refresh();
+    check("the core recycles every selected item", result.succeeded && result.message === "Moved 3 items to Recycle Bin" && names(source).join() === "z-folder", `${result.message} / ${names(source).join()}`);
+    done = nextDone();
+    undo();
+    result = await done;
+    await source.refresh();
+    check("one undo restores the whole batch", result.succeeded && result.message === "Restored 3 items from Recycle Bin" && names(source).length === 4, `${result.message} / ${names(source).join()}`);
+  }
+
+  /** M4.3-h: context-menu icon row, keys and row height (the menu is open on a file). */
+  async function menuKeySteps(check: Check) {
+    const quick = () => [...document.querySelectorAll<HTMLButtonElement>(".menu .quick .qi")];
+    const focusedQuick = () => quick().includes(document.activeElement as HTMLButtonElement);
+    check("the menu opens with focus on its first enabled item", focusedQuick() && document.activeElement?.getAttribute("aria-label") === "Cut", document.activeElement?.outerHTML.slice(0, 80));
+    const press = (key: string) => menuElement!.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    press("ArrowRight");
+    await tick();
+    check("Right moves along the icon row", focusedQuick() && document.activeElement?.getAttribute("aria-label") !== "Cut");
+    press("ArrowDown");
+    await tick();
+    const row = document.activeElement as HTMLElement;
+    check("Down leaves the icon row for the 28 px rows", row.classList.contains("mi") && row.offsetHeight === 28, `${row.className} ${row.offsetHeight}`);
+    press("ArrowDown");
+    await tick();
+    check("Down moves to the next row", document.activeElement !== row && !!(document.activeElement as HTMLElement).classList.contains("mi"));
+    press("ArrowUp");
+    press("ArrowUp");
+    await tick();
+    check("Up returns to the icon row", focusedQuick());
+    const before = menuReturn;
+    press("Escape");
+    await tick();
+    check("Escape closes the menu and restores focus", !menu && !document.querySelector(".menu") && (!before || document.activeElement === before));
+  }
+
+  /** M4.3-h: breadcrumb collapsing and chevrons, status bar and sidebar sizes. */
+  async function layoutSteps(pane: Pane, check: Check) {
+    const nav = document.querySelector<HTMLElement>('.toolbar nav[aria-label="Folder path"]')!;
+    const crumbs = nav.querySelector<HTMLElement>(".crumbs")!;
+    const visible = () => nav.querySelectorAll(".crumb:not(.more)").length;
+    const wide = visible();
+    nav.style.flex = "0 0 240px";
+    await waitFor(() => !!nav.querySelector('button[aria-label="Hidden folders"]'), 5000, "collapsed segments");
+    await painted();
+    const segments = pane.folder!.segments;
+    const current = nav.querySelector<HTMLElement>(".crumb.cur")!;
+    check("leading segments collapse into … when the path is narrow", crumbs.scrollWidth <= crumbs.clientWidth + 1 && current.textContent === segments.at(-1)!.name && (visible() === 1 || current.scrollWidth <= current.clientWidth + 1) && visible() < segments.length, `${visible()} of ${segments.length}`);
+    nav.querySelector<HTMLButtonElement>('button[aria-label="Hidden folders"]')!.click();
+    await waitFor(() => !!document.querySelector('.crumb-menu[aria-label="Hidden folders"]'), 5000, "the hidden folders list");
+    const hiddenNames = [...document.querySelectorAll('.crumb-menu .mi .label')].map((label) => label.textContent);
+    check("… lists the collapsed folders from the drive down", hiddenNames.length === segments.length - visible() && hiddenNames[0] === segments[0].name, hiddenNames.join(" › "));
+    document.querySelector(".crumb-menu")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await tick();
+    nav.style.flex = "";
+    await waitFor(() => visible() === wide, 5000, "the restored breadcrumb");
+    check("a wider address shows the segments again", !document.querySelector(".crumb-menu"));
+    const chevrons = nav.querySelectorAll<HTMLButtonElement>(".chev");
+    chevrons[chevrons.length - 1].click();
+    await waitFor(() => !!document.querySelector(".crumb-menu .mi"), 5000, "sibling folders");
+    const siblings = [...document.querySelectorAll<HTMLButtonElement>(".crumb-menu .mi")];
+    const marked = siblings.find((item) => item.classList.contains("on"));
+    check("a chevron lists the sibling folders with the current one marked", siblings.some((item) => item.textContent === "dest") && marked?.textContent === segments.at(-1)!.name && document.activeElement === marked, siblings.map((item) => item.textContent).join());
+    const from = pane.folder!.path;
+    siblings.find((item) => item.textContent === "dest")!.click();
+    await waitFor(() => pane.folder?.path.endsWith("\\dest") === true, 5000, "the chosen sibling");
+    check("choosing a sibling opens it", !document.querySelector(".crumb-menu"));
+    await pane.back();
+    await waitFor(() => pane.folder?.path === from, 5000, "back to the source");
+
+    const status = document.querySelector<HTMLElement>(".status")!;
+    await waitFor(() => /free$/.test(status.querySelector(".space")?.textContent ?? ""), 5000, "the free space");
+    check("the 32 px status bar shows the drive's free space", status.offsetHeight === 32, `${status.offsetHeight} px · ${status.querySelector(".space")?.textContent}`);
+    const side = document.querySelector<HTMLElement>(".sidebar")!;
+    check("the sidebar starts 232 px wide", sidebar && side.offsetWidth === 232, `${side.offsetWidth}`);
+    const handle = document.querySelector<HTMLElement>('[role="separator"][aria-label="Sidebar width"]')!;
+    handle.focus();
+    handle.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", shiftKey: true, bubbles: true, cancelable: true }));
+    await waitFor(() => settings?.sidebar_width === 264 && side.offsetWidth === 264, 5000, "a wider sidebar");
+    handle.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }));
+    await waitFor(() => side.offsetWidth === 180, 5000, "the narrowest sidebar");
+    check("the sidebar resizes within 180–360 px and persists", (await api.getSettings()).sidebar_width === 180);
+    handle.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await waitFor(() => side.offsetWidth === 232 && settings?.sidebar_width === 232, 5000, "the default width");
+    check("double-clicking the edge restores 232 px", true);
+  }
+
   async function selfTest(info: Startup) {
     const steps: { step: string; ok: boolean; detail?: string }[] = [];
     const check = (step: string, ok: boolean, detail?: string) => {
@@ -1155,14 +1411,25 @@
       check("copy to the other pane", result.succeeded && names(target).includes("note.txt"), result.message);
       activeIndex = 1;
       pick(target, "note.txt");
-      done = nextDone();
       recycle();
+      await painted();
+      check("recycling asks in the window first", !!recycleSheet()?.open && recycleSheet()!.getAttribute("aria-label") === "Move “note.txt” to the Recycle Bin?" && document.activeElement === recycleButton("Move to Recycle Bin"), recycleSheet()?.getAttribute("aria-label") ?? "no sheet");
+      recycleButton("Cancel").click();
+      await painted();
+      await target.refresh();
+      check("Cancel keeps the item", !recycleSheet() && names(target).includes("note.txt"));
+      pick(target, "note.txt");
+      recycle();
+      await painted();
+      done = nextDone();
+      recycleButton("Move to Recycle Bin").click();
       result = await settle(target, done);
       check("move to the Recycle Bin", result.succeeded && !names(target).includes("note.txt"), result.message);
       done = nextDone();
       undo();
       result = await settle(target, done);
       check("undo recycle", result.succeeded && names(target).includes("note.txt"), result.message);
+      await recycleBatchSteps(source, check);
       await transferSteps(source, target, check);
       await dragSteps(source, target, check);
       await togglePin(destPath);
@@ -1232,7 +1499,12 @@
       await painted();
       const items = () => [...document.querySelectorAll<HTMLButtonElement>(".menu .mi")];
       const labels = items().map((item) => item.querySelector(".label")?.textContent?.trim()).join("|");
-      check("the context menu follows the saved menu", labels.includes("Self-test action") && !labels.split("|").includes("Copy") && labels.includes("Cut") && labels.includes("Edit menu…") && !labels.includes("Customize folder"), labels);
+      const quick = [...document.querySelectorAll(".menu .quick .qi")].map((item) => item.getAttribute("aria-label")).join("|");
+      check("the context menu follows the saved menu", labels.includes("Self-test action") && !quick.split("|").includes("Copy") && quick.includes("Cut") && !labels.split("|").includes("Cut") && labels.includes("Edit menu…") && !labels.includes("Customize folder"), `${quick} / ${labels}`);
+      check("the icon row holds Cut, Paste, Rename and Recycle", quick === "Cut|Paste in current folder|Rename|Move to Recycle Bin" && labels.includes("Open in new tab"), quick);
+      await menuKeySteps(check);
+      showMenu("item", 40, 40);
+      await painted();
       items().find((item) => item.textContent?.includes("Edit menu…"))!.click();
       await waitFor(() => slots[0].active?.kind === "settings" && !!document.querySelector(".settings h2"), 5000, "Edit menu…");
       check("Edit menu… opens the Context menu section", document.querySelector(".settings h2")?.textContent === "Context menu");
@@ -1245,6 +1517,7 @@
       press("w");
       await waitFor(() => tabs().length === count && shown(), 5000, "closing Settings again");
       await folderStyleSelfTest(check, active!, sourcePath);
+      await layoutSteps(active!, check);
       const sidebarBefore = sidebar;
       press("b");
       await waitFor(() => sidebar !== sidebarBefore, 5000, "Ctrl+B");
@@ -1345,15 +1618,13 @@
           <input id="address" bind:this={addressField} bind:value={address} spellcheck="false" onblur={() => (editing = false)} />
         </form>
       {:else}
-        <nav class="field address" aria-label="Folder path">
-          <span class="muted icon"><Icon name="drive" /></span>
-          {#each active?.folder?.segments ?? [] as segment, index (segment.path)}
-            {#if index > 0}<span class="muted icon"><Icon name="chevron" size={12} weight={2} /></span>{/if}
-            <button class="crumb" class:cur={index === (active?.folder?.segments.length ?? 0) - 1} onclick={() => active?.open(segment.path)}>{segment.name}</button>
-          {/each}
-          <button class="crumb-space" aria-label="Edit path (Ctrl+L)" onclick={editAddress}></button>
-          <button class="ib sm" aria-label="Refresh (F5)" title="Refresh (F5)" onclick={() => active?.refresh()}><Icon name="refresh" size={14} /></button>
-        </nav>
+        <Breadcrumb
+          segments={active?.folder?.segments ?? []}
+          onopen={(path) => void active?.open(path)}
+          onedit={editAddress}
+          onrefresh={() => void active?.refresh()}
+          onerror={(message) => notify(message, { error: true })}
+        />
       {/if}
       {#if active}
         {#key active}
@@ -1373,7 +1644,7 @@
 
     <div class="body" class:settings-only={settingsOnly}>
       {#if sidebar && !settingsOnly}
-        <nav class="sidebar" aria-label="Pinned folders">
+        <nav class="sidebar" aria-label="Pinned folders" style:flex-basis={`${sidebarWidth}px`}>
           <div class="side-head">
             <span class="side-title">Pinned</span>
             <button
@@ -1394,6 +1665,22 @@
             <p class="muted side-empty">Pin folders you use often. They stay here until you unpin them.</p>
           {/each}
         </nav>
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+        <div
+          class="side-resize"
+          class:dragging={sidebarDrag !== undefined}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Sidebar width"
+          aria-valuemin={SIDEBAR_MIN}
+          aria-valuemax={SIDEBAR_MAX}
+          aria-valuenow={sidebarWidth}
+          tabindex="0"
+          title="Drag to resize · double-click resets"
+          onpointerdown={resizeSidebar}
+          onkeydown={sidebarKey}
+          ondblclick={() => void saveSidebarWidth(232)}
+        ></div>
       {/if}
       <div class="panes" use:nonPassiveWheel={zoomTiles}>
         {#each slots as slot, index (slot)}
@@ -1458,6 +1745,9 @@
       {:else if active?.index === "ready"}
         <span>Folder index ready · {formatCount(active.indexCount)} items</span>
       {/if}
+      {#if active && space && space.path === active.folder?.path}
+        <span class="space" title={`${formatSize(space.free)} free of ${formatSize(space.total)}`}>{formatSize(space.free)} free</span>
+      {/if}
     </footer>
   </div>
 
@@ -1478,10 +1768,23 @@
   {/if}
 
   {#if menu}
-    <div class="menu" role="menu" tabindex="-1" style:left={`${menu.x}px`} style:top={`${menu.y}px`} onmousedown={(event) => event.stopPropagation()}>
+    <div class="menu" role="menu" tabindex="-1" bind:this={menuElement} style:left={`${menu.x}px`} style:top={`${menu.y}px`} onmousedown={(event) => event.stopPropagation()} onkeydown={menuKey}>
       {#if menu.kind === "item" || menu.kind === "area"}
         {@const onItem = menu.kind === "item"}
-        {#each menuRows(settings?.menu ?? [], menuContext(onItem)) as row (row.index)}
+        {@const split = splitRows(menuRows(settings?.menu ?? [], menuContext(onItem)))}
+        {#if split.quick.length > 0}
+          <div class="quick" role="group" aria-label="Clipboard and file actions">
+            {#each split.quick as row (row.index)}
+              {@const label = labelOf(row.entry).replace(/…$/, "")}
+              {@const keys = details(row.entry.action).shortcut}
+              <button class="qi" role="menuitem" aria-label={label} title={keys ? `${label} (${keys})` : label} disabled={!row.enabled} style:color={row.entry.color ? hex(row.entry.color) : undefined} onclick={() => runEntry(row, onItem)}>
+                {#if row.entry.icon}<span class="glyph">{row.entry.icon}</span>{:else}<Icon name={details(row.entry.action).icon} />{/if}
+              </button>
+            {/each}
+          </div>
+          {#if split.rows.length > 0}<div class="sep"></div>{/if}
+        {/if}
+        {#each split.rows as row (row.index)}
           {#if row.divider}<div class="sep"></div>{/if}
           <button class="mi" role="menuitem" disabled={!row.enabled} onclick={() => runEntry(row, onItem)}>
             {#if row.entry.icon || row.entry.color}
@@ -1527,6 +1830,23 @@
   {#if folderSheet}
     <FolderStyleSheet name={folderSheet.name} path={folderSheet.path} style={styleOf(folderSheet.item)} onsave={saveFolderStyle} onclose={() => (folderSheet = undefined)} />
   {/if}
+  {#if recycleAsk}
+    {@const items = recycleAsk}
+    {@const name = (entry: Entry) => entry.style?.alias || entry.name}
+    <Sheet title={items.length === 1 ? `Move “${name(items[0])}” to the Recycle Bin?` : `Move ${items.length} items to the Recycle Bin?`} onclose={cancelRecycle}>
+      {#if items.length > 1}
+        <ul class="recycle-list">
+          {#each items.slice(0, 5) as entry (entry.path)}<li>{name(entry)}</li>{/each}
+          {#if items.length > 5}<li class="muted">and {items.length - 5} more</li>{/if}
+        </ul>
+      {/if}
+      <p class="muted">You can restore {items.length === 1 ? "it" : "them"} with Undo (Ctrl+Z) while Firewol is open, or from the Recycle Bin.</p>
+      <div class="actions">
+        <button class="action" onclick={cancelRecycle}>Cancel</button>
+        <button class="action primary" use:initialFocus onclick={confirmRecycle}>Move to Recycle Bin</button>
+      </div>
+    </Sheet>
+  {/if}
   {#if volumeAsk}
     {@const drive = volumeAsk.drive}
     <Sheet title={`Search all of ${drive}:?`} onclose={() => (volumeAsk = undefined)}>
@@ -1564,15 +1884,15 @@
   .cap.close:hover { background: var(--caption-hover, #c42b1c); color: #ffffff; }
   .toolbar { display: flex; align-items: center; gap: 4px; flex: none; min-height: 52px; padding: 6px 12px 8px 10px; }
   .address { flex: 1 1 360px; min-width: 0; margin-left: 6px; overflow: hidden; }
-  .icon { display: flex; flex: none; }
   .accent { color: var(--accent); }
-  .crumb { flex: none; padding: 3px 6px; border: 0; border-radius: 6px; background: transparent; font-size: 13px; }
-  .crumb:hover { background: var(--hover); }
-  .crumb.cur { font-weight: 600; }
-  .crumb-space { flex-grow: 1; align-self: stretch; min-width: 24px; border: 0; background: transparent; }
   .search-gap { flex: 0 1 280px; }
   .body { display: flex; flex: 1; min-height: 0; gap: 8px; padding: 0 12px 0 8px; }
-  .sidebar { display: flex; flex-direction: column; gap: 2px; flex: 0 0 216px; padding: 2px 0; overflow: auto; }
+  .sidebar { display: flex; flex-direction: column; gap: 2px; flex: 0 0 232px; min-width: 0; padding: 2px 0; overflow: auto; }
+  /* Sits in the 8 px gap beside the sidebar; a thin accent line shows while hovered or dragged. */
+  .side-resize { position: relative; flex: none; width: 8px; margin: 0 -8px; cursor: col-resize; touch-action: none; }
+  .side-resize::after { content: ""; position: absolute; top: 8px; bottom: 8px; left: 3px; width: 2px; border-radius: 1px; background: transparent; transition: background 120ms ease-out; }
+  .side-resize:hover::after, .side-resize.dragging::after, .side-resize:focus-visible::after { background: var(--accent); }
+  .side-resize:focus-visible { outline: none; }
   .side-head { display: flex; align-items: center; justify-content: space-between; padding: 0 4px 4px 12px; }
   .side-title { font-size: 12px; font-weight: 600; color: var(--muted); }
   .side-empty { margin: 0; padding: 4px 12px; font-size: 12px; line-height: 18px; }
@@ -1590,8 +1910,15 @@
   .body.settings-only { padding: 8px 12px 0 8px; }
   .glyph { display: inline-flex; justify-content: center; flex: none; width: 16px; color: var(--accent); }
   .status.collapsed { height: 12px; overflow: hidden; visibility: hidden; }
-  .status { display: flex; align-items: center; gap: 12px; flex: none; height: 36px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
+  .status { display: flex; align-items: center; gap: 12px; flex: none; height: 32px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
   .grow { flex-grow: 1; }
+  .space { flex: none; white-space: nowrap; }
+  .quick { display: flex; gap: 2px; padding: 2px; }
+  .qi { display: flex; align-items: center; justify-content: center; flex: 1; height: 32px; min-width: 36px; padding: 0; border: 0; border-radius: var(--radius-s); background: transparent; color: var(--text); }
+  .qi:hover:not(:disabled), .qi:focus-visible { background: var(--hover); outline: none; }
+  .qi:disabled { opacity: .4; }
+  .recycle-list { margin: 16px 0 0; padding-left: 20px; line-height: 22px; }
+  .recycle-list li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .error { color: var(--text); }
   :global(.ib.xs) { width: 22px; height: 22px; border-radius: 999px; }
   .drag-ghost { position: fixed; z-index: 40; display: flex; align-items: center; gap: 8px; max-width: 420px; padding: 6px 12px; border: var(--border-w) solid var(--border); border-radius: var(--radius-s); background: var(--surface-2); box-shadow: var(--shadow-pop); backdrop-filter: var(--blur); font-size: 12px; pointer-events: none; white-space: nowrap; }

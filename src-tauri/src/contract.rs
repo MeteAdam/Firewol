@@ -137,6 +137,8 @@ pub struct SettingsView {
     pub sidebar: bool,
     pub grid: bool,
     pub tile: u32,
+    /// Pixels, 180 to 360 (default 232).
+    pub sidebar_width: u32,
     pub appearance: AppearanceView,
     pub menu: Vec<MenuEntryView>,
     pub folders: Vec<StyledFolder>,
@@ -157,6 +159,9 @@ pub struct SettingsPatch {
     /// 96, 128 or 160.
     #[ts(optional)]
     pub tile: Option<u32>,
+    /// 180 to 360 pixels.
+    #[ts(optional)]
+    pub sidebar_width: Option<u32>,
     #[ts(optional)]
     pub menu: Option<Vec<MenuEntryView>>,
     #[ts(optional)]
@@ -173,6 +178,25 @@ pub struct SettingsPatch {
 pub struct Segment {
     pub name: String,
     pub path: String,
+}
+
+/// The folders a breadcrumb chevron lists: the children of the segment before it.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct Subfolders {
+    pub folders: Vec<Segment>,
+    /// More folders exist than the list holds.
+    pub more: bool,
+}
+
+/// Free and total bytes of the drive holding the open folder.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DriveSpace {
+    #[ts(type = "number")]
+    pub free: u64,
+    #[ts(type = "number")]
+    pub total: u64,
 }
 
 /// A core-issued item identity. File operations act on it, never on displayed text.

@@ -3,6 +3,7 @@ mod directory;
 pub mod elevation;
 pub mod icons;
 mod operations;
+mod places;
 mod search;
 mod session;
 mod settings;
@@ -14,6 +15,7 @@ pub use operations::{
     MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations, TransferControl, TransferProgress,
     TransferRequest, TransferState,
 };
+pub use places::{free_space, natural_order, subfolders};
 pub use search::{Filters, SearchIndex, SearchQuery, SearchReader, remove_stale_indexes};
 pub use session::{Clipboard, Completion, History, Session};
 pub use settings::{

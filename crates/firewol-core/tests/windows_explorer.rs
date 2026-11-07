@@ -128,14 +128,14 @@ fn shell_operations_verify_identities_and_preserve_conflicts() -> Result<()> {
     fs::write(&source, b"different item")?;
     assert!(
         operations
-            .submit_operation(Operation::Recycle { item: stale })
+            .submit_operation(Operation::Recycle { items: vec![stale] })
             .is_err()
     );
     assert_eq!(fs::read(&source)?, b"different item");
 
     let original = ItemId::at(held.clone())?;
     operations.submit_operation(Operation::Recycle {
-        item: original.clone(),
+        items: vec![original.clone()],
     })?;
     fs::write(&held, b"new file at old path")?;
     assert!(operations.undo().is_err());
@@ -431,5 +431,56 @@ fn stale_search_indexes_are_removed_but_live_ones_stay() -> anyhow::Result<()> {
     assert_eq!(left.len(), 2, "{left:?}");
     assert!(left[0].starts_with(&format!("search-{}-", std::process::id())));
     assert_eq!(left[1], "unrelated");
+    Ok(())
+}
+
+#[test]
+fn multi_item_recycle_undoes_as_one_batch() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let root = fixture.path();
+    let names = ["a-火.txt", "b.txt", "c"];
+    fs::write(root.join(names[0]), b"first")?;
+    fs::write(root.join(names[1]), b"second")?;
+    fs::create_dir(root.join(names[2]))?;
+    let items = names
+        .iter()
+        .map(|name| ItemId::at(root.join(name)))
+        .collect::<Result<Vec<_>>>()?;
+    let mut operations = Operations::open()?;
+    assert!(
+        operations
+            .submit_operation(Operation::Recycle {
+                items: vec![items[0].clone(), items[0].clone()],
+            })
+            .is_err(),
+        "the same path twice is refused"
+    );
+    let done = operations.submit_operation(Operation::Recycle {
+        items: items.clone(),
+    })?;
+    assert_eq!(done.message, "Moved 3 items to Recycle Bin");
+    assert!(names.iter().all(|name| !root.join(name).exists()));
+
+    // A conflict at the first restored (newest) item keeps the whole batch for a retry.
+    fs::create_dir(root.join(names[2]))?;
+    assert!(operations.undo().is_err());
+    fs::remove_dir(root.join(names[2]))?;
+    // A conflict later restores the newer items and keeps the rest.
+    fs::write(root.join(names[0]), b"conflict")?;
+    let partial = operations.undo()?;
+    assert!(
+        partial.message.starts_with("Restored 2/3 items"),
+        "{}",
+        partial.message
+    );
+    assert!(root.join(names[2]).is_dir());
+    assert_eq!(fs::read(root.join(names[1]))?, b"second");
+    assert_eq!(fs::read(root.join(names[0]))?, b"conflict");
+    fs::remove_file(root.join(names[0]))?;
+    let rest = operations.undo()?;
+    assert_eq!(rest.message, "Restored the exact item from Recycle Bin");
+    assert_eq!(fs::read(root.join(names[0]))?, b"first");
+    items.iter().try_for_each(|item| item.verify().map(drop))?;
+    assert!(operations.undo().is_err(), "the batch was one undo record");
     Ok(())
 }

@@ -33,11 +33,12 @@ pub use transfer::{
     MAX_TRANSFER_ITEMS, TransferControl, TransferProgress, TransferRequest, TransferState,
 };
 
+/// `Recycle` moves 1 to `MAX_TRANSFER_ITEMS` items to the Recycle Bin; one undo restores them all.
 pub enum Operation {
     Copy { item: ItemId, into: ItemId },
     Move { item: ItemId, into: ItemId },
     Rename { item: ItemId, name: OsString },
-    Recycle { item: ItemId },
+    Recycle { items: Vec<ItemId> },
 }
 
 pub struct OperationResult {
@@ -52,7 +53,8 @@ pub struct Operations {
 
 enum Undo {
     Transfer(TransferUndo),
-    Recycle { item: RecycledItem, parent: ItemId },
+    /// Items recycled together, in recycle order; undo restores them newest first.
+    Recycle(Vec<(RecycledItem, ItemId)>),
 }
 
 enum TransferUndo {
@@ -132,22 +134,56 @@ impl Operations {
                     "Renamed item",
                 )
             }
-            Operation::Recycle { item } => {
-                Stamp::read(&item.verify()?)?;
-                let parent = parent_of(&item)?;
-                let recycled = recycle(item.path(), item.identity)?;
-                (
-                    Undo::Recycle {
-                        item: recycled,
-                        parent,
-                    },
-                    "Moved to Recycle Bin",
-                )
-            }
+            Operation::Recycle { items } => return self.recycle(items),
         };
         self.record(record);
         Ok(OperationResult {
             message: message.into(),
+            transferred: Vec::new(),
+        })
+    }
+
+    fn recycle(&mut self, items: Vec<ItemId>) -> Result<OperationResult> {
+        ensure!(
+            (1..=MAX_TRANSFER_ITEMS).contains(&items.len()),
+            "Select between 1 and {MAX_TRANSFER_ITEMS} items"
+        );
+        let names: HashSet<_> = items.iter().map(|item| item.path()).collect();
+        ensure!(
+            names.len() == items.len(),
+            "The selection contains the same path twice"
+        );
+        let total = items.len();
+        let mut recycled = Vec::with_capacity(total);
+        let mut first_error = None;
+        for item in &items {
+            let result = (|| {
+                Stamp::read(&item.verify()?)?;
+                let parent = parent_of(item)?;
+                Ok::<_, anyhow::Error>((recycle(item.path(), item.identity)?, parent))
+            })();
+            match result {
+                Ok(entry) => recycled.push(entry),
+                Err(error) => {
+                    first_error = Some(error.context(format!("{}", item.path().display())));
+                    break;
+                }
+            }
+        }
+        let count = recycled.len();
+        if count > 0 {
+            self.record(Undo::Recycle(recycled));
+        }
+        let message = match first_error {
+            Some(error) if count == 0 => return Err(error),
+            Some(error) => format!(
+                "Moved {count}/{total} items to Recycle Bin. First unfinished item: {error:#}"
+            ),
+            None if total == 1 => "Moved to Recycle Bin".into(),
+            None => format!("Moved {count} items to Recycle Bin"),
+        };
+        Ok(OperationResult {
+            message,
             transferred: Vec::new(),
         })
     }
@@ -324,11 +360,7 @@ impl Operations {
                 recycle(item.path(), item.identity)?;
                 "Moved the copy to Recycle Bin"
             }
-            Undo::Recycle { item, parent } => {
-                parent.verify()?;
-                item.restore()?;
-                "Restored the exact item from Recycle Bin"
-            }
+            Undo::Recycle(_) => return self.restore_recycled(),
             Undo::Transfer(TransferUndo::FolderCopy) => {
                 bail!("A copy of a nonempty folder cannot be safely undone")
             }
@@ -336,6 +368,42 @@ impl Operations {
         self.history.pop_back();
         Ok(OperationResult {
             message: message.into(),
+            transferred: Vec::new(),
+        })
+    }
+
+    /// Restores a recycled batch newest first. Items restored before a failure leave the record,
+    /// so the next undo retries only what is still in the Recycle Bin.
+    fn restore_recycled(&mut self) -> Result<OperationResult> {
+        let Some(Undo::Recycle(items)) = self.history.back_mut() else {
+            bail!("The latest operation is not a recycle");
+        };
+        let total = items.len();
+        let mut restored = 0;
+        while let Some((item, parent)) = items.last() {
+            let result = parent.verify().and_then(|_| item.restore());
+            if let Err(error) = result {
+                if restored == 0 {
+                    return Err(error);
+                }
+                let left = items.len();
+                return Ok(OperationResult {
+                    message: format!(
+                        "Restored {restored}/{total} items. {left} stay in the Recycle Bin: {error:#}"
+                    ),
+                    transferred: Vec::new(),
+                });
+            }
+            items.pop();
+            restored += 1;
+        }
+        self.history.pop_back();
+        Ok(OperationResult {
+            message: if total == 1 {
+                "Restored the exact item from Recycle Bin".into()
+            } else {
+                format!("Restored {total} items from Recycle Bin")
+            },
             transferred: Vec::new(),
         })
     }

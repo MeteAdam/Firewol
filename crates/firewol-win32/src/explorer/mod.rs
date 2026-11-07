@@ -1093,7 +1093,7 @@ impl App {
                     )
                 } == IDOK
                 {
-                    self.submit(FileJob::Run(Operation::Recycle { item: id }), false)?;
+                    self.submit(FileJob::Run(Operation::Recycle { items: vec![id] }), false)?;
                 }
                 Ok(())
             }

@@ -69,7 +69,9 @@ function enabled(action: MenuActionView, context: MenuContext): boolean | null {
     case "containing": return context.searching ? selected : null;
     case "copy": case "cut": return selected && idle;
     case "copy_other": case "move_other": return context.split ? selected && idle : null;
-    case "rename": case "recycle": return selected && idle && context.selectedCount <= 1;
+    case "rename": return selected && idle && context.selectedCount <= 1;
+    // The core recycles up to 32 items as one batch with one undo.
+    case "recycle": return selected && idle;
     case "paste": return context.current && context.clipboard && idle;
     // Win32 rule: a selected folder item, or the current folder from the empty area.
     case "folder_style": return item ? (item.directory ? selected : null) : context.current;
@@ -91,6 +93,22 @@ export function menuRows(menu: MenuEntryView[], context: MenuContext): MenuRow[]
     group = next;
   });
   return rows;
+}
+
+/** Actions shown as the compact icon row at the top of the menu (Nilesoft layout). */
+const QUICK = new Set<MenuActionView>(["cut", "copy", "paste", "rename", "recycle"]);
+
+/** Splits menu rows into the icon row and the labelled rows, with dividers recomputed. */
+export function splitRows(rows: MenuRow[]): { quick: MenuRow[]; rows: MenuRow[] } {
+  const quick = rows.filter((row) => QUICK.has(row.entry.action));
+  let group: number | undefined;
+  const rest = rows.filter((row) => !QUICK.has(row.entry.action)).map((row) => {
+    const next = details(row.entry.action).group;
+    const divided = { ...row, divider: group !== undefined && group !== next };
+    group = next;
+    return divided;
+  });
+  return { quick, rows: rest };
 }
 
 export function parentPath(path: string) {

@@ -5,8 +5,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
-use windows::Win32::Globalization::{CompareStringEx, NORM_IGNORECASE, SORT_DIGITSASNUMBERS};
-use windows::core::PCWSTR;
 
 use super::{Cancellation, Item, ItemPage, decode, encode, resolve_directory, unix_seconds};
 use crate::PageRequest;
@@ -42,27 +40,7 @@ impl Directory {
         let source = fs::read_dir(&path).with_context(|| format!("List {}", path.display()))?;
         let db = Connection::open("")?;
         crate::index::configure(&db)?;
-        db.create_collation("windows_natural", |left, right| {
-            let left_wide: Vec<u16> = left.encode_utf16().collect();
-            let right_wide: Vec<u16> = right.encode_utf16().collect();
-            let result = unsafe {
-                CompareStringEx(
-                    PCWSTR::null(),
-                    NORM_IGNORECASE | SORT_DIGITSASNUMBERS,
-                    &left_wide,
-                    &right_wide,
-                    None,
-                    None,
-                    None,
-                )
-            };
-            match result.0 {
-                1 => std::cmp::Ordering::Less,
-                2 => std::cmp::Ordering::Equal,
-                3 => std::cmp::Ordering::Greater,
-                _ => left.cmp(right),
-            }
-        })?;
+        db.create_collation("windows_natural", super::places::natural_order)?;
         // Pages are read in row order, so a small cache keeps each open pane cheap.
         db.execute_batch(
             "PRAGMA cache_size = -1024;

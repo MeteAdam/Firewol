@@ -24,6 +24,8 @@ export const itemKey = (item: ItemRef) => `${item.volume}:${item.index}:${item.p
 const KEEP = PAGE * 6;
 // Typing waits this long before searching, so a burst of keys runs one query.
 const DEBOUNCE_MS = 150;
+/** Ctrl+A selects at most this many rows; file operations accept 32 items at a time anyway. */
+export const SELECT_ALL_LIMIT = 10_000;
 const tagged = (items: Entry[]) => items.some((entry) => hasTags(entry.style));
 const prune = (pages: Record<number, Entry[]>, offset: number) => {
   for (const key of Object.keys(pages).map(Number)) {
@@ -163,6 +165,20 @@ export class Pane {
       this.#anchor = row;
     }
     this.selected = row;
+  }
+
+  /**
+   * Selects every row (Ctrl+A), up to `limit` rows so a 100k-item folder does not load every page.
+   * Returns whether every row is selected.
+   */
+  async selectAll(limit = SELECT_ALL_LIMIT) {
+    const last = Math.min(this.rows, limit) - 1;
+    if (last < 0) return true;
+    const focused = this.selected;
+    this.#anchor = 0;
+    await this.select(last, "range");
+    if (focused >= 0 && focused <= last) this.selected = focused;
+    return this.rows <= limit;
   }
 
   open(path: string) {

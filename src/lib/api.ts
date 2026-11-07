@@ -17,6 +17,8 @@ import type {
   SearchRequest,
   SearchCount,
   VolumeState,
+  Subfolders,
+  DriveSpace,
 } from "./contract";
 
 export const api = {
@@ -49,7 +51,10 @@ export const api = {
   transfer: (items: ItemRef[], into: ItemRef, moveItems: boolean) =>
     invoke<void>("transfer", { items, into, moveItems }),
   rename: (item: ItemRef, name: string) => invoke<void>("rename", { item, name }),
-  recycle: (item: ItemRef) => invoke<void>("recycle", { item }),
+  /** One batch: a single undo restores every item. */
+  recycle: (items: ItemRef[]) => invoke<void>("recycle", { items }),
+  subfolders: (path: string) => invoke<Subfolders>("subfolders", { path }),
+  driveSpace: (path: string) => invoke<DriveSpace>("drive_space", { path }),
   undo: () => invoke<void>("undo"),
   transferStatus: () => invoke<TransferStatus | null>("transfer_status"),
   pauseTransfer: () => invoke<void>("pause_transfer"),

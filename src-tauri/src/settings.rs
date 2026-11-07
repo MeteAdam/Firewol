@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::contract::{ElevationView, FolderStyleView, SettingsPatch, SettingsView, StyledFolder};
 
 pub const TILES: [u32; 3] = [96, 128, 160];
+pub const SIDEBAR_WIDTH: std::ops::RangeInclusive<u32> = 180..=360;
 
 fn mirror<T: Serialize, U: DeserializeOwned>(value: T) -> Result<U> {
     Ok(serde_json::from_value(serde_json::to_value(value)?)?)
@@ -24,6 +25,10 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
             .tile
             .filter(|tile| TILES.contains(tile))
             .unwrap_or(128),
+        sidebar_width: settings
+            .sidebar_width
+            .filter(|width| SIDEBAR_WIDTH.contains(width))
+            .unwrap_or(232),
         appearance: mirror(settings.appearance)?,
         menu: mirror(&settings.menu)?,
         folders: settings
@@ -82,6 +87,12 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
         patch.tile.is_none_or(|tile| TILES.contains(&tile)),
         "Grid tiles are 96, 128 or 160 pixels"
     );
+    ensure!(
+        patch
+            .sidebar_width
+            .is_none_or(|width| SIDEBAR_WIDTH.contains(&width)),
+        "The sidebar is 180 to 360 pixels wide"
+    );
     if let Some(menu) = &menu {
         ensure!(menu.len() <= 64, "Use up to 64 menu entries");
         for entry in menu {
@@ -127,6 +138,9 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
         }
         if let Some(tile) = patch.tile {
             settings.tile = Some(tile);
+        }
+        if let Some(width) = patch.sidebar_width {
+            settings.sidebar_width = Some(width);
         }
         if let Some(menu) = menu {
             settings.menu = menu;
@@ -176,7 +190,25 @@ mod tests {
                 ..Default::default()
             },
         )?;
-        assert!(again.appearance.dark && !again.sidebar);
+        assert!(again.appearance.dark && !again.sidebar && again.sidebar_width == 232);
+        let wide = update(
+            &session,
+            SettingsPatch {
+                sidebar_width: Some(300),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(wide.sidebar_width, 300);
+        assert!(
+            update(
+                &session,
+                SettingsPatch {
+                    sidebar_width: Some(500),
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        );
         let reload = Settings::load(fixture.path())?;
         assert!(reload.appearance.dark && reload.theme_migrated);
         assert_eq!(reload.sidebar, Some(false));

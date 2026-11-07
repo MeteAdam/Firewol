@@ -7,4 +7,8 @@ export type SettingsPatch = { appearance?: AppearanceView, sidebar?: boolean, gr
 /**
  * 96, 128 or 160.
  */
-tile?: number, menu?: Array<MenuEntryView>, elevation?: ElevationView, allow_all_confirmed?: boolean, migrate_appearance?: boolean, };
+tile?: number, 
+/**
+ * 180 to 360 pixels.
+ */
+sidebar_width?: number, menu?: Array<MenuEntryView>, elevation?: ElevationView, allow_all_confirmed?: boolean, migrate_appearance?: boolean, };

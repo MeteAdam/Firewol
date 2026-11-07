@@ -60,8 +60,8 @@
     void pane.folder?.path;
     void pane.results;
     untrack(() => {
-      grid.scrollTop = 0;
-      scroll = 0;
+      grid.scrollTop = pane.scroll;
+      scroll = pane.scroll;
     });
   });
 
@@ -173,7 +173,7 @@
     aria-label={pane.searching ? "Search results" : "Files"}
     bind:this={grid}
     bind:clientHeight={height}
-    onscroll={() => (scroll = grid.scrollTop)}
+    onscroll={() => { scroll = grid.scrollTop; pane.scroll = scroll; }}
     onkeydown={keydown}
     onfocusin={onactivate}
     onmousedown={onactivate}

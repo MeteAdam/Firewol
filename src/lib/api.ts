@@ -12,6 +12,7 @@ import type {
   SettingsPatch,
   SortView,
   FolderProgress,
+  TabSnapshot,
 } from "./contract";
 
 export const api = {
@@ -22,6 +23,8 @@ export const api = {
   navigate: (pane: string, path: string | null, step: Step, sort: SortView) =>
     invoke<Navigation>("navigate", { pane, path, step, sort }),
   closePane: (pane: string) => invoke<void>("close_pane", { pane }),
+  suspendPane: (pane: string) => invoke<void>("suspend_pane", { pane }),
+  adoptPane: (tab: TabSnapshot) => invoke<string>("adopt_pane", { tab }),
   listPage: (id: number, offset: number, sort: SortView) => invoke<Page>("list_page", { id, offset, sort }),
   folderProgress: (id: number) => invoke<FolderProgress>("folder_progress", { id }),
   locateSelection: (id: number, items: ItemRef[]) => invoke<(number | null)[]>("locate_selection", { id, items }),
@@ -39,6 +42,6 @@ export const api = {
   pauseTransfer: () => invoke<void>("pause_transfer"),
   cancelTransfer: () => invoke<void>("cancel_transfer"),
   togglePin: (path: string) => invoke<SessionState>("toggle_pin", { path }),
-  openWindow: (path: string, split: boolean) => invoke<void>("open_window", { path, split }),
+  openWindow: (path: string, split: boolean) => invoke<string>("open_window", { path, split }),
   saveReport: (report: object) => invoke<void>("save_report", { report }),
 };

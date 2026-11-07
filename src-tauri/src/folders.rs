@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use firewol_core::explorer::{
     Cancellation, Directory, Filters, History, Item, ItemId, ItemPage, PAGE_SIZE, SearchIndex,
     SearchQuery, SearchReader, Sort, SortColumn, data_dir, display_path, page,
@@ -73,6 +73,10 @@ impl Folders {
         let (target, position, sequence) = {
             let mut panes = lock(&self.panes);
             let state = panes.entry(pane.to_owned()).or_default();
+            ensure!(
+                state.owner.is_empty() || state.owner == owner,
+                "This tab belongs to another window"
+            );
             state.owner = owner.to_owned();
             state.sequence += 1;
             let (target, position) = match step {
@@ -98,15 +102,22 @@ impl Folders {
         };
         let folder = self.open(owner, &target, sort, notify)?;
         let mut panes = lock(&self.panes);
-        let state = panes.entry(pane.to_owned()).or_default();
-        if state.sequence != sequence {
+        let state = panes.get_mut(pane);
+        if state
+            .as_ref()
+            .is_none_or(|state| state.sequence != sequence || state.owner != owner)
+        {
             drop(panes);
             self.close(folder.id);
             anyhow::bail!("A newer navigation replaced this one");
         }
+        let state = state.context("The tab was closed")?;
         match (step, position) {
             (Step::Back | Step::Forward, Some(position)) => state.history.go(position),
             (Step::New, _) => state.history.visit(PathBuf::from(&folder.path)),
+            (Step::Reload, _) if state.history.current().is_none() => {
+                state.history.visit(PathBuf::from(&folder.path))
+            }
             _ => {}
         }
         let previous = state.folder.replace(folder.id);
@@ -122,13 +133,39 @@ impl Folders {
         Ok(navigation)
     }
 
-    pub fn close_pane(&self, pane: &str) {
-        if let Some(folder) = lock(&self.panes)
-            .remove(pane)
-            .and_then(|state| state.folder)
-        {
+    pub fn close_pane(&self, owner: &str, pane: &str) {
+        let mut panes = lock(&self.panes);
+        if !panes.get(pane).is_some_and(|pane| pane.owner == owner) {
+            return;
+        }
+        if let Some(folder) = panes.remove(pane).and_then(|state| state.folder) {
+            drop(panes);
             self.close(folder);
         }
+    }
+
+    pub fn suspend(&self, owner: &str, pane: &str) -> Result<()> {
+        let mut panes = lock(&self.panes);
+        let Some(state) = panes.get_mut(pane) else {
+            return Ok(());
+        };
+        ensure!(state.owner == owner, "This tab belongs to another window");
+        state.sequence += 1;
+        let folder = state.folder.take();
+        drop(panes);
+        if let Some(folder) = folder {
+            self.close(folder);
+        }
+        Ok(())
+    }
+
+    pub fn adopt(&self, from: &str, to: &str, pane: &str) -> Result<()> {
+        self.suspend(from, pane)?;
+        let mut panes = lock(&self.panes);
+        let state = panes.get_mut(pane).context("The tab was closed")?;
+        ensure!(state.owner == from, "This tab belongs to another window");
+        state.owner = to.to_owned();
+        Ok(())
     }
 
     fn open(&self, owner: &str, path: &Path, sort: SortView, notify: Notify) -> Result<FolderView> {
@@ -287,6 +324,9 @@ impl Folders {
     fn close(&self, id: u64) {
         if let Some(folder) = lock(&self.open).remove(&id) {
             folder.cancel.cancel();
+            if let Some(query) = lock(&folder.query).take() {
+                query.cancel();
+            }
         }
     }
 
@@ -422,5 +462,62 @@ fn entry(item: &Item) -> Entry {
             .attributes
             .is_some_and(|attributes| attributes & FILE_ATTRIBUTE_HIDDEN != 0),
         id: item.id.as_ref().map(item_ref),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suspended_and_adopted_tabs_keep_history_and_release_listings() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let first = fixture.path().join("first");
+        let second = fixture.path().join("second");
+        std::fs::create_dir(&first)?;
+        std::fs::create_dir(&second)?;
+        let folders = Folders::default();
+        let notify: Notify = Arc::new(|_| {});
+        for path in [&first, &second] {
+            folders.navigate(
+                "main",
+                "main:1",
+                Some(&text(path)),
+                Step::New,
+                SortView::default(),
+                notify.clone(),
+            )?;
+        }
+        assert_eq!(lock(&folders.open).len(), 1);
+        folders.suspend("main", "main:1")?;
+        assert!(lock(&folders.open).is_empty());
+        folders.adopt("main", "detached", "main:1")?;
+        assert!(
+            folders
+                .navigate(
+                    "main",
+                    "main:1",
+                    None,
+                    Step::Back,
+                    SortView::default(),
+                    notify.clone()
+                )
+                .is_err()
+        );
+        let back = folders.navigate(
+            "detached",
+            "main:1",
+            None,
+            Step::Back,
+            SortView::default(),
+            notify,
+        )?;
+        assert_eq!(back.folder.path, text(&first));
+        assert!(back.can_forward);
+        folders.close_owned("main");
+        assert_eq!(lock(&folders.open).len(), 1);
+        folders.close_pane("detached", "main:1");
+        assert!(lock(&folders.open).is_empty() && lock(&folders.panes).is_empty());
+        Ok(())
     }
 }

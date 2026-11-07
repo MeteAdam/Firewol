@@ -20,6 +20,9 @@ const KEEP = PAGE * 6;
 /** One folder view. Navigation history lives in the core; this keeps what the list renders. */
 export class Pane {
   readonly id: string;
+  path = $state("");
+  label = $state("Folder");
+  scroll = $state(0);
   // Listing data is replaced, never mutated, so it skips Svelte's per-field deep proxies.
   folder = $state.raw<FolderView>();
   count = $state(0);
@@ -148,11 +151,13 @@ export class Pane {
     }
     if (navigation !== this.#navigation) return;
     const view = result.folder;
-    const reload = step === "reload" && view.path === this.folder?.path;
+    const reload = step === "reload" && view.path === (this.folder?.path ?? this.path);
     this.#revision++;
     this.pageVersion++;
     this.#pending.clear();
     this.folder = view;
+    this.path = view.path;
+    this.label = view.segments.at(-1)?.name ?? view.path;
     this.count = view.count;
     this.complete = view.complete;
     this.sortMs = view.sort_ms;
@@ -162,6 +167,7 @@ export class Pane {
     this.renaming = null;
     this.error = "";
     if (!reload) {
+      this.scroll = 0;
       this.query = "";
       this.results = undefined;
     }
@@ -296,6 +302,25 @@ export class Pane {
   }
 
   close() {
+    this.release();
     void api.closePane(this.id);
   }
+
+  release() {
+    this.#navigation++;
+    this.#search++;
+    this.#revision++;
+    this.pages = {};
+    this.results = undefined;
+    this.folder = undefined;
+    this.#pending.clear();
+    this.index = "none";
+  }
+
+  async suspend() {
+    this.release();
+    await api.suspendPane(this.id);
+  }
+
+  resume() { return this.path ? this.#go("reload", this.path) : Promise.resolve(); }
 }

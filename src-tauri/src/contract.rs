@@ -30,6 +30,22 @@ pub struct SortView {
 }
 
 #[derive(Clone, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export)]
+pub enum TabSnapshot {
+    Folder {
+        pane: String,
+        path: String,
+        query: String,
+        scroll: f64,
+        sort: SortView,
+    },
+    Settings {
+        pane: String,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AppearanceView {
     #[ts(
@@ -293,6 +309,7 @@ pub struct TransferStatus {
 #[ts(export)]
 pub struct Startup {
     pub label: String,
+    pub adopt: Option<TabSnapshot>,
     pub path: String,
     pub split: bool,
     pub report: bool,

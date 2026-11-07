@@ -36,6 +36,17 @@ try {
     $result | ConvertTo-Json -Depth 6
     Write-Output "Report: $report"
     if (-not $result.passed) { throw 'Interface self-test failed' }
+    # The detached tab reports from its own window once it has listed its folder.
+    $adopted = $null
+    while (-not $adopted) {
+        $adopted = Get-ChildItem -LiteralPath $reports.FullName -Filter 'window-*.json' |
+            ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json } |
+            Where-Object { $_.ready -and $_.adopted -eq 'folder' -and $_.path } | Select-Object -First 1
+        if ($adopted) { break }
+        if ($timer.Elapsed.TotalSeconds -gt 120) { throw 'The detached tab never reported from its new window' }
+        Start-Sleep -Milliseconds 100
+    }
+    Write-Output "Detached tab listed $($adopted.path) in $($adopted.label)"
 } finally {
     if ($process -and -not $process.HasExited) { $process.Kill($true); $null = $process.WaitForExit(5000) }
     foreach ($name in $saved.Keys) {

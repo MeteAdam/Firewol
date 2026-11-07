@@ -28,13 +28,16 @@
   import { Pane } from "./lib/pane.svelte";
   import { PRESETS, colors, presetClass } from "./lib/appearance";
   import Sheet from "./lib/Sheet.svelte";
+  import TabBar from "./lib/TabBar.svelte";
+  import { PaneSlot, folderTab, restore, snapshot, type Tab } from "./lib/tabs.svelte";
 
   const QUERIES = ["ré", "cord", "port", "résumé", "record-0000"];
 
   const appWindow = getCurrentWindow();
   let startup = $state<Startup>();
   let session = $state.raw<SessionState>({ pins: [], clipboard: null });
-  let panes = $state<Pane[]>([]);
+  let slots = $state<PaneSlot[]>([]);
+  const panes = $derived(slots.flatMap(slot => slot.active?.kind === "folder" ? [slot.active.pane] : []));
   let lists = $state<FileList[]>([]);
   let paneCounter = 0;
   let activeIndex = $state(0);
@@ -57,9 +60,11 @@
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let transferTimer: ReturnType<typeof setInterval> | undefined;
 
-  const active = $derived(panes[activeIndex] ?? panes[0]);
-  const other = $derived(panes.length > 1 ? panes[activeIndex === 0 ? 1 : 0] : undefined);
-  const title = $derived(active?.folder?.segments.at(-1)?.name ?? "Firewol");
+  const activeTab = $derived(slots[activeIndex]?.active);
+  const active = $derived(activeTab?.kind === "folder" ? activeTab.pane : undefined);
+  const otherTab = $derived(slots[activeIndex === 0 ? 1 : 0]?.active);
+  const other = $derived(otherTab?.kind === "folder" ? otherTab.pane : undefined);
+  const title = $derived(activeTab?.kind === "settings" ? "Settings" : active?.label ?? "Firewol");
   const focused = $derived(active?.focusedEntry);
   const selectedCount = $derived(active?.selection.size ?? 0);
   const pinned = $derived(session.pins.some((pin) => pin.path === active?.folder?.path));
@@ -158,10 +163,10 @@
     void api.session().then((state) => (session = state));
   }
 
-  function open(entry: Entry, newWindow: boolean) {
+  function open(entry: Entry, inNewTab: boolean) {
     menu = undefined;
     if (!entry.directory) return;
-    if (newWindow) void api.openWindow(entry.path, false);
+    if (inNewTab) void newTab(entry.path);
     else void active?.open(entry.path);
   }
 
@@ -218,21 +223,85 @@
 
   async function toggleSplit() {
     menu = undefined;
-    if (panes.length > 1) {
-      panes[1].close();
-      panes = [panes[0]];
+    if (slots.length > 1) {
+      const second = slots[1].active;
+      if (second?.kind === "folder") await second.pane.suspend();
+      slots[0].tabs = [...slots[0].tabs, ...slots[1].tabs];
+      slots = [slots[0]];
       lists = [lists[0]];
       activeIndex = 0;
       return;
     }
     const pane = newPane();
-    panes = [...panes, pane];
-    if (active?.folder) await pane.open(active.folder.path);
+    const path = active?.path || startup?.path;
+    slots = [...slots, new PaneSlot(folderTab(pane))];
+    if (path) await pane.open(path);
+  }
+
+  async function selectTab(slot: PaneSlot, tab: Tab) {
+    const previous = slot.active;
+    if (previous?.id === tab.id && (tab.kind === "settings" || tab.pane.folder)) return;
+    const activation = ++slot.activation;
+    activeIndex = slots.indexOf(slot);
+    slot.activeTab = tab.id;
+    try {
+      if (previous?.kind === "folder" && previous.id !== tab.id) await previous.pane.suspend();
+      if (activation !== slot.activation) return;
+      if (tab.kind === "folder") await tab.pane.resume();
+      await tick();
+      if (activation === slot.activation && tab.kind === "folder") lists[activeIndex]?.focus();
+    } catch (reason) { notify(String(reason), { error: true }); }
+  }
+
+  async function newTab(path = active?.path || startup?.path || "", slot = slots[activeIndex]) {
+    if (!slot) return;
+    const pane = newPane();
+    pane.path = path;
+    const tab = folderTab(pane);
+    slot.tabs = [...slot.tabs, tab];
+    await selectTab(slot, tab);
+    return tab;
+  }
+
+  async function closeTab(slot: PaneSlot, tab: Tab, detached = false) {
+    if (tab.kind === "folder") { if (detached) tab.pane.release(); else tab.pane.close(); }
+    const index = slot.tabs.indexOf(tab);
+    const wasActive = slot.activeTab === tab.id;
+    slot.tabs = slot.tabs.filter(current => current.id !== tab.id);
+    if (!slot.tabs.length) {
+      if (slots.length > 1) { slots = slots.filter(current => current !== slot); activeIndex = 0; }
+      else await newTab(startup?.path, slot);
+    } else if (wasActive) {
+      const next = slot.tabs[Math.min(index, slot.tabs.length - 1)];
+      slot.activeTab = "";
+      await selectTab(slot, next);
+    }
+  }
+
+  function cycleTab(backwards = false) {
+    const slot = slots[activeIndex];
+    if (!slot) return;
+    const position = slot.tabs.findIndex(tab => tab.id === slot.activeTab);
+    void selectTab(slot, slot.tabs[(position + (backwards ? -1 : 1) + slot.tabs.length) % slot.tabs.length]);
+  }
+
+  async function detachTab(slot: PaneSlot, tab: Tab) {
+    try { await api.adoptPane(snapshot(tab)); await closeTab(slot, tab, true); }
+    catch (reason) { notify(String(reason), { error: true }); if (tab.kind === "folder") await tab.pane.resume(); }
+  }
+
+  function openSettings() {
+    menu = undefined;
+    const slot = slots[activeIndex];
+    if (!slot) return;
+    let tab = slot.tabs.find(tab => tab.kind === "settings");
+    if (!tab) { tab = { kind: "settings", id: `${startup?.label}:settings-${++paneCounter}` }; slot.tabs = [...slot.tabs, tab]; }
+    void selectTab(slot, tab);
   }
 
   function newWindow() {
     menu = undefined;
-    if (active?.folder) void api.openWindow(active.folder.path, false);
+    if (active?.folder) void api.openWindow(active.folder.path, false).catch(reason => notify(String(reason), { error: true }));
   }
 
   function editAddress() {
@@ -258,8 +327,13 @@
     if (event.key === "Escape" && menu) menu = undefined;
     else if (event.key === "Escape" && editing) editing = false;
     else if (event.ctrlKey && key === "l") editAddress();
-    else if (event.ctrlKey && key === "f") searchField.focus();
+    else if (event.ctrlKey && key === "f") searchField?.focus();
+    else if (event.ctrlKey && event.shiftKey && key === "n" && activeTab) void detachTab(slots[activeIndex], activeTab);
     else if (event.ctrlKey && key === "n") newWindow();
+    else if (event.ctrlKey && key === "t") void newTab();
+    else if (event.ctrlKey && key === "w" && activeTab) void closeTab(slots[activeIndex], activeTab);
+    else if (event.ctrlKey && event.key === "Tab") cycleTab(event.shiftKey);
+    else if (event.ctrlKey && event.key === ",") openSettings();
     else if (event.ctrlKey && event.key === "\\") void toggleSplit();
     else if (event.ctrlKey && key === "b") toggleSidebar();
     else if (event.altKey && event.key === "ArrowLeft") void active?.back();
@@ -355,11 +429,18 @@
       times.sort((a, b) => a - b);
       report.searchP95Ms = times[Math.ceil(times.length * 0.95) - 1];
       report.searchSamples = times.length;
+      // Keep several suspended tabs per slot during the four-window gate.
+      const slot = slots[0];
+      const original = slot.active;
+      await newTab(info.path, slot);
+      await newTab(info.path, slot);
+      await selectTab(slot, original);
+      report.tabs = slot.tabs.length;
     }
     await api.saveReport(report);
     if (info.extraWindows > 0) {
       await sleep(info.idleMs);
-      if (panes.length === 1) await toggleSplit();
+      if (slots.length === 1) await toggleSplit();
       await painted();
       for (let window = 0; window < info.extraWindows; window++) await api.openWindow(info.path, true);
     }
@@ -460,6 +541,64 @@
       await source.sortBy("name");
       await source.refresh();
       check("sort and refresh preserve selected identity", source.selected !== oldRow && source.selectedRefs()[0]?.index === identity.index && source.selectedRefs()[0]?.path === identity.path);
+      const slot = slots[0];
+      const originalTab = slot.active;
+      source.query = "file";
+      const extra = await newTab(destPath, slot);
+      check("inactive tabs release listing pages", !source.folder && Object.keys(source.pages).length === 0);
+      check("a new tab owns its folder", extra?.kind === "folder" && extra.pane.folder?.path === destPath);
+      await selectTab(slot, originalTab);
+      check("switching back restores history and search draft", source.query === "file" && source.canForward && !!source.folder);
+      await source.search("");
+      if (extra) { slot.reorder(extra.id, originalTab.id); check("tabs reorder", slot.tabs[0].id === extra.id); await closeTab(slot, extra); }
+      check("closing a tab preserves the active tab", slot.activeTab === originalTab.id && slot.tabs.length === 1);
+      await toggleSplit();
+      check("closing split view merges tabs", slots.length === 1 && slots[0].tabs.length === 2);
+      // Shortcuts go through the same window handler a real key press reaches.
+      const press = (key: string, init: KeyboardEventInit = {}) =>
+        window.dispatchEvent(new KeyboardEvent("keydown", { key, ctrlKey: true, cancelable: true, ...init }));
+      const tabs = () => slots[0].tabs;
+      const shown = () => slots[0].active?.kind === "folder" && !!slots[0].active.pane.folder;
+      const count = tabs().length;
+      press("t");
+      await waitFor(() => tabs().length === count + 1 && shown(), 5000, "Ctrl+T");
+      const opened = slots[0].activeTab;
+      check("Ctrl+T opens and lists a new tab", opened === tabs().at(-1)?.id);
+      press("Tab");
+      await waitFor(() => slots[0].activeTab === tabs()[0].id && shown(), 5000, "Ctrl+Tab");
+      check("Ctrl+Tab wraps to the first tab", true);
+      press("Tab", { shiftKey: true });
+      await waitFor(() => slots[0].activeTab === opened && shown(), 5000, "Ctrl+Shift+Tab");
+      check("Ctrl+Shift+Tab cycles back", true);
+      press("w");
+      await waitFor(() => tabs().length === count && !tabs().some((tab) => tab.id === opened) && shown(), 5000, "Ctrl+W");
+      check("Ctrl+W closes the active tab", true);
+      press(",");
+      await waitFor(() => slots[0].active?.kind === "settings", 5000, "Ctrl+,");
+      await tick();
+      check("Ctrl+, opens Settings as a tab", !!document.querySelector(".settings-pane") && !document.querySelector(".grid"));
+      press("w");
+      await waitFor(() => tabs().length === count && shown(), 5000, "closing Settings");
+      check("closing Settings returns to a folder tab", true);
+      const sidebarBefore = sidebar;
+      press("b");
+      await waitFor(() => sidebar !== sidebarBefore, 5000, "Ctrl+B");
+      press("b");
+      await waitFor(() => sidebar === sidebarBefore, 5000, "Ctrl+B again");
+      check("Ctrl+B still toggles the sidebar", true);
+      press("\\");
+      await waitFor(() => slots.length === 2 && slots[1].active?.kind === "folder" && !!slots[1].active.pane.folder, 5000, "Ctrl+\\");
+      press("\\");
+      await waitFor(() => slots.length === 1 && tabs().length === count + 1, 5000, "Ctrl+\\ again");
+      check("Ctrl+\\ still splits and merges", true);
+      const detached = slots[0].active;
+      check("a folder tab is active before detaching", detached?.kind === "folder");
+      if (detached?.kind === "folder") {
+        press("N", { shiftKey: true });
+        await waitFor(() => !tabs().some((tab) => tab.id === detached.id) && shown(), 10000, "Ctrl+Shift+N");
+        const refused = await api.navigate(detached.id, null, "reload", detached.pane.sort).then(() => false, () => true);
+        check("Ctrl+Shift+N hands the tab to a new window", refused, "the old window can no longer drive the detached tab");
+      }
     } catch (reason) {
       if (steps.every((step) => step.ok)) steps.push({ step: "error", ok: false, detail: String(reason) });
     }
@@ -487,13 +626,20 @@
       useLocale(info.locale);
       startup = info;
       session = info.session;
-      panes = info.split ? [newPane(), newPane()] : [newPane()];
-      await Promise.all(panes.map((pane) => pane.open(info.path)));
+      if (info.adopt) {
+        const tab = restore(info.adopt);
+        slots = [new PaneSlot(tab)];
+        if (tab.kind === "folder") await tab.pane.resume();
+      } else {
+        slots = (info.split ? [newPane(), newPane()] : [newPane()]).map(pane => new PaneSlot(folderTab(pane)));
+        await Promise.all(panes.map((pane) => pane.open(info.path)));
+      }
       await painted();
       const firstListMs = info.sinceStartMs + performance.now() - start;
       lists[0]?.focus();
-      if (info.selfTest) await selfTest(info);
-      else if (info.report) {
+      if (info.selfTest && info.label === "main") await selfTest(info);
+      else if (info.selfTest) await api.saveReport({ label: info.label, ready: true, adopted: info.adopt?.kind ?? null, path: active?.folder?.path ?? null });
+      else if (info.report && !info.adopt) {
         await benchmark(info, firstListMs).catch((reason) =>
           api.saveReport({ label: info.label, error: String(reason) }),
         );
@@ -511,15 +657,7 @@
 <div class="fw p-{preset}" class:dark use:colors={settings?.appearance}>
   <div class="shell">
     <header class="titlebar" data-tauri-drag-region>
-      <div class="tabs" role="tablist" aria-label="Folder tabs">
-        <div class="tab on">
-          <button class="tl" role="tab" aria-selected="true">
-            <FolderIcon />
-            <span>{title}</span>
-          </button>
-        </div>
-      </div>
-      <button class="ib" aria-label="New window (Ctrl+N)" title="New window (Ctrl+N)" onclick={newWindow}><Icon name="plus" /></button>
+      {#if slots.length === 1}<TabBar slot={slots[0]} onselect={tab => selectTab(slots[0], tab)} onclose={tab => closeTab(slots[0], tab)} onnew={() => newTab()} ondetach={tab => detachTab(slots[0], tab)} />{:else}<span class="app-title">Firewol</span>{/if}
       <div class="drag" data-tauri-drag-region></div>
       <div class="caption {settings?.appearance.caption_shape ?? 'rounded'}" class:left={settings?.appearance.caption_left}>
         <button class="cap" aria-label="Minimize" onclick={() => appWindow.minimize()}><Icon name="minimize" size={14} weight={1.5} /></button>
@@ -565,7 +703,7 @@
         <button class="ib on" aria-pressed="true" aria-label="Details view" title="Details view"><Icon name="list" /></button>
         <button class="ib" aria-pressed="false" aria-label="Grid view (not in this build)" title="Grid view (not in this build)" disabled><Icon name="grid" /></button>
       </div>
-      <button class="ib" class:on={panes.length > 1} aria-pressed={panes.length > 1} aria-label="Split view (Ctrl+\)" title="Split view (Ctrl+\)" onclick={toggleSplit}><Icon name="split" /></button>
+      <button class="ib" class:on={slots.length > 1} aria-pressed={slots.length > 1} aria-label="Split view (Ctrl+\)" title="Split view (Ctrl+\)" onclick={toggleSplit}><Icon name="split" /></button>
       <button class="ib" aria-label="More" title="More" aria-haspopup="menu" onmousedown={(event) => event.stopPropagation()} onclick={(event) => showMenu("more", event.clientX - 220, event.clientY + 16)}><Icon name="more" /></button>
     </div>
 
@@ -593,18 +731,42 @@
         </nav>
       {/if}
       <div class="panes">
-        {#each panes as pane, index (pane)}
+        {#each slots as slot, index (slot)}
+          <div class="pane-slot">
+          {#if slots.length > 1}
+            <TabBar {slot} onselect={tab => selectTab(slot, tab)} onclose={tab => closeTab(slot, tab)} onnew={() => newTab(undefined, slot)} ondetach={tab => detachTab(slot, tab)} />
+            {#if slot.active?.kind === "folder"}
+              {@const pane = slot.active.pane}
+              <div class="pane-nav">
+                <button class="ib" title="Back" aria-label="Pane back" disabled={!pane.canBack} onclick={() => pane.back()}><Icon name="back" /></button>
+                <button class="ib" title="Forward" aria-label="Pane forward" disabled={!pane.canForward} onclick={() => pane.forward()}><Icon name="forward" /></button>
+                <input class="field pane-address" aria-label="Pane folder path" value={pane.path} onfocus={() => (activeIndex = index)} onkeydown={(event) => { if (event.key === "Enter") void pane.open(event.currentTarget.value); }} />
+                <input class="field pane-search" aria-label={`Search ${pane.label}`} placeholder={`Search ${pane.label}`} value={pane.query} onfocus={() => (activeIndex = index)} oninput={event => pane.search(event.currentTarget.value)} />
+              </div>
+            {/if}
+          {/if}
+          {#if slot.active?.kind === "folder"}
+          {#key slot.active.id}
           <FileList
             bind:this={lists[index]}
-            {pane}
+            pane={slot.active.pane}
             id={`pane-${index}`}
-            marked={panes.length > 1 && index === activeIndex}
+            marked={slots.length > 1 && index === activeIndex}
             onactivate={() => (activeIndex = index)}
             onopen={open}
             onmenu={(x, y, onRow) => showMenu(onRow ? "item" : "area", x, y)}
             onrename={rename}
             onrecycle={recycle}
           />
+          {/key}
+          {:else if slot.active?.kind === "settings"}
+            <section class="settings-pane" aria-label="Settings">
+              <h1>Settings</h1><p class="muted">Changes apply immediately.</p><h2>Appearance</h2>
+              {#each PRESETS as [value, css, name]}<button class="action" aria-pressed={preset === css} onclick={() => choosePreset(value)}>{name}</button>{/each}
+              {#if preset === "light" || preset === "neu"}<button class="action" onclick={toggleDark}>Dark variant: {dark ? "On" : "Off"}</button>{/if}
+            </section>
+          {/if}
+          </div>
         {/each}
       </div>
     </div>
@@ -647,7 +809,7 @@
     <div class="menu" role="menu" tabindex="-1" style:left={`${menu.x}px`} style:top={`${menu.y}px`} onmousedown={(event) => event.stopPropagation()}>
       {#if menu.kind === "item"}
         <button class="mi" role="menuitem" disabled={!focused?.directory} onclick={() => focused && open(focused, false)}><Icon name="open" /><span class="label">Open</span><span class="sc">Enter</span></button>
-        <button class="mi" role="menuitem" disabled={!focused?.directory} onclick={() => focused && open(focused, true)}><Icon name="window" /><span class="label">Open in new window</span><span class="sc">Ctrl+Enter</span></button>
+        <button class="mi" role="menuitem" disabled={!focused?.directory} onclick={() => focused && open(focused, true)}><Icon name="window" /><span class="label">Open in new tab</span><span class="sc">Ctrl+Enter</span></button>
         <div class="sep"></div>
         <button class="mi" role="menuitem" onclick={() => clip(true)}><Icon name="cut" /><span class="label">Cut</span><span class="sc">Ctrl+X</span></button>
         <button class="mi" role="menuitem" onclick={() => clip(false)}><Icon name="copy" /><span class="label">Copy</span><span class="sc">Ctrl+C</span></button>
@@ -673,6 +835,8 @@
         <button class="mi" role="menuitem" onclick={undo}><Icon name="undo" /><span class="label">Undo</span><span class="sc">Ctrl+Z</span></button>
         <button class="mi" role="menuitem" onclick={() => { menu = undefined; void active?.refresh(); }}><Icon name="refresh" /><span class="label">Refresh</span><span class="sc">F5</span></button>
       {:else}
+        <button class="mi" role="menuitem" onclick={openSettings}><Icon name="settings" /><span class="label">Settings</span><span class="sc">Ctrl+,</span></button>
+        <div class="sep"></div>
         <div class="menu-title">Theme</div>
         {#each PRESETS as [value, css, name] (value)}
           <button class="mi" class:on={preset === css} role="menuitemradio" aria-checked={preset === css} onclick={() => choosePreset(value)}><Icon name="palette" /><span class="label">{name}</span></button>
@@ -680,7 +844,7 @@
         {#if preset === "light" || preset === "neu"}<button class="mi" role="menuitemcheckbox" aria-checked={dark ?? false} onclick={toggleDark}><Icon name="check" /><span class="label">Dark variant</span><span class="sc">{dark ? "On" : "Off"}</span></button>{/if}
         <div class="sep"></div>
         <button class="mi" role="menuitem" onclick={newWindow}><Icon name="window" /><span class="label">New window</span><span class="sc">Ctrl+N</span></button>
-        <button class="mi" role="menuitem" onclick={toggleSplit}><Icon name="split" /><span class="label">{panes.length > 1 ? "Single pane" : "Split view"}</span><span class="sc">Ctrl+\</span></button>
+        <button class="mi" role="menuitem" onclick={toggleSplit}><Icon name="split" /><span class="label">{slots.length > 1 ? "Single pane" : "Split view"}</span><span class="sc">Ctrl+\</span></button>
       {/if}
     </div>
   {/if}
@@ -698,11 +862,7 @@
 <style>
   .shell { display: flex; flex-direction: column; height: 100%; }
   .titlebar { display: flex; align-items: center; gap: 4px; flex: none; height: 44px; padding-left: 10px; }
-  .tabs { display: flex; align-items: center; gap: 4px; min-width: 0; }
-  .tab { display: flex; align-items: center; height: 32px; max-width: 240px; padding: 0 4px 0 2px; border: var(--border-w) solid transparent; border-radius: var(--radius-s); color: var(--muted); }
-  .tab.on { background: var(--tab-active); color: var(--text); border-color: var(--border); box-shadow: var(--shadow-s); backdrop-filter: var(--blur); }
-  .tl { display: flex; align-items: center; gap: 8px; min-width: 0; height: 100%; padding: 0 8px; border: 0; background: transparent; font-size: 12px; }
-  .tl span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app-title { padding: 0 12px; color: var(--muted); }
   .drag { flex-grow: 1; align-self: stretch; }
   .caption { display: flex; align-self: flex-start; }
   .caption.left { order: -1; margin-right: 8px; }
@@ -731,6 +891,12 @@
   .pin:hover { background: var(--hover); }
   .pin.on { background: var(--sel); color: var(--sel-text); box-shadow: var(--sel-shadow); font-weight: 600; }
   .panes { display: flex; flex: 1; min-width: 0; gap: 12px; }
+  .pane-slot { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+  .pane-nav { display: flex; gap: 4px; min-width: 0; }
+  .pane-address { min-width: 0; width: 45%; flex: 1; }
+  .pane-search { min-width: 80px; width: 35%; }
+  .settings-pane { flex: 1; min-height: 0; overflow: auto; padding: 24px; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); }
+  .settings-pane .action { margin: 4px; }
   .status { display: flex; align-items: center; gap: 12px; flex: none; height: 36px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
   .grow { flex-grow: 1; }
   .error { color: var(--text); }

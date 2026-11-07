@@ -1,6 +1,7 @@
 <script lang="ts" module>
   // One outline set (24 px grid, round caps), drawn at 16 px. See docs/DESIGN.md › Iconography.
   const PATHS = {
+    settings: ["M5 6h14M5 12h14M5 18h14M9 3v6M15 9v6M9 15v6"],
     back: ["M19 12H5M11 6l-6 6 6 6"],
     forward: ["M5 12h14M13 6l6 6-6 6"],
     up: ["M12 19V5M6 11l6-6 6 6"],

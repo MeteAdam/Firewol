@@ -44,7 +44,7 @@ cargo build --release --locked -p firewol-tauri --features custom-protocol
 | Interface types | `npm run check` |
 | Memory and performance gate | `.\scripts\Measure-M4Gate.ps1 -App .\target\release\firewol-tauri.exe -Fixture <M0 fixture>` |
 | UI Automation stress | `.\scripts\Test-UiaStress.ps1 -App <exe> -Folder <100k folder>` |
-| Interface self-test | `FIREWOL_OPEN=<fixture>\source`, `FIREWOL_SPIKE_REPORT=<dir>`, `FIREWOL_SELF_TEST=1`, then run the exe; `<dir>\main.json` lists 18 steps |
+| Interface self-test | `.\scripts\Test-Interface.ps1` (disposable fixture, isolated `LOCALAPPDATA`); `main.json` lists 40 steps and the detached tab reports from `window-1.json` |
 | Window screenshot | `powershell.exe -File .\scripts\Capture-Window.ps1 -ProcessId <pid> -OutputPath <png> -TitleLike Firewol` |
 
 The 100,000-file and 1,000,000-record fixture used by every gate run is `target/verify-m3-be5d47eaa6cc4d62b64e597855550377/fixture` (ignored by Git). Recreate one with `firewol-m0.exe prepare 100000 1000000` and `FIREWOL_M0_ROOT` (see README › Reproduce the M0 measurement). The self-test fixture is a folder with `source\note.txt` and an empty `dest`.
@@ -105,3 +105,4 @@ The gate and UIA scripts isolate `LOCALAPPDATA` and `WEBVIEW2_USER_DATA_FOLDER` 
 1. **M4.2 finish:** shell file icons. Extract icons in the core (Shell image factory or `SHGetFileInfo`, cached by extension and per path for executables and shortcuts), serve them through a Tauri custom protocol, and re-run the memory gate.
 2. **M4.3 parity:** tabs (drag, detach), settings as a tab (appearance editor with color wheel and the seven presets moved into core settings, context-menu editor, admin policy), folder styles (alias, color, icon, tags), search filters, regex and the NTFS search scope chip, drag and drop between panes, grid view, the Transfers popover with speed graph, breadcrumb collapsing, folders-first sorting, multi-item recycle, Nilesoft-style icon row in the context menu.
 3. **M4.4 acceptance:** gate and UIA stress on the final interface, interactive transfer, recycle and undo scenarios, long and Unicode paths, then remove the Win32 interface (keep the M0 measurement binaries) and update README.
+4. **Design review (required before closing):** once M4.4 passes and nothing else remains, ask the user whether they want design corrections. Apply any requested changes and re-run the affected checks before calling the project finished.

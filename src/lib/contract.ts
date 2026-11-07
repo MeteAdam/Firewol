@@ -23,6 +23,7 @@ export type { ElevationView } from "./bindings/ElevationView";
 export const SETTINGS_CHANGED = "settings-changed";
 export type { SortView } from "./bindings/SortView";
 export type { SortColumn } from "./bindings/SortColumn";
+export type { TabSnapshot } from "./bindings/TabSnapshot";
 
 // Event names mirror the constants in contract.rs.
 export const FOLDER_PROGRESS = "folder-progress";

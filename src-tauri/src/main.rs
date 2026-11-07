@@ -39,6 +39,7 @@ struct App {
     folders: Arc<Folders>,
     windows: Mutex<HashMap<String, WindowRequest>>,
     next_window: AtomicU32,
+    window_count: AtomicU32,
     report: Option<PathBuf>,
 }
 
@@ -50,6 +51,7 @@ struct WindowRequest {
     path: String,
     split: bool,
     requested: Instant,
+    adopt: Option<contract::TabSnapshot>,
 }
 
 #[tauri::command]
@@ -84,14 +86,14 @@ async fn startup(
     );
     Ok(Startup {
         label,
+        adopt: request.as_ref().and_then(|request| request.adopt.clone()),
         path,
         split: request.map_or_else(
             || std::env::var_os("FIREWOL_SPLIT").is_some_and(|value| !value.is_empty()),
             |r| r.split,
         ),
         report: state.report.is_some(),
-        self_test: main
-            && state.report.is_some()
+        self_test: state.report.is_some()
             && std::env::var("FIREWOL_SELF_TEST").is_ok_and(|value| value == "1"),
         extra_windows: if main {
             setting("FIREWOL_SPIKE_WINDOWS", 1).saturating_sub(1)
@@ -143,8 +145,16 @@ async fn navigate(
 }
 
 #[tauri::command]
-fn close_pane(state: State<'_, App>, pane: String) {
-    state.folders.close_pane(&pane);
+fn close_pane(window: Window, state: State<'_, App>, pane: String) {
+    state.folders.close_pane(window.label(), &pane);
+}
+
+#[tauri::command]
+fn suspend_pane(window: Window, state: State<'_, App>, pane: String) -> Result<(), String> {
+    state
+        .folders
+        .suspend(window.label(), &pane)
+        .map_err(message)
 }
 
 #[tauri::command]
@@ -355,21 +365,78 @@ async fn open_window(
     state: State<'_, App>,
     path: String,
     split: bool,
-) -> Result<(), String> {
-    let label = format!(
-        "window-{}",
-        state.next_window.fetch_add(1, Ordering::Relaxed) + 1
-    );
+) -> Result<String, String> {
+    let label = reserve_window(&state)?;
     lock(&state.windows).insert(
         label.clone(),
         WindowRequest {
             path,
             split,
             requested: Instant::now(),
+            adopt: None,
         },
     );
-    build_window(&app, &label).map_err(message)?;
-    Ok(())
+    if let Err(error) = build_window(&app, &label) {
+        lock(&state.windows).remove(&label);
+        state.window_count.fetch_sub(1, Ordering::Relaxed);
+        return Err(message(error));
+    }
+    Ok(label)
+}
+
+fn reserve_window(state: &App) -> Result<String, String> {
+    state
+        .window_count
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            (count < 4).then_some(count + 1)
+        })
+        .map_err(|_| "Firewol supports up to four windows".to_owned())?;
+    Ok(format!(
+        "window-{}",
+        state.next_window.fetch_add(1, Ordering::Relaxed) + 1
+    ))
+}
+
+#[tauri::command]
+async fn adopt_pane(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, App>,
+    tab: contract::TabSnapshot,
+) -> Result<String, String> {
+    let label = reserve_window(&state)?;
+    let pane = match &tab {
+        contract::TabSnapshot::Folder { pane, .. } => Some(pane.clone()),
+        _ => None,
+    };
+    if let Some(pane) = &pane
+        && let Err(error) = state.folders.adopt(window.label(), &label, pane)
+    {
+        state.window_count.fetch_sub(1, Ordering::Relaxed);
+        return Err(message(error));
+    }
+    let path = match &tab {
+        contract::TabSnapshot::Folder { path, .. } => path.clone(),
+        _ => String::new(),
+    };
+    lock(&state.windows).insert(
+        label.clone(),
+        WindowRequest {
+            path,
+            split: false,
+            requested: Instant::now(),
+            adopt: Some(tab),
+        },
+    );
+    if let Err(error) = build_window(&app, &label) {
+        lock(&state.windows).remove(&label);
+        state.window_count.fetch_sub(1, Ordering::Relaxed);
+        if let Some(pane) = pane {
+            let _ = state.folders.adopt(&label, window.label(), &pane);
+        }
+        return Err(message(error));
+    }
+    Ok(label)
 }
 
 fn build_window(app: &AppHandle, label: &str) -> tauri::Result<WebviewWindow> {
@@ -465,6 +532,7 @@ fn main() {
             folders,
             windows: Mutex::default(),
             next_window: AtomicU32::new(0),
+            window_count: AtomicU32::new(1),
             report: std::env::var_os("FIREWOL_SPIKE_REPORT")
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from),
@@ -486,7 +554,12 @@ fn main() {
             Ok(())
         })
         .on_window_event(move |window, event| match event {
-            WindowEvent::Destroyed => closing.close_owned(window.label()),
+            WindowEvent::Destroyed => {
+                closing.close_owned(window.label());
+                let state = window.state::<App>();
+                lock(&state.windows).remove(window.label());
+                state.window_count.fetch_sub(1, Ordering::Relaxed);
+            }
             WindowEvent::Focused(focused) => memory_target(window, *focused),
             _ => {}
         })
@@ -494,6 +567,8 @@ fn main() {
             startup,
             navigate,
             close_pane,
+            suspend_pane,
+            adopt_pane,
             list_page,
             folder_progress,
             locate_selection,

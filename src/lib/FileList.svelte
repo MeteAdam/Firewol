@@ -4,6 +4,7 @@
   import FolderIcon from "./FolderIcon.svelte";
   import FileIcon from "./FileIcon.svelte";
   import { formatDate, formatSize, location, typeName } from "./format";
+  import { edgeScroll } from "./autoscroll";
   import Icon from "./Icon.svelte";
   import { PAGE, type Pane } from "./pane.svelte";
   import { tint } from "./styles";
@@ -134,6 +135,11 @@
 
   function press(event: MouseEvent, row: number) {
     if (event.button !== 0) return;
+    // As in Explorer: outside the name of an unselected row, a press starts a selection box.
+    if (!tiles && !pane.isSelected(row) && !(event.target as Element).closest(".name")) {
+      beginBox(event, row);
+      return;
+    }
     const keep = !event.ctrlKey && !event.shiftKey && pane.isSelected(row);
     if (keep) pane.selected = row;
     else void pane.select(row, event.ctrlKey ? "toggle" : event.shiftKey ? "range" : "single");
@@ -150,6 +156,134 @@
   function pointerUp() {
     if (pressed?.keep) void pane.select(pressed.row);
     pressed = undefined;
+  }
+
+  // Drag selection: a box in content coordinates, so it stays put while the list scrolls.
+  const BOX_THRESHOLD = 4;
+  // The grid's side padding plus the tile lines' own padding.
+  const TILES_LEFT = 14;
+  let box = $state<{ left: number; top: number; width: number; height: number }>();
+  let boxing: {
+    x: number; y: number; pointerX: number; pointerY: number;
+    moved: boolean; row?: number; ctrl: boolean; shift: boolean;
+    base: Map<string, Entry>; last: string; frame: number;
+  } | undefined;
+
+  const contentX = (clientX: number) => clientX - grid.getBoundingClientRect().left + grid.scrollLeft;
+  const contentY = (clientY: number) => clientY - grid.getBoundingClientRect().top + grid.scrollTop;
+
+  function gridDown(event: MouseEvent) {
+    onactivate();
+    if (event.button !== 0 || (event.target as Element).closest("[data-row], .hdr, .rename")) return;
+    const bounds = grid.getBoundingClientRect();
+    // A press on the list's own scroll bars is not a press on the list.
+    if (event.clientX >= bounds.left + grid.clientWidth || event.clientY >= bounds.top + grid.clientHeight) return;
+    beginBox(event);
+  }
+
+  function beginBox(event: MouseEvent, row?: number) {
+    if (pane.renaming !== null) return;
+    boxing = {
+      x: contentX(event.clientX), y: contentY(event.clientY),
+      pointerX: event.clientX, pointerY: event.clientY,
+      moved: false, row, ctrl: event.ctrlKey, shift: event.shiftKey,
+      base: event.ctrlKey ? new Map(pane.selection) : new Map(), last: "", frame: 0,
+    };
+    window.addEventListener("pointermove", boxMove, true);
+    window.addEventListener("pointerup", boxUp, true);
+    window.addEventListener("pointercancel", endBox, true);
+    window.addEventListener("keydown", boxKey, true);
+  }
+
+  /** The rows inside the box, in order from where the drag started. */
+  function rowsInBox(left: number, top: number, right: number, bottom: number, upwards: boolean) {
+    if (rows === 0) return [];
+    const inRange = (value: number, last: number) => Math.max(0, Math.min(last, value));
+    const result: number[] = [];
+    if (!tiles) {
+      if (bottom < HEADER || top >= HEADER + rows * ROW) return [];
+      const from = inRange(Math.floor((top - HEADER) / ROW), rows - 1);
+      const to = inRange(Math.floor((bottom - HEADER) / ROW), rows - 1);
+      for (let row = from; row <= to; row++) result.push(row);
+    } else {
+      const stride = tile + GAP;
+      const lastLine = lines - 1;
+      if (bottom < PAD || right < TILES_LEFT) return [];
+      const firstColumn = Math.max(0, Math.ceil((left - TILES_LEFT - tile) / stride));
+      const lastColumn = Math.min(columns - 1, Math.floor((right - TILES_LEFT) / stride));
+      const firstRow = Math.max(0, Math.ceil((top - PAD - tile) / stride));
+      const lastRow = Math.min(lastLine, Math.floor((bottom - PAD) / stride));
+      for (let index = firstRow; index <= lastRow; index++) {
+        for (let column = firstColumn; column <= lastColumn; column++) {
+          const row = index * columns + column;
+          if (row < rows) result.push(row);
+        }
+      }
+    }
+    return upwards ? result.reverse() : result;
+  }
+
+  function drawBox() {
+    if (!boxing) return;
+    const x = Math.max(0, Math.min(grid.scrollWidth, contentX(boxing.pointerX)));
+    const y = Math.max(0, Math.min(Math.max(grid.scrollHeight, grid.clientHeight), contentY(boxing.pointerY)));
+    const left = Math.min(x, boxing.x);
+    const top = Math.min(y, boxing.y);
+    const right = Math.max(x, boxing.x);
+    const bottom = Math.max(y, boxing.y);
+    box = { left, top, width: right - left, height: bottom - top };
+    const chosen = rowsInBox(left, top, right, bottom, y < boxing.y);
+    const shape = chosen.length ? `${chosen[0]}:${chosen.at(-1)}:${chosen.length}` : "";
+    if (shape !== boxing.last) {
+      boxing.last = shape;
+      void pane.selectRows(chosen, boxing.base);
+    }
+  }
+
+  /** Keeps the box growing while the pointer rests near an edge. */
+  function boxFrame() {
+    if (!boxing) return;
+    if (edgeScroll(grid, boxing.pointerY)) drawBox();
+    boxing.frame = requestAnimationFrame(boxFrame);
+  }
+
+  function boxMove(event: PointerEvent) {
+    if (!boxing) return;
+    boxing.pointerX = event.clientX;
+    boxing.pointerY = event.clientY;
+    if (!boxing.moved) {
+      if (Math.hypot(contentX(event.clientX) - boxing.x, contentY(event.clientY) - boxing.y) < BOX_THRESHOLD) return;
+      boxing.moved = true;
+      boxing.frame = requestAnimationFrame(boxFrame);
+    }
+    drawBox();
+  }
+
+  function boxUp() {
+    const finished = boxing;
+    endBox();
+    if (!finished || finished.moved) return;
+    if (finished.row !== undefined) void pane.select(finished.row, finished.ctrl ? "toggle" : finished.shift ? "range" : "single");
+    else if (!finished.ctrl) pane.clearSelection();
+  }
+
+  function boxKey(event: KeyboardEvent) {
+    if (event.key !== "Escape" || !boxing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const base = boxing.base;
+    endBox();
+    pane.selection = base;
+  }
+
+  function endBox() {
+    if (boxing) cancelAnimationFrame(boxing.frame);
+    boxing = undefined;
+    box = undefined;
+    window.removeEventListener("pointermove", boxMove, true);
+    window.removeEventListener("pointerup", boxUp, true);
+    window.removeEventListener("pointercancel", endBox, true);
+    window.removeEventListener("keydown", boxKey, true);
   }
 
   function rowMenu(event: MouseEvent, row: number) {
@@ -249,7 +383,7 @@
     onpointermove={pointerMove}
     onpointerup={pointerUp}
     onfocusin={onactivate}
-    onmousedown={onactivate}
+    onmousedown={gridDown}
     oncontextmenu={areaMenu}
   >
     {#if tiles}
@@ -341,6 +475,9 @@
         {/each}
       </div>
     </div>
+    {/if}
+    {#if box}
+      <div class="box" aria-hidden="true" style:left={`${box.left}px`} style:top={`${box.top}px`} style:width={`${box.width}px`} style:height={`${box.height}px`}></div>
     {/if}
     {#if rows === 0}
       <p class="empty">
@@ -440,6 +577,7 @@
   .tile .placeholder { width: 60%; }
   :global(.drop-target).row, :global(.drop-target).tile { outline: 2px dashed var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .list:global(.drop-target) { outline: 2px dashed var(--accent); outline-offset: -4px; }
+  .box { position: absolute; z-index: 2; border: 1px solid var(--accent); border-radius: 2px; background: color-mix(in srgb, var(--accent) 18%, transparent); pointer-events: none; }
   .placeholder { height: 8px; width: 40%; border-radius: 4px; background: var(--sep); }
   .empty { position: absolute; inset: 56px 24px auto 24px; margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

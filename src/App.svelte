@@ -4,6 +4,7 @@
   import { onMount, tick, untrack } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
   import { api } from "./lib/api";
+  import { edgeScroll } from "./lib/autoscroll";
   import {
     FOLDER_PROGRESS,
     INDEX_STATE,
@@ -429,15 +430,7 @@
   function autoScroll() {
     if (!drag) return;
     const list = document.elementFromPoint(drag.x, drag.y)?.closest<HTMLElement>('[role="grid"]');
-    if (list) {
-      const box = list.getBoundingClientRect();
-      const edge = 40;
-      const speed = drag.y < box.top + edge ? -(box.top + edge - drag.y) : drag.y > box.bottom - edge ? drag.y - (box.bottom - edge) : 0;
-      if (speed) {
-        list.scrollTop += Math.round(speed / 2);
-        hover(drag.x, drag.y, drag.move);
-      }
-    }
+    if (list && edgeScroll(list, drag.y)) hover(drag.x, drag.y, drag.move);
     dragFrame = requestAnimationFrame(autoScroll);
   }
 
@@ -1327,8 +1320,8 @@
     const ghost = () => document.querySelector(".drag-ghost")?.textContent ?? "";
     const grab = async (pane: Pane, name: string, over: Element, shiftKey = false) => {
       const row = rowOf(pane, name);
-      const from = center(row);
-      row.dispatchEvent(new MouseEvent("mousedown", { clientX: from.x, clientY: from.y, button: 0, bubbles: true }));
+      const from = center(row.querySelector(".name .nm") ?? row);
+      (row.querySelector(".name .nm") ?? row).dispatchEvent(new MouseEvent("mousedown", { clientX: from.x, clientY: from.y, button: 0, bubbles: true }));
       await waitFor(() => pane.focusedEntry?.name === name, 2000, `select ${name}`);
       pointer(row, "pointermove", { x: from.x + 20, y: from.y });
       pointer(row, "pointermove", center(over), shiftKey);

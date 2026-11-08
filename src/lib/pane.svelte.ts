@@ -170,6 +170,44 @@ export class Pane {
   }
 
   /**
+   * The drag-selection result: `rows` (in drag order) flipped against `base`, so an empty base
+   * selects them and a Ctrl base adds and removes. Stops at the same limit as Ctrl+A.
+   */
+  async selectRows(rows: number[], base: Map<string, Entry>) {
+    const selecting = ++this.#selecting;
+    const revision = this.#revision;
+    const chosen = rows.slice(0, SELECT_ALL_LIMIT);
+    const offsets = new Set(chosen.map((row) => Math.floor(row / PAGE) * PAGE));
+    const next = new Map(base);
+    for (const offset of offsets) {
+      if (!this.#loaded(offset)) await this.loadPage(offset);
+      if (selecting !== this.#selecting || revision !== this.#revision) return;
+      for (const row of chosen) {
+        if (Math.floor(row / PAGE) * PAGE !== offset) continue;
+        const entry = this.entry(row);
+        if (!entry?.id) continue;
+        const key = itemKey(entry.id);
+        if (base.has(key)) next.delete(key);
+        else next.set(key, entry);
+      }
+    }
+    this.selection = next;
+    if (chosen.length > 0) {
+      this.#anchor = chosen[0];
+      this.selected = chosen.at(-1)!;
+    } else {
+      this.selected = -1;
+    }
+  }
+
+  clearSelection() {
+    this.#selecting++;
+    this.selection = new Map();
+    this.selected = -1;
+    this.#anchor = -1;
+  }
+
+  /**
    * Selects every row (Ctrl+A), up to `limit` rows so a 100k-item folder does not load every page.
    * Returns whether every row is selected.
    */

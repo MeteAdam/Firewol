@@ -13,6 +13,7 @@ pub const OPERATION_DONE: &str = "operation-done";
 pub const SESSION_CHANGED: &str = "session-changed";
 pub const SETTINGS_CHANGED: &str = "settings-changed";
 pub const ICON_CHANGED: &str = "icon-changed";
+pub const DRIVES_CHANGED: &str = "drives-changed";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "camelCase")]
@@ -391,6 +392,17 @@ pub struct Pin {
     pub path: String,
     pub item: Option<ItemRef>,
     /// Shell cache key when the folder has its own Windows icon.
+    pub icon: Option<String>,
+}
+
+/// A drive in the sidebar's This PC section.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DriveView {
+    /// For example `Local Disk (C:)`.
+    pub name: String,
+    pub path: String,
+    pub item: Option<ItemRef>,
     pub icon: Option<String>,
 }
 

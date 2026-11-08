@@ -196,6 +196,16 @@ impl Session {
         })
     }
 
+    /// Adds the Windows user folders to the pins the first time this profile runs.
+    pub fn seed_pins(&self) -> Result<()> {
+        if self.settings().pins_seeded {
+            return Ok(());
+        }
+        let known = super::drives::known_folders();
+        self.update_settings(|settings| settings.seed_pins(&known))
+            .map(drop)
+    }
+
     /// Pins the folder, or unpins it when it is already pinned. Returns whether it is pinned.
     pub fn toggle_pin(&self, folder: &Path) -> Result<bool> {
         let mut pinned = false;

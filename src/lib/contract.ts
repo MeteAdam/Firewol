@@ -23,6 +23,7 @@ export type { FolderStyleView } from "./bindings/FolderStyleView";
 export type { ElevationView } from "./bindings/ElevationView";
 export const SETTINGS_CHANGED = "settings-changed";
 export const ICON_CHANGED = "icon-changed";
+export const DRIVES_CHANGED = "drives-changed";
 export type { SortView } from "./bindings/SortView";
 export type { SortColumn } from "./bindings/SortColumn";
 export type { TabSnapshot } from "./bindings/TabSnapshot";
@@ -33,6 +34,7 @@ export type { SearchCount } from "./bindings/SearchCount";
 export type { VolumeState } from "./bindings/VolumeState";
 export type { Subfolders } from "./bindings/Subfolders";
 export type { DriveSpace } from "./bindings/DriveSpace";
+export type { DriveView } from "./bindings/DriveView";
 
 // Event names mirror the constants in contract.rs.
 export const FOLDER_PROGRESS = "folder-progress";

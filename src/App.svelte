@@ -14,6 +14,7 @@
     SESSION_CHANGED,
     SETTINGS_CHANGED,
     ICON_CHANGED,
+    DRIVES_CHANGED,
     type SettingsView,
     type SettingsPatch,
     type AppearanceView,
@@ -28,6 +29,7 @@
     type TransferStatus,
     type VolumeState,
     type DriveSpace,
+    type DriveView,
   } from "./lib/contract";
   import FileList from "./lib/FileList.svelte";
   import FolderIcon from "./lib/FolderIcon.svelte";
@@ -55,6 +57,8 @@
   const appWindow = getCurrentWindow();
   let startup = $state<Startup>();
   let session = $state.raw<SessionState>({ pins: [], clipboard: null });
+  let drives = $state.raw<DriveView[]>([]);
+  let drivesTimer: ReturnType<typeof setTimeout> | undefined;
   let slots = $state<PaneSlot[]>([]);
   const panes = $derived(slots.flatMap(slot => slot.active?.kind === "folder" ? [slot.active.pane] : []));
   let lists = $state<FileList[]>([]);
@@ -98,6 +102,7 @@
   const SIDEBAR_MIN = 180;
   const SIDEBAR_MAX = 360;
   let sidebarDrag = $state<number>();
+  let pcOpen = $state(stored("pc-open", "true") === "true");
   const sidebarWidth = $derived(sidebarDrag ?? settings?.sidebar_width ?? 232);
   /** Free space of the open folder's drive, for the status bar. */
   let space = $state.raw<DriveSpace & { path: string }>();
@@ -405,7 +410,7 @@
     const tabPane = pane(tab?.dataset.tab);
     if (tab && tabPane?.identity) return { item: tabPane.identity, name: paneLabel(tabPane), path: tabPane.path, element: tab };
     const pin = element.closest<HTMLElement>("[data-pin]");
-    const pinned = session.pins.find((candidate) => candidate.path === pin?.dataset.pin);
+    const pinned = [...session.pins, ...drives].find((candidate) => candidate.path === pin?.dataset.pin);
     if (pin && pinned?.item) return { item: pinned.item, name: styleOf(pinned.item)?.alias || pinned.name, path: pinned.path, element: pin };
     return undefined;
   }
@@ -617,6 +622,17 @@
     iconChanged(key);
     for (const pane of panes) void pane.refresh();
     void api.session().then((state) => (session = state));
+  }
+
+  /** Device notifications arrive in bursts, so a change reads the drives once they settle. */
+  function refreshDrives(delay = 0) {
+    clearTimeout(drivesTimer);
+    drivesTimer = setTimeout(() => void api.drives().then((list) => (drives = list), () => {}), delay);
+  }
+
+  function togglePcSection() {
+    pcOpen = !pcOpen;
+    try { localStorage.setItem("firewol.pc-open", String(pcOpen)); } catch { /* Only a convenience. */ }
   }
 
   async function togglePin(path: string | undefined) {
@@ -1715,6 +1731,8 @@
       listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
       listen<SettingsView>(SETTINGS_CHANGED, (event) => (settings = withPending(event.payload))),
       listen<string>(ICON_CHANGED, (event) => windowsIconChanged(event.payload)),
+      listen(DRIVES_CHANGED, () => refreshDrives(300)),
+      appWindow.onFocusChanged((event) => { if (event.payload) refreshDrives(); }),
       appWindow.onCloseRequested(async (event) => {
         // Not prevented: the API then destroys the window, which needs `core:window:allow-destroy`.
         if (allowClose) return;
@@ -1735,6 +1753,7 @@
       useLocale(info.locale);
       startup = info;
       session = info.session;
+      refreshDrives();
       if (info.adopt) {
         const tab = restore(info.adopt);
         slots = [new PaneSlot(tab)];
@@ -1839,6 +1858,17 @@
           {:else}
             <p class="muted side-empty">Pin folders you use often. They stay here until you unpin them.</p>
           {/each}
+          <div class="side-head pc-head">
+            <button class="side-toggle" aria-expanded={pcOpen} onclick={togglePcSection}><span class="turn" class:open={pcOpen}><Icon name="chevron" size={12} weight={2} /></span><span class="side-title">This PC</span></button>
+          </div>
+          {#if pcOpen}
+            {#each drives as drive (drive.path)}
+              {@const place = { path: drive.path, item: drive.item, name: drive.name }}
+              <button class="pin" data-pin={drive.path} class:on={drive.path === active?.folder?.path} title={drive.path} onclick={() => active?.open(drive.path)} oncontextmenu={(event) => placeMenu(event, "drive", place)} onkeydown={(event) => placeMenu(event, "drive", place)}>
+                <FolderIcon icon={drive.icon} /><span>{drive.name}</span>
+              </button>
+            {/each}
+          {/if}
         </nav>
         <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
@@ -2089,6 +2119,11 @@
   .side-resize:focus-visible { outline: none; }
   .side-head { display: flex; align-items: center; justify-content: space-between; padding: 0 4px 4px 12px; }
   .side-title { font-size: 12px; font-weight: 600; color: var(--muted); }
+  .pc-head { margin-top: 8px; padding-left: 4px; }
+  .side-toggle { display: flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px 0 4px; border: 0; border-radius: var(--radius-s); background: transparent; }
+  .side-toggle:hover { background: var(--hover); }
+  .turn { display: inline-flex; color: var(--muted); transition: transform 120ms ease-out; }
+  .turn.open { transform: rotate(90deg); }
   .side-empty { margin: 0; padding: 4px 12px; font-size: 12px; line-height: 18px; }
   .pin { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 12px; border: 0; border-radius: var(--radius-s); background: transparent; font-size: 13px; text-align: left; }
   .pin span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

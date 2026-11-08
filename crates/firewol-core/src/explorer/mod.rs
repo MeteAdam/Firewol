@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod custom_icon;
 mod directory;
+mod drives;
 pub mod elevation;
 pub mod icons;
 mod operations;
@@ -12,6 +13,7 @@ pub mod volume;
 mod watch;
 
 pub use directory::{Directory, Sort, SortColumn};
+pub use drives::{Drive, drives, watch_devices};
 pub use operations::{
     MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations, TransferControl, TransferProgress,
     TransferRequest, TransferState,

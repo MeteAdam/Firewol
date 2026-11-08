@@ -19,6 +19,7 @@ import type {
   VolumeState,
   Subfolders,
   DriveSpace,
+  DriveView,
 } from "./contract";
 
 export const api = {
@@ -55,6 +56,7 @@ export const api = {
   recycle: (items: ItemRef[]) => invoke<void>("recycle", { items }),
   subfolders: (path: string) => invoke<Subfolders>("subfolders", { path }),
   driveSpace: (path: string) => invoke<DriveSpace>("drive_space", { path }),
+  drives: () => invoke<DriveView[]>("drives"),
   undo: () => invoke<void>("undo"),
   transferStatus: () => invoke<TransferStatus | null>("transfer_status"),
   pauseTransfer: () => invoke<void>("pause_transfer"),

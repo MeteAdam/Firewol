@@ -237,6 +237,8 @@ pub struct Settings {
     pub theme_migrated: bool,
     pub last_folder: Option<PathBuf>,
     pub pins: Vec<PathBuf>,
+    /// The Windows folders were added to the pins once; removing one later keeps it removed.
+    pub pins_seeded: bool,
     pub sidebar: Option<bool>,
     /// Folder tabs show tiles instead of details.
     pub grid: Option<bool>,
@@ -259,6 +261,7 @@ impl Default for Settings {
             theme_migrated: false,
             last_folder: None,
             pins: Vec::new(),
+            pins_seeded: false,
             sidebar: None,
             grid: None,
             tile: None,
@@ -281,6 +284,8 @@ struct Stored {
     last_folder: Option<Vec<u16>>,
     #[serde(default)]
     pins: Vec<Vec<u16>>,
+    #[serde(default)]
+    pins_seeded: bool,
     #[serde(default)]
     sidebar: Option<bool>,
     #[serde(default)]
@@ -333,6 +338,7 @@ impl Settings {
             theme_migrated: stored.theme_migrated,
             last_folder: stored.last_folder.map(path),
             pins: stored.pins.into_iter().map(path).collect(),
+            pins_seeded: stored.pins_seeded,
             sidebar: stored.sidebar,
             grid: stored.grid,
             tile: stored.tile,
@@ -343,6 +349,30 @@ impl Settings {
             menu: stored.menu,
             folders: stored.folders.into_iter().collect(),
         })
+    }
+
+    /// Puts `folders` first, in order, once per profile. The user's other pins stay after them
+    /// and a folder that is already pinned moves into place instead of repeating.
+    pub fn seed_pins(&mut self, folders: &[PathBuf]) {
+        if self.pins_seeded {
+            return;
+        }
+        let same = |left: &Path, right: &Path| {
+            left.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+        };
+        let mut rest = std::mem::take(&mut self.pins);
+        let mut pins = Vec::with_capacity(folders.len() + rest.len());
+        for folder in folders {
+            match rest.iter().position(|pin| same(pin, folder)) {
+                Some(index) => pins.push(rest.remove(index)),
+                None => pins.push(folder.clone()),
+            }
+        }
+        pins.append(&mut rest);
+        self.pins = pins;
+        self.pins_seeded = true;
     }
 
     pub fn update(dir: &Path, apply: impl FnOnce(&mut Self)) -> Result<Self> {
@@ -368,6 +398,7 @@ impl Settings {
             theme_migrated: self.theme_migrated,
             last_folder: self.last_folder.as_ref().map(units),
             pins: self.pins.iter().map(units).collect(),
+            pins_seeded: self.pins_seeded,
             sidebar: self.sidebar,
             grid: self.grid,
             tile: self.tile,
@@ -387,5 +418,31 @@ impl Settings {
         file.persist(dir.join("explorer.json"))
             .context("Save Firewol settings")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_pins_are_added_once_in_order_without_repeats() {
+        let known: Vec<PathBuf> = ["D:\\Desktop", "D:\\Documents", "D:\\Music"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        let mut settings = Settings {
+            pins: vec![PathBuf::from("C:\\"), PathBuf::from("d:\\documents")],
+            ..Settings::default()
+        };
+        settings.seed_pins(&known);
+        let expected = ["D:\\Desktop", "d:\\documents", "D:\\Music", "C:\\"];
+        assert_eq!(settings.pins, expected.map(PathBuf::from));
+        assert!(settings.pins_seeded);
+        // A pin the user removes afterwards does not come back.
+        settings.pins.remove(0);
+        settings.seed_pins(&known);
+        assert_eq!(settings.pins.len(), 3);
+        assert_eq!(settings.pins[0], PathBuf::from("d:\\documents"));
     }
 }

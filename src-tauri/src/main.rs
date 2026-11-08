@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use contract::{
-    ClipboardState, DriveSpace, FolderStyleView, IndexState, ItemRef, Navigation, OperationDone,
+    ClipboardState, DriveSpace, DriveView, FolderStyleView, IndexState, ItemRef, Navigation, OperationDone,
     Page, Pin, SearchCount, SearchRequest, Segment, SessionState, SettingsView, Startup, Step,
     Subfolders, TransferStatus, VolumeState,
 };
@@ -400,6 +400,24 @@ async fn subfolders(path: String) -> Result<Subfolders, String> {
                 .collect(),
             more,
         })
+    })
+    .await
+}
+
+/// Every drive with readable media, for the sidebar.
+#[tauri::command]
+async fn drives() -> Result<Vec<DriveView>, String> {
+    blocking(|| {
+        Ok(firewol_core::explorer::drives()
+            .into_iter()
+            .map(|drive| DriveView {
+                name: drive.name,
+                path: text(&drive.path),
+                item: ItemId::at(drive.path.clone()).ok().as_ref().map(item_ref),
+                icon: icons::folder_icon(&drive.path),
+            })
+            .filter(|drive| drive.item.is_some())
+            .collect())
     })
     .await
 }
@@ -903,7 +921,13 @@ fn main() {
                     },
                 );
             })?;
+            // Best effort: a settings file that cannot be written must not stop the app.
+            let _ = session.seed_pins();
             let session = Arc::new(session);
+            let devices = app.handle().clone();
+            let _ = firewol_core::explorer::watch_devices(move || {
+                let _ = devices.emit(contract::DRIVES_CHANGED, ());
+            });
             let styles = session.clone();
             app.state::<App>()
                 .folders
@@ -946,6 +970,7 @@ fn main() {
             recycle,
             subfolders,
             drive_space,
+            drives,
             undo,
             transfer_status,
             pause_transfer,

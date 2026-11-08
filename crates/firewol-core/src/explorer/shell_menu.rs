@@ -41,6 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::{HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR, w};
 
 use super::icons::{bitmap_info, encode_png};
+use super::modern_menu::Modern;
 
 const FIRST_ID: u32 = 1;
 const LAST_ID: u32 = 0x7FFF;
@@ -127,6 +128,7 @@ struct Session {
     opened: Instant,
     generation: u64,
     commands: HashSet<u32>,
+    modern: Modern,
 }
 
 impl Drop for Session {
@@ -370,7 +372,7 @@ fn sweep(window: HWND) {
     }
 }
 
-struct Pidl(*mut ITEMIDLIST);
+pub(super) struct Pidl(pub(super) *mut ITEMIDLIST);
 
 impl Drop for Pidl {
     fn drop(&mut self) {
@@ -378,7 +380,7 @@ impl Drop for Pidl {
     }
 }
 
-fn parse(path: &Path) -> Result<Pidl> {
+pub(super) fn parse(path: &Path) -> Result<Pidl> {
     let mut pidl = std::ptr::null_mut();
     unsafe {
         SHParseDisplayName(&HSTRING::from(path.as_os_str()), None, &mut pidl, 0, None)
@@ -434,6 +436,7 @@ fn open(window: HWND, label: String, owner: isize, target: Target) -> Result<Vec
         opened: Instant::now(),
         generation,
         commands: HashSet::new(),
+        modern: Modern::default(),
     };
     unsafe {
         session
@@ -443,7 +446,12 @@ fn open(window: HWND, label: String, owner: isize, target: Target) -> Result<Vec
             .context("Read the Windows menu")?;
     }
     let mut next_icon = 0;
-    let items = tidy(walk(&mut session, popup, 0, &mut next_icon));
+    let classic = walk(&mut session, popup, 0, &mut next_icon);
+    // Windows 11 lists its packaged commands above the classic ones.
+    let (modern, mut items) = Modern::load(&target, &mut session.commands);
+    session.modern = modern;
+    items.extend(classic);
+    let items = tidy(items);
     SESSIONS.with_borrow_mut(|sessions| sessions.insert(label, session));
     unsafe { SetTimer(Some(window), SWEEP_TIMER, SWEEP_MS, None) };
     Ok(items)
@@ -475,7 +483,7 @@ fn verb(session: &Session, id: u32) -> String {
 }
 
 /// Drops the accelerator hint after a tab and turns `&&` into `&` and other `&` into nothing.
-fn clean_label(text: &str) -> String {
+pub(super) fn clean_label(text: &str) -> String {
     let text = text.split('\t').next().unwrap_or_default();
     let mut label = String::with_capacity(text.len());
     let mut characters = text.chars().peekable();
@@ -568,11 +576,14 @@ fn walk(session: &mut Session, menu: HMENU, depth: u32, next_icon: &mut u32) -> 
     items
 }
 
-/// Removes separators that filtering left at the ends or side by side.
+/// Removes separators that filtering left at the ends or side by side, and the second copy of
+/// a command that registers both as a packaged handler and as a classic extension.
 fn tidy(items: Vec<ShellItem>) -> Vec<ShellItem> {
     let mut result: Vec<ShellItem> = Vec::with_capacity(items.len());
+    let mut labels = HashSet::new();
     for item in items {
-        if item.separator && result.last().is_none_or(|last| last.separator) {
+        let repeated = !item.separator && !labels.insert(item.label.clone());
+        if repeated || (item.separator && result.last().is_none_or(|last| last.separator)) {
             continue;
         }
         result.push(item);
@@ -643,6 +654,9 @@ fn bitmap_png(bitmap: HBITMAP) -> Option<Vec<u8>> {
 }
 
 fn run_command(session: &Session, id: u32, point: (i32, i32)) -> Result<()> {
+    if let Some(result) = session.modern.invoke(id) {
+        return result.context("Windows could not run this command");
+    }
     let offset = (id - FIRST_ID) as usize;
     let info = CMINVOKECOMMANDINFOEX {
         cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,

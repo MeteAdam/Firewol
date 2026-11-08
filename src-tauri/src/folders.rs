@@ -8,13 +8,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use firewol_core::explorer::{
     Cancellation, Directory, Filters, FolderKey, FolderStyle, History, Item, ItemId, ItemPage,
-    PAGE_SIZE, SearchIndex, SearchQuery, SearchReader, Sort, SortColumn, data_dir, display_path,
-    icons, page,
+    PAGE_SIZE, SavedView, SearchIndex, SearchQuery, SearchReader, Sort, SortColumn, data_dir,
+    display_path, icons, page,
 };
 
 use crate::contract::{
-    Entry, FolderProgress, FolderView, IndexState, ItemRef, Navigation, Page, SearchCount,
-    SearchFilters, SearchRequest, SearchScope, Segment, SortView, Step,
+    Entry, FolderDisplay, FolderProgress, FolderView, IndexState, ItemRef, Navigation, Page,
+    SearchCount, SearchFilters, SearchRequest, SearchScope, Segment, SortView, Step,
 };
 use crate::volumes::{self, Volumes};
 
@@ -32,6 +32,7 @@ pub type Notify = Arc<dyn Fn(Notice) + Send + Sync>;
 pub type Styles = BTreeMap<FolderKey, FolderStyle>;
 type StyleSource = Arc<dyn Fn() -> Styles + Send + Sync>;
 type HiddenSource = Arc<dyn Fn() -> bool + Send + Sync>;
+type ViewSource = Arc<dyn Fn(FolderKey) -> Option<SavedView> + Send + Sync>;
 
 /// Open folder snapshots, keyed by the id the interface holds, and the panes showing them.
 #[derive(Default)]
@@ -41,6 +42,7 @@ pub struct Folders {
     panes: Mutex<HashMap<String, Pane>>,
     styles: OnceLock<StyleSource>,
     show_hidden: OnceLock<HiddenSource>,
+    views: OnceLock<ViewSource>,
     pub volumes: Arc<Volumes>,
 }
 
@@ -91,6 +93,22 @@ impl Folders {
     /// Sets where listings read the Show/Hide choice from, once at startup.
     pub fn use_show_hidden(&self, source: impl Fn() -> bool + Send + Sync + 'static) {
         let _ = self.show_hidden.set(Arc::new(source));
+    }
+
+    /// Sets where listings read each folder's saved view from, once at startup.
+    pub fn use_views(
+        &self,
+        source: impl Fn(FolderKey) -> Option<SavedView> + Send + Sync + 'static,
+    ) {
+        let _ = self.views.set(Arc::new(source));
+    }
+
+    fn saved_view(&self, folder: &ItemId) -> Option<FolderDisplay> {
+        let view = self.views.get()?(FolderKey::from(folder))?;
+        Some(FolderDisplay {
+            grid: view.grid,
+            tile: view.tile,
+        })
     }
 
     fn directory(&self, path: &Path) -> Result<Directory> {
@@ -298,9 +316,11 @@ impl Folders {
         sort_ms: f64,
         first: ItemPage,
     ) -> FolderView {
+        let identity = ItemId::at(path.to_owned()).ok();
         FolderView {
             id,
-            item: ItemId::at(path.to_owned()).ok().as_ref().map(item_ref),
+            view: identity.as_ref().and_then(|folder| self.saved_view(folder)),
+            item: identity.as_ref().map(item_ref),
             icon: firewol_core::explorer::icons::folder_icon(path),
             path: text(path),
             segments: segments(path),

@@ -136,6 +136,14 @@ pub(super) fn known_folders() -> Vec<PathBuf> {
     .collect()
 }
 
+/// The folders that start as tiles rather than details.
+pub(super) fn media_folders() -> Vec<PathBuf> {
+    [FOLDERID_Pictures, FOLDERID_Videos]
+        .iter()
+        .filter_map(known_folder)
+        .collect()
+}
+
 /// The folders of the Go To menu, in the order and with the names of Nilesoft's `goto.nss`.
 pub fn go_to_folders() -> Vec<(&'static str, PathBuf)> {
     let known = [

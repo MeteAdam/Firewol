@@ -10,10 +10,14 @@ use anyhow::{Context, Result, ensure};
 
 use super::{
     FolderKey, FolderStyle, ItemId, MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations,
-    Settings, TransferControl, TransferProgress, TransferRequest,
+    SavedView, Settings, TransferControl, TransferProgress, TransferRequest,
 };
 
 const HISTORY_LIMIT: usize = 64;
+const MEDIA_VIEW: SavedView = SavedView {
+    grid: true,
+    tile: 128,
+};
 
 /// Back and forward history of one pane.
 #[derive(Clone, Debug, Default)]
@@ -204,6 +208,38 @@ impl Session {
         let known = super::drives::known_folders();
         self.update_settings(|settings| settings.seed_pins(&known))
             .map(drop)
+    }
+
+    /// Remembers how this folder is shown. The identity keeps it through renames and moves.
+    pub fn set_folder_view(&self, folder: &ItemId, view: SavedView) -> Result<()> {
+        ensure!(
+            folder.verify()?.metadata()?.is_dir(),
+            "Only folders have a view"
+        );
+        let key = FolderKey::from(folder);
+        self.update_settings(|settings| {
+            settings.views.insert(key, view);
+        })
+        .map(drop)
+    }
+
+    /// Starts Pictures and Videos as tiles, once per profile.
+    pub fn seed_views(&self) -> Result<()> {
+        if self.settings().views_seeded {
+            return Ok(());
+        }
+        let keys: Vec<FolderKey> = super::drives::media_folders()
+            .into_iter()
+            .filter_map(|folder| ItemId::at(folder).ok())
+            .map(|folder| FolderKey::from(&folder))
+            .collect();
+        self.update_settings(|settings| {
+            for key in keys {
+                settings.views.entry(key).or_insert(MEDIA_VIEW);
+            }
+            settings.views_seeded = true;
+        })
+        .map(drop)
     }
 
     /// Moves a pinned folder before `before`, or to the end of the pins when that is `None`.

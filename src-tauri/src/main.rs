@@ -24,8 +24,8 @@ use contract::{
 use firewol_core::explorer::icons::{self, Icons};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
 use firewol_core::explorer::{
-    ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, Session, actions, custom_icon, data_dir,
-    display_path, home,
+    ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, SavedView, Session, actions, custom_icon,
+    data_dir, display_path, home,
 };
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::{
@@ -512,6 +512,31 @@ async fn update_settings(
         let view = settings::update(&files, patch)?;
         app.emit(contract::SETTINGS_CHANGED, &view)?;
         Ok(view)
+    })
+    .await
+}
+
+/// Remembers details or tiles for one folder.
+#[tauri::command]
+async fn set_folder_view(
+    files: State<'_, Files>,
+    folder: ItemRef,
+    view: contract::FolderDisplay,
+) -> Result<(), String> {
+    let files = files.0.clone();
+    let folder = item_id(&folder).map_err(message)?;
+    blocking(move || {
+        anyhow::ensure!(
+            settings::TILES.contains(&view.tile),
+            "Grid tiles are 96, 128 or 160 pixels"
+        );
+        files.set_folder_view(
+            &folder,
+            SavedView {
+                grid: view.grid,
+                tile: view.tile,
+            },
+        )
     })
     .await
 }
@@ -1185,6 +1210,7 @@ fn main() {
             })?;
             // Best effort: a settings file that cannot be written must not stop the app.
             let _ = session.seed_pins();
+            let _ = session.seed_views();
             let session = Arc::new(session);
             let devices = app.handle().clone();
             let _ = firewol_core::explorer::watch_devices(move || {
@@ -1198,6 +1224,10 @@ fn main() {
             app.state::<App>()
                 .folders
                 .use_show_hidden(move || visibility.settings().show_hidden.unwrap_or(true));
+            let views = session.clone();
+            app.state::<App>()
+                .folders
+                .use_views(move |folder| views.settings().views.get(&folder).copied());
             app.manage(Files(session));
             build_window(app.handle(), "main")?;
             Ok(())
@@ -1252,6 +1282,7 @@ fn main() {
             pick_custom_icon,
             reset_custom_icon,
             open_items,
+            set_folder_view,
             menu_places,
             open_terminal,
             open_system_uri,

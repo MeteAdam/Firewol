@@ -37,6 +37,7 @@ export type { DriveSpace } from "./bindings/DriveSpace";
 export type { DriveView } from "./bindings/DriveView";
 export type { ShellMenuItem } from "./bindings/ShellMenuItem";
 export type { ColumnWidthsView } from "./bindings/ColumnWidthsView";
+export type { FolderDisplay } from "./bindings/FolderDisplay";
 export type { OpenResult } from "./bindings/OpenResult";
 export type { MenuPlaces } from "./bindings/MenuPlaces";
 export type { GoToFolder } from "./bindings/GoToFolder";

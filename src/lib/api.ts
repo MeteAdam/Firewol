@@ -22,6 +22,7 @@ import type {
   DriveView,
   ShellMenuItem,
   OpenResult,
+  FolderDisplay,
   MenuPlaces,
   ItemAttributesView,
 } from "./contract";
@@ -36,6 +37,7 @@ export const api = {
   /** `null` (or an empty style) clears the folder's customization. */
   setFolderStyle: (folder: ItemRef, style: FolderStyleView | null) =>
     invoke<SettingsView>("set_folder_style", { folder, style }),
+  setFolderView: (folder: ItemRef, view: FolderDisplay) => invoke<void>("set_folder_view", { folder, view }),
   operationBusy: () => invoke<boolean>("operation_busy"),
   navigate: (pane: string, path: string | null, step: Step, sort: SortView) =>
     invoke<Navigation>("navigate", { pane, path, step, sort }),

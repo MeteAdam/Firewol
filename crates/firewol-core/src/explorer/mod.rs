@@ -25,7 +25,7 @@ pub use search::{Filters, SearchIndex, SearchQuery, SearchReader, remove_stale_i
 pub use session::{Clipboard, Completion, History, Session};
 pub use settings::{
     Appearance, CaptionShape, ColumnWidths, FolderKey, FolderStyle, MenuAction, MenuEntry, Preset,
-    Rgb, Settings, default_menu,
+    Rgb, SavedView, Settings, default_menu,
 };
 
 use std::ffi::{OsStr, OsString};

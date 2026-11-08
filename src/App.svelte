@@ -72,8 +72,11 @@
   let settings = $state.raw<SettingsView>();
   const windowsDark = new MediaQuery("(prefers-color-scheme: dark)");
   const sidebar = $derived(settings?.sidebar ?? true);
-  const gridView = $derived(settings?.grid ?? false);
-  const tile = $derived(settings?.tile ?? 128);
+  /** The active folder's own view; a folder without one opens in details. */
+  const gridOf = (pane?: Pane) => pane?.folder?.view?.grid ?? false;
+  const tileOf = (pane?: Pane) => pane?.folder?.view?.tile ?? settings?.tile ?? 128;
+  /** Settles when the latest view choice has reached the core (used by the self-test). */
+  let viewSaved: Promise<unknown> = Promise.resolve();
   const TILES = TILE_SIZES;
   const rowHeight = $derived(settings?.row ?? 32);
   const ROWS = [24, 32, 40, 52];
@@ -143,6 +146,8 @@
 
   const activeTab = $derived(slots[activeIndex]?.active);
   const active = $derived(activeTab?.kind === "folder" ? activeTab.pane : undefined);
+  const gridView = $derived(gridOf(active));
+  const tile = $derived(tileOf(active));
   const otherTab = $derived(slots[activeIndex === 0 ? 1 : 0]?.active);
   const other = $derived(otherTab?.kind === "folder" ? otherTab.pane : undefined);
   // Tabs, the title and pins look styles up by identity, so they follow edits at once.
@@ -277,10 +282,18 @@
     event.preventDefault();
     void saveSidebarWidth(clampSidebar(next));
   }
-  /** Details, or tiles of `size` pixels; saved for every folder tab and window. */
+  /** Details, or tiles of `size` pixels, remembered for the open folder only. */
   function setView(grid: boolean, size = tile) {
     menu = undefined;
-    if (grid !== gridView || size !== tile) void saveSettings({ grid, tile: size });
+    const folder = active?.folder;
+    if (!folder || (grid === gridView && size === tile)) return;
+    const view = { grid, tile: size };
+    for (const pane of allPanes()) {
+      if (pane.folder?.path === folder.path) pane.folder = { ...pane.folder, view };
+    }
+    if (folder.item) viewSaved = api.setFolderView(folder.item, view).catch(reportFailure);
+    // The next folder switched to tiles starts at the size used last.
+    if (grid && size !== settings?.tile) void saveSettings({ tile: size });
   }
   /** Ctrl+wheel must cancel WebView2's page zoom, which needs a non-passive listener. */
   function nonPassiveWheel(node: HTMLElement, handler: (event: WheelEvent) => void) {
@@ -1758,10 +1771,42 @@
     tiles()[0].dispatchEvent(wheel);
     await waitFor(() => tile === 128, 5000, "Ctrl+wheel");
     check("Ctrl+wheel resizes tiles instead of zooming the page", wheel.defaultPrevented);
-    check("the view persists through the core", (await api.getSettings()).grid && (await api.getSettings()).tile === 128);
+    await viewSaved;
+    await source.refresh();
+    check("the view persists through the core", !!source.folder?.view?.grid && source.folder.view.tile === 128, JSON.stringify(source.folder?.view));
+    const folder = source.folder!.path;
+    const other = `${parentPath(folder)}\\dest`;
+    await source.open(other);
+    await waitFor(() => !gridView && !list()?.classList.contains("tiles"), 5000, "details in the other folder");
+    check("a folder without its own view opens in details", source.folder?.view === null, JSON.stringify(source.folder?.view));
+    key("Digit4");
+    await waitFor(() => gridView && tile === 96, 5000, "small tiles in the other folder");
+    await viewSaved;
+    await source.open(folder);
+    await waitFor(() => gridView && tile === 128, 5000, "the first folder's own tiles");
+    check("each folder keeps its own view and size", true);
+    await source.open(other);
+    await waitFor(() => gridView && tile === 96, 5000, "the other folder's own tiles");
+    key("Digit6");
+    await waitFor(() => !gridView, 5000, "details in the other folder again");
+    await viewSaved;
+    await source.back();
+    await source.open(folder);
     key("Digit6");
     await waitFor(() => !gridView && !list()?.classList.contains("tiles"), 5000, "Ctrl+Shift+6");
-    check("Ctrl+Shift+6 returns to details", !(await api.getSettings()).grid);
+    await viewSaved;
+    await source.refresh();
+    check("Ctrl+Shift+6 returns this folder to details", source.folder?.view?.grid === false, JSON.stringify(source.folder?.view));
+    const pictures = places?.folders.find((place) => place.name === "Pictures")?.path;
+    if (pictures) {
+      await source.open(pictures);
+      await waitFor(() => source.folder?.path.toLowerCase() === pictures.toLowerCase(), 5000, "Pictures");
+      check("Pictures starts as tiles", source.folder?.view?.grid === true, JSON.stringify(source.folder?.view));
+      await source.open(folder);
+    }
+    // Later steps expect a forward entry, as before these navigations.
+    await source.open(other);
+    await source.back();
   }
 
   /** M4.3-g: in-window drag and drop with synthetic pointer events over the real layout. */
@@ -2612,8 +2657,8 @@
             pane={slot.active.pane}
             id={`pane-${index}`}
             marked={slots.length > 1 && index === activeIndex}
-            grid={gridView}
-            {tile}
+            grid={gridOf(slot.active.pane)}
+            tile={tileOf(slot.active.pane)}
             row={rowHeight}
             extensions={settings?.show_extensions ?? true}
             widths={settings?.columns}

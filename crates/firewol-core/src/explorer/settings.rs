@@ -102,6 +102,14 @@ impl FolderKey {
     }
 }
 
+/// How one folder is shown. A folder without one opens in details.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedView {
+    pub grid: bool,
+    /// Tile edge in pixels: 96, 128 or 160.
+    pub tile: u32,
+}
+
 /// Details column widths in pixels, shared by every folder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -312,6 +320,10 @@ pub struct Settings {
     pub elevation: ElevationPolicy,
     pub menu: Vec<MenuEntry>,
     pub folders: BTreeMap<FolderKey, FolderStyle>,
+    /// Each folder's own view, by the same identity as its style.
+    pub views: BTreeMap<FolderKey, SavedView>,
+    /// Pictures and Videos were set to tiles once; a later choice stays.
+    pub views_seeded: bool,
 }
 
 impl Default for Settings {
@@ -335,6 +347,8 @@ impl Default for Settings {
             elevation: ElevationPolicy::default(),
             menu: default_menu(),
             folders: BTreeMap::new(),
+            views: BTreeMap::new(),
+            views_seeded: false,
         }
     }
 }
@@ -376,6 +390,10 @@ struct Stored {
     menu: Vec<MenuEntry>,
     #[serde(default)]
     folders: Vec<(FolderKey, FolderStyle)>,
+    #[serde(default)]
+    views: Vec<(FolderKey, SavedView)>,
+    #[serde(default)]
+    views_seeded: bool,
 }
 
 impl Settings {
@@ -425,6 +443,8 @@ impl Settings {
             elevation: stored.elevation,
             menu: stored.menu,
             folders: stored.folders.into_iter().collect(),
+            views: stored.views.into_iter().collect(),
+            views_seeded: stored.views_seeded,
         })
     }
 
@@ -511,6 +531,8 @@ impl Settings {
                 .iter()
                 .map(|(key, style)| (*key, style.clone()))
                 .collect(),
+            views: self.views.iter().map(|(key, view)| (*key, *view)).collect(),
+            views_seeded: self.views_seeded,
         };
         let file = tempfile::NamedTempFile::new_in(dir)?;
         serde_json::to_writer(file.as_file(), &stored)?;
@@ -523,6 +545,29 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_folder_keeps_its_own_view_across_a_reload() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let folder = |name: &str| -> Result<ItemId> {
+            let path = fixture.path().join(name);
+            fs::create_dir(&path)?;
+            ItemId::at(path)
+        };
+        let (photos, code) = (folder("photos")?, folder("code")?);
+        let tiles = SavedView {
+            grid: true,
+            tile: 96,
+        };
+        let data = fixture.path().join("data");
+        Settings::update(&data, |settings| {
+            settings.views.insert(FolderKey::from(&photos), tiles);
+        })?;
+        let loaded = Settings::load(&data)?;
+        assert_eq!(loaded.views.get(&FolderKey::from(&photos)), Some(&tiles));
+        assert_eq!(loaded.views.get(&FolderKey::from(&code)), None);
+        Ok(())
+    }
 
     #[test]
     fn only_a_menu_in_the_earlier_default_order_is_reordered() {

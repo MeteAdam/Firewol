@@ -289,6 +289,16 @@ pub struct FolderView {
     pub complete: bool,
     pub sort_ms: f64,
     pub page: Page,
+    /// This folder's own view; `null` opens it in details.
+    pub view: Option<FolderDisplay>,
+}
+
+/// How one folder is shown: tiles of `tile` pixels, or details.
+#[derive(Clone, Copy, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FolderDisplay {
+    pub grid: bool,
+    pub tile: u32,
 }
 
 /// Which way a pane moves through its history.

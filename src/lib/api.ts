@@ -21,6 +21,7 @@ import type {
   DriveSpace,
   DriveView,
   ShellMenuItem,
+  OpenResult,
 } from "./contract";
 
 export const api = {
@@ -67,6 +68,8 @@ export const api = {
   /** Windows' Change Icon dialog; false means it was cancelled. */
   pickCustomIcon: (item: ItemRef) => invoke<boolean>("pick_custom_icon", { item }),
   resetCustomIcon: (item: ItemRef) => invoke<void>("reset_custom_icon", { item }),
+  /** Runs Windows' default action for files; `navigate` is a folder to show instead. */
+  openItems: (items: ItemRef[]) => invoke<OpenResult>("open_items", { items }),
   /** `background` opens the menu of the empty area of the folder `items[0]`. */
   shellMenuOpen: (items: ItemRef[], background: boolean) => invoke<ShellMenuItem[]>("shell_menu_open", { items, background }),
   shellMenuInvoke: (id: number, x: number, y: number) => invoke<void>("shell_menu_invoke", { id, x, y }),

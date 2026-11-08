@@ -25,16 +25,18 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    BHID_SFObject, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX,
-    GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3, ILFindLastID, IShellFolder, IShellItem,
-    SHBindToParent, SHCreateItemFromParsingName, SHParseDisplayName,
+    BHID_SFObject, CMF_DEFAULTONLY, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO,
+    CMINVOKECOMMANDINFOEX, GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3, ILFindLastID,
+    IShellFolder, IShellItem, SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SHBindToParent,
+    SHCreateItemFromParsingName, SHELLEXECUTEINFOW, SHParseDisplayName, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DeleteMenu, DestroyMenu, DispatchMessageW,
-    GetCursorPos, GetMenuItemCount, GetMenuItemInfoW, GetMessageW, HMENU, KillTimer, MENUITEMINFOW,
-    MF_BYPOSITION, MFS_DISABLED, MFS_GRAYED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_CHECKMARKS,
-    MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, MSG, PostMessageW, RegisterClassW,
-    SW_SHOWNORMAL, SetForegroundWindow, SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    GET_MENU_DEFAULT_ITEM_FLAGS, GetCursorPos, GetMenuDefaultItem, GetMenuItemCount,
+    GetMenuItemInfoW, GetMessageW, HMENU, KillTimer, MENUITEMINFOW, MF_BYPOSITION, MFS_DISABLED,
+    MFS_GRAYED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_CHECKMARKS, MIIM_FTYPE, MIIM_ID, MIIM_STATE,
+    MIIM_STRING, MIIM_SUBMENU, MSG, PostMessageW, RegisterClassW, SW_SHOWNORMAL,
+    SetForegroundWindow, SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
     TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
     WM_MENUCHAR, WM_NULL, WM_TIMER, WNDCLASSW, WS_POPUP,
 };
@@ -54,6 +56,8 @@ const MAX_LABEL: usize = 512;
 const MAX_ICON_EDGE: i32 = 128;
 const OPEN_WAIT: Duration = Duration::from_secs(5);
 const SEE_MASK_UNICODE: u32 = 0x4000;
+/// `SEE_MASK_FLAG_LOG_USAGE`: a launch the user asked for, which Windows counts as recent use.
+const LOG_USAGE: u32 = 0x0400_0000;
 /// Firewol has its own versions of these commands, so its menu leaves them out.
 const FIREWOL_VERBS: [&str; 8] = [
     "open",
@@ -212,6 +216,15 @@ impl ShellMenus {
     pub fn native(&self, label: &str) -> Result<()> {
         let label = label.to_owned();
         self.call(None, move |window| native(window, &label))?
+    }
+
+    /// Runs the default Windows command of `paths`, as a double-click does in Explorer.
+    pub fn open_default(&self, owner: isize, paths: Vec<PathBuf>) -> Result<()> {
+        self.call(None, move |window| {
+            by_folder(paths)
+                .into_iter()
+                .try_for_each(|group| open_group(window, owner, group))
+        })?
     }
 
     pub fn close(&self, label: &str) {
@@ -679,6 +692,91 @@ fn run_command(session: &Session, id: u32, point: (i32, i32)) -> Result<()> {
     .context("Windows could not run this command")
 }
 
+/// One Shell menu covers one folder, and search results can come from many.
+fn by_folder(paths: Vec<PathBuf>) -> Vec<Vec<PathBuf>> {
+    let mut groups: Vec<Vec<PathBuf>> = Vec::new();
+    for path in paths {
+        match groups
+            .iter_mut()
+            .find(|group| group[0].parent() == path.parent())
+        {
+            Some(group) => group.push(path),
+            None => groups.push(vec![path]),
+        }
+    }
+    groups
+}
+
+/// Asks Windows for the items' default command only, the way Explorer handles a double-click, so
+/// the result follows the user's default apps and handlers that replace the plain "open" verb.
+fn open_group(window: HWND, owner: isize, paths: Vec<PathBuf>) -> Result<()> {
+    let folder = paths[0]
+        .parent()
+        .context("This item has no folder")?
+        .to_owned();
+    let menu = context_menu(&Target::Items(paths.clone()), window)?;
+    let popup = unsafe { CreatePopupMenu()? };
+    let result = invoke_default(&menu, popup, owner, &folder);
+    unsafe {
+        let _ = DestroyMenu(popup);
+    }
+    match result? {
+        true => Ok(()),
+        false => paths
+            .iter()
+            .try_for_each(|path| open_without_menu(owner, path)),
+    }
+}
+
+/// Returns false when the menu has no default command to run.
+fn invoke_default(menu: &IContextMenu, popup: HMENU, owner: isize, folder: &Path) -> Result<bool> {
+    unsafe {
+        menu.QueryContextMenu(popup, 0, FIRST_ID, LAST_ID, CMF_DEFAULTONLY)
+            .ok()
+            .context("Read the Windows menu")?;
+    }
+    let id = unsafe { GetMenuDefaultItem(popup, 0, GET_MENU_DEFAULT_ITEM_FLAGS(0)) };
+    if !(FIRST_ID..=LAST_ID).contains(&id) {
+        return Ok(false);
+    }
+    let offset = (id - FIRST_ID) as usize;
+    let directory = HSTRING::from(folder.as_os_str());
+    // No zone-check override: Windows keeps warning about files that came from the internet.
+    let info = CMINVOKECOMMANDINFOEX {
+        cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+        fMask: SEE_MASK_UNICODE | LOG_USAGE,
+        hwnd: HWND(owner as _),
+        lpVerb: PCSTR(offset as *const u8),
+        lpVerbW: PCWSTR(offset as *const u16),
+        lpDirectoryW: PCWSTR(directory.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe { menu.InvokeCommand((&raw const info).cast::<CMINVOKECOMMANDINFO>()) }
+        .context("Windows could not open this item")?;
+    Ok(true)
+}
+
+/// For a type without a default command: any verb Windows finds, else its app picker.
+fn open_without_menu(owner: isize, path: &Path) -> Result<()> {
+    let file = HSTRING::from(path.as_os_str());
+    let execute = |verb: PCWSTR, flags: u32| {
+        let mut request = SHELLEXECUTEINFOW {
+            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_INVOKEIDLIST | flags,
+            hwnd: HWND(owner as _),
+            lpVerb: verb,
+            lpFile: PCWSTR(file.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        unsafe { ShellExecuteExW(&mut request) }
+    };
+    execute(PCWSTR::null(), SEE_MASK_FLAG_NO_UI)
+        .or_else(|_| execute(w!("openas"), 0))
+        .context("Windows could not open this item")
+}
+
 fn invoke(label: &str, id: u32, point: (i32, i32)) -> Result<()> {
     let session = take(label).context("This menu is no longer open")?;
     let allowed = session.commands.contains(&id);
@@ -762,6 +860,38 @@ mod tests {
         assert!(lock(&menus.icons).is_empty());
         assert!(menus.invoke("test", 1, (0, 0)).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn opening_a_file_runs_its_default_command() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let script = fixture.path().join("open me.cmd");
+        let marker = fixture.path().join("opened.txt");
+        std::fs::write(&script, "@echo opened> \"%~dp0opened.txt\"\r\n")?;
+        let menus = ShellMenus::default();
+        menus.open_default(0, vec![script])?;
+        let started = Instant::now();
+        while !marker.exists() {
+            ensure!(
+                started.elapsed() < Duration::from_secs(20),
+                "The script did not run"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn search_results_open_one_folder_at_a_time() {
+        let path = |text: &str| PathBuf::from(text);
+        let groups = by_folder(vec![path(r"C:\a\1"), path(r"C:\b\2"), path(r"C:\a\3")]);
+        assert_eq!(
+            groups,
+            [
+                vec![path(r"C:\a\1"), path(r"C:\a\3")],
+                vec![path(r"C:\b\2")]
+            ]
+        );
     }
 
     #[test]

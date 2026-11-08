@@ -88,6 +88,23 @@ fn open_link(path: &Path, mode_write: bool) -> Result<(IShellLinkW, IPersistFile
     Ok((link, file))
 }
 
+/// The folder a shortcut points to, so Firewol can show it instead of starting Explorer.
+pub fn shortcut_folder(path: &Path) -> Option<PathBuf> {
+    let shortcut = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lnk"));
+    if !shortcut {
+        return None;
+    }
+    let target = on_sta(|| {
+        let (link, _file) = open_link(path, false)?;
+        let mut buffer = [0u16; MAX_PATH];
+        unsafe { link.GetPath(&mut buffer, std::ptr::null_mut(), 0)? };
+        Ok(PathBuf::from(from_wide(&buffer)))
+    });
+    target.ok().filter(|target| target.is_dir())
+}
+
 fn current(kind: Kind, path: &Path) -> Result<(String, i32)> {
     let mut buffer = [0u16; MAX_PATH];
     match kind {

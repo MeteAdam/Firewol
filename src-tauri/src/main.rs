@@ -17,8 +17,8 @@ use std::time::Instant;
 use anyhow::Context as _;
 use contract::{
     ClipboardState, DriveSpace, DriveView, FolderStyleView, IndexState, ItemRef, Navigation,
-    OperationDone, Page, Pin, SearchCount, SearchRequest, Segment, SessionState, SettingsView,
-    ShellMenuItem, Startup, Step, Subfolders, TransferStatus, VolumeState,
+    OpenResult, OperationDone, Page, Pin, SearchCount, SearchRequest, Segment, SessionState,
+    SettingsView, ShellMenuItem, Startup, Step, Subfolders, TransferStatus, VolumeState,
 };
 use firewol_core::explorer::icons::{self, Icons};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
@@ -655,6 +655,55 @@ fn shell_view(item: ShellItem) -> ShellMenuItem {
     }
 }
 
+fn item_ids(items: &[ItemRef]) -> Result<Vec<ItemId>, String> {
+    items
+        .iter()
+        .map(item_id)
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(message)
+}
+
+/// Re-checks every identity and returns the paths Windows understands.
+fn verified_paths(items: &[ItemId]) -> anyhow::Result<Vec<PathBuf>> {
+    anyhow::ensure!(
+        (1..=MAX_TRANSFER_ITEMS).contains(&items.len()),
+        "Select between 1 and {MAX_TRANSFER_ITEMS} items"
+    );
+    items
+        .iter()
+        .map(|item| {
+            drop(item.verify()?);
+            Ok(PathBuf::from(display_path(item.path())))
+        })
+        .collect()
+}
+
+/// Double-click and Enter on files: what Windows does for them, except that a shortcut to a
+/// folder comes back to the interface, which shows that folder itself.
+#[tauri::command]
+async fn open_items(
+    window: Window,
+    state: State<'_, App>,
+    items: Vec<ItemRef>,
+) -> Result<OpenResult, String> {
+    let owner = owner(&window)?;
+    let menus = state.menus.clone();
+    let items = item_ids(&items)?;
+    blocking(move || {
+        let paths = verified_paths(&items)?;
+        if let [path] = paths.as_slice()
+            && let Some(folder) = custom_icon::shortcut_folder(path)
+        {
+            return Ok(OpenResult {
+                navigate: Some(text(&folder)),
+            });
+        }
+        menus.open_default(owner, paths)?;
+        Ok(OpenResult { navigate: None })
+    })
+    .await
+}
+
 /// Opens the Windows menu of `items`, or of the empty area of the folder `items[0]`.
 #[tauri::command]
 async fn shell_menu_open(
@@ -666,21 +715,9 @@ async fn shell_menu_open(
     let owner = owner(&window)?;
     let label = window.label().to_owned();
     let menus = state.menus.clone();
-    let items = items
-        .iter()
-        .map(item_id)
-        .collect::<anyhow::Result<Vec<_>>>()
-        .map_err(message)?;
+    let items = item_ids(&items)?;
     blocking(move || {
-        anyhow::ensure!(
-            (1..=MAX_TRANSFER_ITEMS).contains(&items.len()),
-            "Select between 1 and {MAX_TRANSFER_ITEMS} items"
-        );
-        let mut paths = Vec::with_capacity(items.len());
-        for item in &items {
-            drop(item.verify()?);
-            paths.push(PathBuf::from(display_path(item.path())));
-        }
+        let mut paths = verified_paths(&items)?;
         let target = if background {
             Target::Background(paths.swap_remove(0))
         } else {
@@ -1090,6 +1127,7 @@ fn main() {
             run_as_administrator,
             pick_custom_icon,
             reset_custom_icon,
+            open_items,
             shell_menu_open,
             shell_menu_invoke,
             shell_menu_native,

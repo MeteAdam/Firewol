@@ -38,7 +38,8 @@
     /** Details row height: 24, 32, 40 or 52 pixels. */
     row?: number;
     onactivate: () => void;
-    onopen: (entry: Entry, newWindow: boolean) => void;
+    /** `selection` opens everything selected; a double-click opens only the item under it. */
+    onopen: (entry: Entry, newTab: boolean, selection?: boolean) => void;
     /** `onRow` is false for the empty area, which acts on the current folder. */
     onmenu: (x: number, y: number, onRow: boolean) => void;
     onrename: (entry: Entry, name: string) => void;
@@ -117,7 +118,7 @@
     if (event.key in moves && !event.altKey) move(Math.max(0, Math.min(rows - 1, pane.selected + moves[event.key])), event.shiftKey);
     else if (event.key === "Home") move(0, event.shiftKey);
     else if (event.key === "End") move(rows - 1, event.shiftKey);
-    else if (event.key === "Enter" && entry) onopen(entry, event.ctrlKey);
+    else if (event.key === "Enter" && entry) onopen(entry, event.ctrlKey, true);
     else if (event.key === "Backspace") void pane.up();
     else if (event.key === "F2" && entry?.id) pane.renaming = pane.selected;
     else if (event.key === "Delete" && pane.selection.size > 0) onrecycle();

@@ -62,7 +62,7 @@ function enabled(action: MenuActionView, context: MenuContext): boolean | null {
   }
   if (!item && ITEM_ONLY.has(action)) return null;
   switch (action) {
-    case "open": return selected && !!item?.directory;
+    case "open": return selected;
     case "run_as_administrator":
       if (!item?.id || item.directory || context.elevation.mode === "standard" || !executable(item.path)) return null;
       return idle && (context.elevation.mode === "all_executables" || context.elevation.executables.some((path) => path.toLowerCase() === item.path.toLowerCase()));

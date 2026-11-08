@@ -39,7 +39,7 @@
   import { formatCount, formatSize, useLocale } from "./lib/format";
   import { iconChanged } from "./lib/icons.svelte";
   import Icon from "./lib/Icon.svelte";
-  import { NO_FILTERS, Pane, SELECT_ALL_LIMIT } from "./lib/pane.svelte";
+  import { NO_FILTERS, Pane, SELECT_ALL_LIMIT, itemKey } from "./lib/pane.svelte";
   import { PRESETS, colors, hex, presetClass } from "./lib/appearance";
   import { details, isCustom, labelOf, menuRows, parentPath, splitRows, type MenuContext, type MenuRow } from "./lib/menu";
   import Breadcrumb from "./lib/Breadcrumb.svelte";
@@ -104,6 +104,9 @@
   let folderSheet = $state<{ item: ItemRef; name: string; path: string }>();
   /** Items waiting for the in-window Recycle Bin confirmation. */
   let recycleAsk = $state.raw<Entry[]>();
+  /** Explorer asks before opening more than this many items at once. */
+  const OPEN_WITHOUT_ASKING = 15;
+  let openAsk = $state.raw<{ entries: Entry[]; inNewTab: boolean }>();
   let menuElement: HTMLElement | undefined = $state();
   /** Where focus returns when Escape closes the context menu. */
   let menuReturn: HTMLElement | null = null;
@@ -360,11 +363,43 @@
     void api.session().then((state) => (session = state));
   }
 
-  function open(entry: Entry, inNewTab: boolean) {
+  /** Enter and the menu's Open act on the selection; a double-click on the item under it. */
+  function open(entry: Entry, inNewTab: boolean, selection = false) {
     menu = undefined;
-    if (!entry.directory) return;
-    if (inNewTab) void newTab(entry.path);
-    else void active?.open(entry.path);
+    const pane = active;
+    if (!pane) return;
+    const entries = selection && entry.id && pane.selection.has(itemKey(entry.id)) ? pane.selectedEntries() : [entry];
+    if (entries.length > MAX_ITEMS) notify(`Open at most ${MAX_ITEMS} items at a time`, { error: true });
+    else if (entries.length > OPEN_WITHOUT_ASKING) openAsk = { entries, inNewTab };
+    else void openEntries(pane, entries, inNewTab);
+  }
+
+  /** One folder replaces the view and several get tabs; files go to their Windows default app. */
+  async function openEntries(pane: Pane, entries: Entry[], inNewTab: boolean) {
+    const folders = entries.filter((entry) => entry.directory);
+    const files = entries.flatMap((entry) => (!entry.directory && entry.id ? [entry.id] : []));
+    if (folders.length === 1 && files.length === 0 && !inNewTab) void pane.open(folders[0].path);
+    else for (const folder of folders) await newTab(folder.path);
+    if (files.length === 0) return;
+    try {
+      const { navigate } = await api.openItems(files);
+      if (navigate && inNewTab) void newTab(navigate);
+      else if (navigate) void pane.open(navigate);
+    } catch (reason) {
+      notify(String(reason), { error: true });
+    }
+  }
+
+  function confirmOpen() {
+    const ask = openAsk;
+    openAsk = undefined;
+    lists[activeIndex]?.focus();
+    if (ask && active) void openEntries(active, ask.entries, ask.inNewTab);
+  }
+
+  function cancelOpen() {
+    openAsk = undefined;
+    lists[activeIndex]?.focus();
   }
 
   async function clip(cut: boolean) {
@@ -575,7 +610,7 @@
         return;
       }
       switch (action) {
-        case "open": if (item) open(item, false); break;
+        case "open": if (item) open(item, false, true); break;
         case "run_as_administrator": if (item?.id) await api.runAsAdministrator(item.id); break;
         case "containing": if (item) await active?.open(parentPath(item.path)); break;
         case "copy": await clip(false); break;
@@ -1902,6 +1937,25 @@
     void root;
   }
 
+  /** Files run their Windows default action; a shortcut to a folder stays inside Firewol. */
+  async function openSteps(pane: Pane, root: string, check: Check) {
+    const from = pane.folder!.path;
+    await pane.open(`${root}\\launch`);
+    const entry = (name: string) => (pane.pages[0] ?? []).find((item) => item.name === name);
+    await pane.select((pane.pages[0] ?? []).indexOf(entry("open-me.cmd")!));
+    const grid = document.querySelector<HTMLElement>(`[data-pane="${pane.id}"] [role="grid"]`)!;
+    grid.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    for (let attempt = 0; attempt < 100 && !entry("opened.txt"); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await pane.refresh();
+    }
+    check("Enter runs a file's Windows default action", !!entry("opened.txt"), names(pane).join());
+    open(entry("to-dest.lnk")!, false);
+    await waitFor(() => pane.folder?.path === `${root}\\dest`, 5000, "the shortcut's folder");
+    check("a shortcut to a folder opens inside Firewol", true);
+    await pane.open(from);
+  }
+
   async function selfTest(info: Startup) {
     const steps: { step: string; ok: boolean; detail?: string }[] = [];
     const check = (step: string, ok: boolean, detail?: string) => {
@@ -2055,7 +2109,7 @@
       const labels = items().map((item) => item.querySelector(".label")?.textContent?.trim()).join("|");
       const quick = [...document.querySelectorAll(".menu .quick .qi")].map((item) => item.getAttribute("aria-label")).join("|");
       check("the context menu follows the saved menu", labels.includes("Self-test action") && !quick.split("|").includes("Copy") && quick.includes("Cut") && !labels.split("|").includes("Cut") && labels.includes("Edit menu…") && !labels.includes("Customize folder"), `${quick} / ${labels}`);
-      check("the icon row holds Cut, Paste, Rename and Recycle", quick === "Cut|Paste in current folder|Rename|Move to Recycle Bin" && labels.includes("Open in new tab"), quick);
+      check("the icon row holds Cut, Paste, Rename and Recycle", quick === "Cut|Paste in current folder|Rename|Move to Recycle Bin" && !labels.includes("Open in new tab"), `${quick} / ${labels}`);
       await menuKeySteps(check);
       showMenu("item", 40, 40);
       await painted();
@@ -2074,6 +2128,7 @@
       await layoutSteps(active!, check);
       await designSteps(active!, parentPath(sourcePath), check);
       await acceptanceSteps(active!, parentPath(sourcePath), check);
+      await openSteps(active!, parentPath(sourcePath), check);
       const sidebarBefore = sidebar;
       press("b");
       await waitFor(() => sidebar !== sidebarBefore, 5000, "Ctrl+B");
@@ -2406,7 +2461,7 @@
             {:else}<Icon name={details(row.entry.action).icon} />{/if}
             <span class="label">{labelOf(row.entry)}</span><span class="sc">{details(row.entry.action).shortcut}</span>
           </button>
-          {#if onItem && row.entry.action === "open"}
+          {#if onItem && row.entry.action === "open" && focused?.directory}
             <button class="mi" role="menuitem" disabled={!row.enabled} onclick={() => focused && open(focused, true)}><Icon name="window" /><span class="label">Open in new tab</span><span class="sc">Ctrl+Enter</span></button>
           {/if}
         {/each}
@@ -2483,6 +2538,15 @@
       <div class="actions">
         <button class="action" onclick={cancelRecycle}>Cancel</button>
         <button class="action primary" use:initialFocus onclick={confirmRecycle}>Move to Recycle Bin</button>
+      </div>
+    </Sheet>
+  {/if}
+  {#if openAsk}
+    <Sheet title={`Open ${openAsk.entries.length} items?`} onclose={cancelOpen}>
+      <p class="muted">Each item opens in its Windows default app or a new tab.</p>
+      <div class="actions">
+        <button class="action" onclick={cancelOpen}>Cancel</button>
+        <button class="action primary" use:initialFocus onclick={confirmOpen}>Open all</button>
       </div>
     </Sheet>
   {/if}

@@ -412,6 +412,13 @@ pub struct ShellMenuItem {
     pub separator: bool,
 }
 
+/// What opening items did. `navigate` is a folder the interface shows itself (a shortcut's target).
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct OpenResult {
+    pub navigate: Option<String>,
+}
+
 /// A drive in the sidebar's This PC section.
 #[derive(Clone, Serialize, TS)]
 #[ts(export)]

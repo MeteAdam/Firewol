@@ -787,6 +787,16 @@
     event.preventDefault();
   }
 
+  /** Mouse buttons 3 and 4 drive the pane under the pointer; WebView2 must never see them. */
+  function sideButton(event: MouseEvent) {
+    if (event.button !== 3 && event.button !== 4) return;
+    event.preventDefault();
+    if (event.type !== "mouseup" || document.querySelector("dialog[open]")) return;
+    const id = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-pane]")?.dataset.pane;
+    const pane = allPanes().find((candidate) => candidate.id === id) ?? active;
+    void (event.button === 3 ? pane?.back() : pane?.forward());
+  }
+
   const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -1662,6 +1672,7 @@
         else { allowClose = true; await appWindow.close(); }
       }),
     ];
+    for (const type of ["mousedown", "mouseup", "auxclick"] as const) window.addEventListener(type, sideButton, true);
     void (async () => {
       const info = await api.startup();
       await Promise.all([loadSettings(), volumes.load(), api.transferStatus().then((status) => (transfer = status))]);
@@ -1692,6 +1703,7 @@
     })().catch((reason) => (fatal = String(reason)));
     return () => {
       unlisten.forEach((promise) => void promise.then((stop) => stop()));
+      for (const type of ["mousedown", "mouseup", "auxclick"] as const) window.removeEventListener(type, sideButton, true);
     };
   });
 </script>

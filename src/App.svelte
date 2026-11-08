@@ -1653,10 +1653,12 @@
       listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
       listen<SettingsView>(SETTINGS_CHANGED, (event) => (settings = withPending(event.payload))),
       appWindow.onCloseRequested(async (event) => {
+        // Not prevented: the API then destroys the window, which needs `core:window:allow-destroy`.
         if (allowClose) return;
         event.preventDefault();
-        await flushAppearance();
-        if (await api.operationBusy()) closeWarning = true;
+        // A failed save or query must never leave the window impossible to close.
+        await flushAppearance().catch(() => {});
+        if (await api.operationBusy().catch(() => false)) closeWarning = true;
         else { allowClose = true; await appWindow.close(); }
       }),
     ];
@@ -1680,6 +1682,8 @@
       lists[0]?.focus();
       if (info.selfTest && info.label === "main") await selfTest(info);
       else if (info.selfTest) await api.saveReport({ label: info.label, ready: true, adopted: info.adopt?.kind ?? null, path: active?.folder?.path ?? null });
+      // The self-test ends with a real click on each window's close button (see Test-Interface.ps1).
+      if (info.selfTest) { await api.awaitSignal("close"); document.querySelector<HTMLButtonElement>(".cap.close")!.click(); }
       else if (info.report && !info.adopt) {
         await benchmark(info, firstListMs).catch((reason) =>
           api.saveReport({ label: info.label, error: String(reason) }),

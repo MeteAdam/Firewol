@@ -102,6 +102,31 @@ impl FolderKey {
     }
 }
 
+/// Details column widths in pixels, shared by every folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnWidths {
+    pub name: u32,
+    pub location: u32,
+    pub modified: u32,
+    pub kind: u32,
+    pub size: u32,
+    pub tags: u32,
+}
+
+impl Default for ColumnWidths {
+    fn default() -> Self {
+        Self {
+            name: 420,
+            location: 320,
+            modified: 150,
+            kind: 128,
+            size: 84,
+            tags: 168,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FolderStyle {
@@ -282,6 +307,7 @@ pub struct Settings {
     pub show_hidden: Option<bool>,
     /// File names show their extension (default on). Firewol's own view only.
     pub show_extensions: Option<bool>,
+    pub columns: Option<ColumnWidths>,
     pub appearance: Appearance,
     pub elevation: ElevationPolicy,
     pub menu: Vec<MenuEntry>,
@@ -304,6 +330,7 @@ impl Default for Settings {
             shell_items: None,
             show_hidden: None,
             show_extensions: None,
+            columns: None,
             appearance: Appearance::default(),
             elevation: ElevationPolicy::default(),
             menu: default_menu(),
@@ -339,6 +366,8 @@ struct Stored {
     show_hidden: Option<bool>,
     #[serde(default)]
     show_extensions: Option<bool>,
+    #[serde(default)]
+    columns: Option<ColumnWidths>,
     #[serde(default)]
     appearance: Appearance,
     #[serde(default)]
@@ -391,6 +420,7 @@ impl Settings {
             shell_items: stored.shell_items,
             show_hidden: stored.show_hidden,
             show_extensions: stored.show_extensions,
+            columns: stored.columns,
             appearance: stored.appearance,
             elevation: stored.elevation,
             menu: stored.menu,
@@ -472,6 +502,7 @@ impl Settings {
             shell_items: self.shell_items,
             show_hidden: self.show_hidden,
             show_extensions: self.show_extensions,
+            columns: self.columns,
             appearance: self.appearance,
             elevation: self.elevation.clone(),
             menu: self.menu.clone(),

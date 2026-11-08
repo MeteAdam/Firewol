@@ -131,6 +131,18 @@ pub struct ElevationView {
     pub executables: Vec<String>,
 }
 
+/// Details column widths in pixels, shared by every folder.
+#[derive(Clone, Copy, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ColumnWidthsView {
+    pub name: u32,
+    pub location: u32,
+    pub modified: u32,
+    pub kind: u32,
+    pub size: u32,
+    pub tags: u32,
+}
+
 #[derive(Clone, Serialize, TS)]
 #[ts(export)]
 pub struct SettingsView {
@@ -149,6 +161,7 @@ pub struct SettingsView {
     pub show_hidden: bool,
     /// File names show their extension.
     pub show_extensions: bool,
+    pub columns: ColumnWidthsView,
     pub appearance: AppearanceView,
     pub menu: Vec<MenuEntryView>,
     pub folders: Vec<StyledFolder>,
@@ -181,6 +194,8 @@ pub struct SettingsPatch {
     pub show_hidden: Option<bool>,
     #[ts(optional)]
     pub show_extensions: Option<bool>,
+    #[ts(optional)]
+    pub columns: Option<ColumnWidthsView>,
     #[ts(optional)]
     pub menu: Option<Vec<MenuEntryView>>,
     #[ts(optional)]

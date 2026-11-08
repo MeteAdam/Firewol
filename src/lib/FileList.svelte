@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import type { Entry } from "./contract";
+  import type { ColumnWidthsView, Entry } from "./contract";
   import FolderIcon from "./FolderIcon.svelte";
   import FileIcon from "./FileIcon.svelte";
   import { formatDate, formatSize, location, typeName } from "./format";
@@ -11,6 +11,16 @@
 
   const HEADER = 32;
   const OVERSCAN = 6;
+  // Details view: the space around columns, and what always stays free to right-click.
+  const COLUMN_GAP = 12;
+  const ROW_PADDING = 20;
+  const LIST_PADDING = 12;
+  const BLANK_STRIP = 48;
+  const MIN_NAME = 120;
+  const MIN_COLUMN = 56;
+  const COLUMN_STEP = 16;
+  const DEFAULT_WIDTHS: ColumnWidthsView = { name: 420, location: 320, modified: 150, kind: 128, size: 84, tags: 168 };
+  type Column = keyof ColumnWidthsView;
   // Grid view: tiles sit in lines of `columns`, with this gap and top padding.
   const GAP = 8;
   const PAD = 8;
@@ -23,6 +33,8 @@
     tile = 128,
     row: ROW = 32,
     extensions = true,
+    widths = DEFAULT_WIDTHS,
+    onwidths,
     onactivate,
     onopen,
     onmenu,
@@ -40,6 +52,9 @@
     row?: number;
     /** File names show their extension. */
     extensions?: boolean;
+    widths?: ColumnWidthsView;
+    /** A column finished resizing; resolves once the new widths are saved. */
+    onwidths?: (widths: ColumnWidthsView) => Promise<void>;
     onactivate: () => void;
     /** `selection` opens everything selected; a double-click opens only the item under it. */
     onopen: (entry: Entry, newTab: boolean, selection?: boolean) => void;
@@ -73,6 +88,64 @@
   const rowIcon = $derived(ROW <= 32 ? 16 : ROW === 40 ? 24 : 32);
   const rowFont = $derived(ROW === 24 ? 12 : ROW === 32 ? 13 : ROW === 40 ? 14 : 15);
   const tagged = $derived(pane.tagged);
+  /** The widths of a column being dragged, shown at once and saved when the drag ends. */
+  let resizing = $state<Partial<ColumnWidthsView>>({});
+  const columnWidths = $derived({ ...widths, ...resizing });
+  const shownColumns = $derived<Column[]>(["name", ...(pane.searching ? (["location"] as const) : []), "modified", ...(pane.searching ? [] : (["kind"] as const)), "size", ...(tagged ? (["tags"] as const) : [])]);
+  const otherColumns = $derived(shownColumns.reduce((sum, column) => (column === "name" ? sum : sum + columnWidths[column]), 0));
+  const columnChrome = $derived((shownColumns.length - 1) * COLUMN_GAP + ROW_PADDING);
+  /** Name gives way first, so a strip for the empty-area menu stays free in any window size. */
+  const nameWidth = $derived(Math.max(MIN_NAME, Math.min(columnWidths.name, width - otherColumns - columnChrome - LIST_PADDING - BLANK_STRIP)));
+  const columnTemplate = $derived(shownColumns.map((column) => `${column === "name" ? nameWidth : columnWidths[column]}px`).join(" "));
+  const tableWidth = $derived(nameWidth + otherColumns + columnChrome);
+  const shownWidth = (column: Column) => (column === "name" ? nameWidth : columnWidths[column]);
+  const clampWidth = (column: Column, value: number) => Math.round(Math.max(column === "name" ? MIN_NAME : MIN_COLUMN, value));
+
+  /** The Name column may not grow past the blank strip, so the saved width stays meaningful. */
+  function limited(column: Column, value: number) {
+    const most = column === "name" ? Math.max(MIN_NAME, width - otherColumns - columnChrome - LIST_PADDING - BLANK_STRIP) : 1200;
+    return Math.min(clampWidth(column, value), most);
+  }
+
+  async function saveColumn(column: Column, value: number) {
+    resizing = { [column]: value };
+    await onwidths?.({ ...widths, [column]: value });
+    resizing = {};
+  }
+
+  function startResize(event: PointerEvent, column: Column) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.currentTarget as HTMLElement;
+    const from = event.clientX;
+    const start = shownWidth(column);
+    let value = start;
+    handle.setPointerCapture(event.pointerId);
+    const move = (next: PointerEvent) => {
+      value = limited(column, start + next.clientX - from);
+      resizing = { [column]: value };
+    };
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("pointercancel", up);
+      if (value !== start) void saveColumn(column, value);
+      else resizing = {};
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+    handle.addEventListener("pointercancel", up);
+  }
+
+  function resizeKey(event: KeyboardEvent, column: Column) {
+    const steps: Record<string, number> = { ArrowLeft: -COLUMN_STEP, ArrowRight: COLUMN_STEP };
+    if (!(event.key in steps)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void saveColumn(column, limited(column, shownWidth(column) + steps[event.key]));
+  }
+
   const withoutExtension = (name: string) => (name.lastIndexOf(".") > 0 ? name.slice(0, name.lastIndexOf(".")) : name);
   const shownName = (entry: Entry) => entry.style?.alias || (extensions || entry.directory ? entry.name : withoutExtension(entry.name));
   const activeRow = $derived(
@@ -206,7 +279,8 @@
     const inRange = (value: number, last: number) => Math.max(0, Math.min(last, value));
     const result: number[] = [];
     if (!tiles) {
-      if (bottom < HEADER || top >= HEADER + rows * ROW) return [];
+      // A box drawn entirely in the blank strip beside the table touches no row.
+      if (bottom < HEADER || top >= HEADER + rows * ROW || left >= LIST_PADDING / 2 + tableWidth) return [];
       const from = inRange(Math.floor((top - HEADER) / ROW), rows - 1);
       const to = inRange(Math.floor((bottom - HEADER) / ROW), rows - 1);
       for (let row = from; row <= to; row++) result.push(row);
@@ -372,7 +446,12 @@
   />
 {/snippet}
 
-<section data-pane={pane.id} class="list" class:tiles class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"} style:--row={`${ROW}px`} style:--row-font={`${rowFont}px`}>
+{#snippet grip(column: Column, name: string)}
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <div class="grip" role="separator" aria-orientation="vertical" aria-label={`${name} column width`} aria-valuenow={shownWidth(column)} aria-valuemin={column === "name" ? MIN_NAME : MIN_COLUMN} aria-valuemax={1200} tabindex="0" title="Drag to resize, double-click to reset" onpointerdown={(event) => startResize(event, column)} ondblclick={() => void saveColumn(column, DEFAULT_WIDTHS[column])} onkeydown={(event) => resizeKey(event, column)}></div>
+{/snippet}
+
+<section data-pane={pane.id} class="list" class:tiles class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"} style:--row={`${ROW}px`} style:--row-font={`${rowFont}px`} style:--cols={columnTemplate} style:--table={`${tableWidth}px`}>
   <div
     class="grid"
     role="grid"
@@ -394,7 +473,7 @@
     oncontextmenu={areaMenu}
   >
     {#if tiles}
-    <div class="spacer" role="rowgroup" style:height={`${lines * line + PAD}px`}>
+    <div class="spacer tiled" role="rowgroup" style:height={`${lines * line + PAD}px`}>
       <div class="lines" style:transform={`translateY(${PAD + firstLine * line}px)`}>
         <!-- Lines are keyed like rows, so scrolling only adds and removes edge lines. -->
         {#each visibleLines as index (index)}
@@ -433,12 +512,12 @@
     </div>
     {:else}
     <div class="cols hdr" role="row" aria-rowindex="1">
-      <div role="columnheader" aria-sort={pane.sort.column === "name" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("name")}>Name {#if pane.sort.column === "name"}<span class:descending={pane.sort.descending}><Icon name="sortUp" size={12} weight={2} /></span>{/if}</button></div>
-      {#if pane.searching}<div role="columnheader">Location</div>{/if}
-      <div role="columnheader" aria-sort={pane.sort.column === "modified" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("modified")}>Date modified</button></div>
-      {#if !pane.searching}<div role="columnheader" aria-sort={pane.sort.column === "type" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" onclick={() => pane.sortBy("type")}>Type</button></div>{/if}
-      <div role="columnheader" class="size" aria-sort={pane.sort.column === "size" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("size")}>Size</button></div>
-      {#if tagged}<div role="columnheader" class="tags-head">Tags</div>{/if}
+      <div role="columnheader" aria-sort={pane.sort.column === "name" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("name")}>Name {#if pane.sort.column === "name"}<span class:descending={pane.sort.descending}><Icon name="sortUp" size={12} weight={2} /></span>{/if}</button>{@render grip("name", "Name")}</div>
+      {#if pane.searching}<div role="columnheader">Location{@render grip("location", "Location")}</div>{/if}
+      <div role="columnheader" aria-sort={pane.sort.column === "modified" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("modified")}>Date modified</button>{@render grip("modified", "Date modified")}</div>
+      {#if !pane.searching}<div role="columnheader" aria-sort={pane.sort.column === "type" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" onclick={() => pane.sortBy("type")}>Type</button>{@render grip("kind", "Type")}</div>{/if}
+      <div role="columnheader" class="size" aria-sort={pane.sort.column === "size" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("size")}>Size</button>{@render grip("size", "Size")}</div>
+      {#if tagged}<div role="columnheader" class="tags-head">Tags{@render grip("tags", "Tags")}</div>{/if}
     </div>
     <div class="spacer" role="rowgroup" style:height={`${rows * ROW}px`}>
       <div class="rows" style:transform={`translateY(${first * ROW}px)`}>
@@ -519,17 +598,22 @@
   .grid:focus-visible .row.focus { outline: 2px solid var(--accent); outline-offset: -2px; }
   .cols {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 150px 128px 84px;
+    grid-template-columns: var(--cols);
     column-gap: 12px;
     align-items: center;
+    width: var(--table);
     height: var(--row);
     padding: 0 10px;
     border-radius: var(--radius-s);
   }
   .row { font-size: var(--row-font); }
-  .searching .cols { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) 150px 84px; }
-  .tagged .cols { grid-template-columns: minmax(0, 1fr) 150px 128px 84px 168px; }
-  .searching.tagged .cols { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) 150px 84px 168px; }
+  /* The space beside the table belongs to the empty-area menu, also when the list scrolls sideways. */
+  .spacer:not(.tiled) { min-width: calc(var(--table) + 48px); }
+  [role="columnheader"] { position: relative; min-width: 0; }
+  .grip { position: absolute; top: 2px; bottom: 2px; right: -12px; width: 12px; cursor: col-resize; touch-action: none; }
+  .grip::after { content: ""; position: absolute; top: 4px; bottom: 4px; left: 5px; width: 2px; border-radius: 1px; background: transparent; transition: background 120ms ease-out; }
+  .grip:hover::after, .grip:focus-visible::after { background: var(--accent); }
+  .grip:focus-visible { outline: none; }
   .tags-head { padding-left: 4px; }
   .tags { display: flex; gap: 4px; min-width: 0; overflow: hidden; }
   .tag { flex: 0 1 auto; min-width: 0; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); font-size: 11px; line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -537,6 +621,8 @@
   .hdr {
     position: sticky;
     top: 0;
+    width: auto;
+    min-width: var(--table);
     height: 32px;
     z-index: 1;
     font-size: 12px;

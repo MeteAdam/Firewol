@@ -1,7 +1,7 @@
 use anyhow::{Result, ensure};
 use firewol_core::explorer::elevation::{ElevationMode, ElevationPolicy, validate_executable};
 use firewol_core::explorer::{
-    Appearance, FolderStyle, ItemId, MenuAction, MenuEntry, Rgb, Session, Settings,
+    Appearance, ColumnWidths, FolderStyle, ItemId, MenuAction, MenuEntry, Rgb, Session, Settings,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
@@ -11,6 +11,8 @@ use crate::contract::{ElevationView, FolderStyleView, SettingsPatch, SettingsVie
 pub const TILES: [u32; 3] = [96, 128, 160];
 pub const ROWS: [u32; 4] = [24, 32, 40, 52];
 pub const SIDEBAR_WIDTH: std::ops::RangeInclusive<u32> = 180..=360;
+const NAME_WIDTH: std::ops::RangeInclusive<u32> = 120..=2400;
+const COLUMN_WIDTH: std::ops::RangeInclusive<u32> = 56..=1200;
 
 fn mirror<T: Serialize, U: DeserializeOwned>(value: T) -> Result<U> {
     Ok(serde_json::from_value(serde_json::to_value(value)?)?)
@@ -34,6 +36,7 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
         shell_items: settings.shell_items.unwrap_or(true),
         show_hidden: settings.show_hidden.unwrap_or(true),
         show_extensions: settings.show_extensions.unwrap_or(true),
+        columns: mirror(settings.columns.unwrap_or_default())?,
         appearance: mirror(settings.appearance)?,
         menu: mirror(&settings.menu)?,
         folders: settings
@@ -88,6 +91,22 @@ pub fn set_folder_style(
 pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
     let appearance = patch.appearance.map(mirror::<_, Appearance>).transpose()?;
     let menu = patch.menu.map(mirror::<_, Vec<MenuEntry>>).transpose()?;
+    let columns = patch.columns.map(mirror::<_, ColumnWidths>).transpose()?;
+    if let Some(columns) = columns {
+        ensure!(
+            [
+                columns.location,
+                columns.modified,
+                columns.kind,
+                columns.size,
+                columns.tags
+            ]
+            .iter()
+            .all(|width| COLUMN_WIDTH.contains(width))
+                && NAME_WIDTH.contains(&columns.name),
+            "Column widths are out of range"
+        );
+    }
     ensure!(
         patch.tile.is_none_or(|tile| TILES.contains(&tile)),
         "Grid tiles are 96, 128 or 160 pixels"
@@ -162,6 +181,9 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
         }
         if let Some(show_extensions) = patch.show_extensions {
             settings.show_extensions = Some(show_extensions);
+        }
+        if let Some(columns) = columns {
+            settings.columns = Some(columns);
         }
         if let Some(menu) = menu {
             settings.menu = menu;

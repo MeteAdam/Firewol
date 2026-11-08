@@ -2136,6 +2136,49 @@
     await waitFor(() => !menu, 5000, "the menu to close");
   }
 
+  /** Details columns resize, keep a blank strip for the empty-area menu, and persist. */
+  async function columnSteps(pane: Pane, check: Check) {
+    const list = () => document.querySelector<HTMLElement>(`[data-pane="${pane.id}"] [role="grid"]`)!;
+    const row = () => list().querySelector<HTMLElement>("[data-row]")!;
+    const grip = (name: string) => list().querySelector<HTMLElement>(`[role="separator"][aria-label="${name} column width"]`)!;
+    const original = settings!.columns;
+    await waitFor(() => !!row(), 5000, "a listed row");
+    const free = () => list().getBoundingClientRect().right - row().getBoundingClientRect().right;
+    check("rows stop short of the list's right edge", free() >= 48, `${free()} px free`);
+    const hit = list().getBoundingClientRect();
+    const beside = new MouseEvent("contextmenu", { clientX: hit.right - 24, clientY: row().getBoundingClientRect().top + 4, bubbles: true, cancelable: true });
+    document.elementFromPoint(beside.clientX, beside.clientY)!.dispatchEvent(beside);
+    await waitFor(() => menu?.kind === "area", 3000, "the empty-area menu");
+    check("right-clicking beside a row opens the empty-area menu", true);
+    dismissMenu();
+    await tick();
+    const start = grip("Name").getBoundingClientRect();
+    const send = (type: string, x: number) => grip("Name").dispatchEvent(new PointerEvent(type, { clientX: x, clientY: start.top + 4, button: 0, pointerId: 1, isPrimary: true, bubbles: true, cancelable: true }));
+    const before = row().getBoundingClientRect().width;
+    grip("Name").setPointerCapture = () => {};
+    send("pointerdown", start.left);
+    send("pointermove", start.left - 100);
+    await tick();
+    check("dragging a column edge resizes the rows at once", Math.round(before - row().getBoundingClientRect().width) === 100, `${before} to ${row().getBoundingClientRect().width}`);
+    send("pointerup", start.left - 100);
+    await waitFor(() => settings!.columns.name !== original.name, 5000, "the saved width");
+    check("the column width persists through the core", (await api.getSettings()).columns.name === settings!.columns.name);
+    grip("Name").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+    const stepped = settings!.columns.name + 16;
+    await waitFor(() => settings!.columns.name === stepped, 5000, "the keyboard step");
+    check("arrow keys resize a focused column edge", true);
+    grip("Name").dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await waitFor(() => settings!.columns.name === 420, 5000, "the default width");
+    check("double-clicking a column edge restores its width", true);
+    grip("Name").dispatchEvent(new PointerEvent("pointerdown", { clientX: start.left, clientY: start.top + 4, button: 0, pointerId: 1, isPrimary: true, bubbles: true, cancelable: true }));
+    send("pointermove", start.left + 5000);
+    await tick();
+    check("a very wide Name column still leaves the blank strip", free() >= 48, `${free()} px free`);
+    send("pointerup", start.left + 5000);
+    await waitFor(() => settings!.columns.name !== 420, 5000, "the wide width");
+    await saveSettings({ columns: original });
+  }
+
   /** Files run their Windows default action; a shortcut to a folder stays inside Firewol. */
   async function openSteps(pane: Pane, root: string, check: Check) {
     const from = pane.folder!.path;
@@ -2330,6 +2373,7 @@
       await designSteps(active!, parentPath(sourcePath), check);
       await acceptanceSteps(active!, parentPath(sourcePath), check);
       await openSteps(active!, parentPath(sourcePath), check);
+      await columnSteps(active!, check);
       const sidebarBefore = sidebar;
       press("b");
       await waitFor(() => sidebar !== sidebarBefore, 5000, "Ctrl+B");
@@ -2572,6 +2616,8 @@
             {tile}
             row={rowHeight}
             extensions={settings?.show_extensions ?? true}
+            widths={settings?.columns}
+            onwidths={(columns) => saveSettings({ columns })}
             onactivate={() => (activeIndex = index)}
             onopen={open}
             onmenu={(x, y, onRow) => showMenu(onRow ? "item" : "area", x, y)}

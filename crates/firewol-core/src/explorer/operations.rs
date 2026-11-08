@@ -586,7 +586,7 @@ fn parent_of(item: &ItemId) -> Result<ItemId> {
     )
 }
 
-fn validate_name(name: &OsStr) -> Result<()> {
+pub(super) fn validate_name(name: &OsStr) -> Result<()> {
     let text = name.to_string_lossy();
     let stem = text
         .split('.')

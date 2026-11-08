@@ -31,6 +31,7 @@ pub enum Notice {
 pub type Notify = Arc<dyn Fn(Notice) + Send + Sync>;
 pub type Styles = BTreeMap<FolderKey, FolderStyle>;
 type StyleSource = Arc<dyn Fn() -> Styles + Send + Sync>;
+type HiddenSource = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Open folder snapshots, keyed by the id the interface holds, and the panes showing them.
 #[derive(Default)]
@@ -39,6 +40,7 @@ pub struct Folders {
     open: Mutex<HashMap<u64, Arc<Folder>>>,
     panes: Mutex<HashMap<String, Pane>>,
     styles: OnceLock<StyleSource>,
+    show_hidden: OnceLock<HiddenSource>,
     pub volumes: Arc<Volumes>,
 }
 
@@ -84,6 +86,19 @@ impl Folders {
     /// Sets where listings read folder styles from (the shared settings), once at startup.
     pub fn use_styles(&self, source: impl Fn() -> Styles + Send + Sync + 'static) {
         let _ = self.styles.set(Arc::new(source));
+    }
+
+    /// Sets where listings read the Show/Hide choice from, once at startup.
+    pub fn use_show_hidden(&self, source: impl Fn() -> bool + Send + Sync + 'static) {
+        let _ = self.show_hidden.set(Arc::new(source));
+    }
+
+    fn directory(&self, path: &Path) -> Result<Directory> {
+        let mut directory = Directory::open(path)?;
+        if self.show_hidden.get().is_some_and(|source| !source()) {
+            directory.hide_hidden_items();
+        }
+        Ok(directory)
     }
 
     /// Read per page rather than cached, so every listed page shows the latest saved styles.
@@ -216,7 +231,7 @@ impl Folders {
     fn open(&self, owner: &str, path: &Path, sort: SortView, notify: Notify) -> Result<FolderView> {
         let cancel = Cancellation::default();
         let listing = Cancellation::default();
-        let mut directory = Directory::open(path)?;
+        let mut directory = self.directory(path)?;
         directory.advance(PAGE_SIZE, &listing)?;
         let sort = sort_core(sort);
         directory.sort(sort, &listing)?;
@@ -252,7 +267,7 @@ impl Folders {
         notify: Notify,
     ) -> Result<FolderView> {
         let listing = Cancellation::default();
-        let mut directory = Directory::open(&folder.path)?;
+        let mut directory = self.directory(&folder.path)?;
         directory.advance(PAGE_SIZE, &listing)?;
         let sort = sort_core(sort);
         directory.sort(sort, &listing)?;

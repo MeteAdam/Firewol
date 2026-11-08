@@ -12,14 +12,14 @@ export const BUILT_IN: Record<BuiltIn, Details> = {
   open: { label: "Open", icon: "open", shortcut: "Enter", group: 0 },
   run_as_administrator: { label: "Run as administrator…", icon: "shield", shortcut: "", group: 0 },
   containing: { label: "Open containing folder", icon: "up", shortcut: "", group: 0 },
-  copy: { label: "Copy", icon: "copy", shortcut: "Ctrl+C", group: 1 },
   cut: { label: "Cut", icon: "cut", shortcut: "Ctrl+X", group: 1 },
-  paste: { label: "Paste in current folder", icon: "paste", shortcut: "Ctrl+V", group: 1 },
+  copy: { label: "Copy", icon: "copy", shortcut: "Ctrl+C", group: 1 },
+  paste: { label: "Paste", icon: "paste", shortcut: "Ctrl+V", group: 1 },
   copy_other: { label: "Copy to other pane", icon: "toPane", shortcut: "", group: 1 },
   move_other: { label: "Move to other pane", icon: "transfer", shortcut: "", group: 1 },
-  rename: { label: "Rename…", icon: "rename", shortcut: "F2", group: 1 },
-  recycle: { label: "Move to Recycle Bin…", icon: "trash", shortcut: "Del", group: 1 },
-  folder_style: { label: "Customize folder…", icon: "palette", shortcut: "", group: 2 },
+  recycle: { label: "Delete", icon: "trash", shortcut: "Del", group: 1 },
+  rename: { label: "Rename", icon: "rename", shortcut: "F2", group: 1 },
+  folder_style: { label: "Customize this folder…", icon: "palette", shortcut: "", group: 2 },
   undo: { label: "Undo", icon: "undo", shortcut: "Ctrl+Z", group: 3 },
   refresh: { label: "Refresh", icon: "refresh", shortcut: "F5", group: 3 },
 };
@@ -93,22 +93,6 @@ export function menuRows(menu: MenuEntryView[], context: MenuContext): MenuRow[]
     group = next;
   });
   return rows;
-}
-
-/** Actions shown as the compact icon row at the top of the menu (Nilesoft layout). */
-const QUICK = new Set<MenuActionView>(["cut", "copy", "paste", "rename", "recycle"]);
-
-/** Splits menu rows into the icon row and the labelled rows, with dividers recomputed. */
-export function splitRows(rows: MenuRow[]): { quick: MenuRow[]; rows: MenuRow[] } {
-  const quick = rows.filter((row) => QUICK.has(row.entry.action));
-  let group: number | undefined;
-  const rest = rows.filter((row) => !QUICK.has(row.entry.action)).map((row) => {
-    const next = details(row.entry.action).group;
-    const divided = { ...row, divider: group !== undefined && group !== next };
-    group = next;
-    return divided;
-  });
-  return { quick, rows: rest };
 }
 
 export function parentPath(path: string) {

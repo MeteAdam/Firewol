@@ -22,7 +22,12 @@ import type {
   DriveView,
   ShellMenuItem,
   OpenResult,
+  MenuPlaces,
+  ItemAttributesView,
 } from "./contract";
+
+export type TerminalKind = "command_prompt" | "power_shell" | "windows_terminal" | "system_information";
+export type AttributeName = "hidden" | "system" | "read_only" | "archive";
 
 export const api = {
   startup: () => invoke<Startup>("startup"),
@@ -73,6 +78,17 @@ export const api = {
   /** `background` opens the menu of the empty area of the folder `items[0]`. */
   shellMenuOpen: (items: ItemRef[], background: boolean) => invoke<ShellMenuItem[]>("shell_menu_open", { items, background }),
   shellMenuInvoke: (id: number, x: number, y: number) => invoke<void>("shell_menu_invoke", { id, x, y }),
+  /** A command from the New menu; resolves with the item it created. */
+  shellMenuInvokeNew: (id: number, x: number, y: number, folder: ItemRef) => invoke<ItemRef | null>("shell_menu_invoke_new", { id, x, y, folder }),
+  menuPlaces: () => invoke<MenuPlaces>("menu_places"),
+  openTerminal: (kind: TerminalKind, target: ItemRef) => invoke<void>("open_terminal", { kind, target }),
+  openSystemUri: (uri: string) => invoke<void>("open_system_uri", { uri }),
+  itemAttributes: (item: ItemRef) => invoke<ItemAttributesView>("item_attributes", { item }),
+  setItemAttribute: (item: ItemRef, attribute: AttributeName, enabled: boolean) => invoke<void>("set_item_attribute", { item, attribute, enabled }),
+  createFolder: (into: ItemRef, name: string) => invoke<ItemRef>("create_folder", { into, name }),
+  createFile: (into: ItemRef, name: string, contents: string) => invoke<ItemRef>("create_file", { into, name, contents }),
+  /** Windows asks for approval; goes through the elevation policy. */
+  takeOwnership: (item: ItemRef) => invoke<void>("take_ownership", { item }),
   shellMenuNative: () => invoke<void>("shell_menu_native"),
   shellMenuClose: () => invoke<void>("shell_menu_close"),
   togglePin: (path: string) => invoke<SessionState>("toggle_pin", { path }),

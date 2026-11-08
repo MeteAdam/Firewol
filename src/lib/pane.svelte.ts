@@ -61,6 +61,8 @@ export class Pane {
   sortMs = $state(0);
   pageVersion = $state(0);
   renaming = $state<number | null>(null);
+  /** The rename field starts with the extension selected instead of the name. */
+  renamingExtension = $state(false);
   query = $state("");
   regex = $state(false);
   filters = $state.raw<SearchFilters>(NO_FILTERS);
@@ -219,6 +221,12 @@ export class Pane {
     await this.select(last, "range");
     if (focused >= 0 && focused <= last) this.selected = focused;
     return this.rows <= limit;
+  }
+
+  /** Selects what is not selected, up to `limit` rows. */
+  invertSelection(limit = SELECT_ALL_LIMIT) {
+    const rows = Array.from({ length: Math.min(this.rows, limit) }, (_, row) => row);
+    return this.selectRows(rows, new Map(this.selection));
   }
 
   open(path: string) {

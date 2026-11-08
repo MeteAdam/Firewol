@@ -12,8 +12,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::WindowsProgramming::{DRIVE_CDROM, DRIVE_REMOTE, DRIVE_REMOVABLE};
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
-    FOLDERID_Videos, KF_FLAG_DEFAULT, SHFILEINFOW, SHGFI_DISPLAYNAME, SHGetFileInfoW,
-    SHGetKnownFolderPath,
+    FOLDERID_Profile, FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86,
+    FOLDERID_RoamingAppData, FOLDERID_StartMenu, FOLDERID_System, FOLDERID_UserProfiles,
+    FOLDERID_Videos, FOLDERID_Windows, KF_FLAG_DEFAULT, SHFILEINFOW, SHGFI_DISPLAYNAME,
+    SHGetFileInfoW, SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, RegisterClassW,
@@ -132,6 +134,30 @@ pub(super) fn known_folders() -> Vec<PathBuf> {
     .iter()
     .filter_map(known_folder)
     .collect()
+}
+
+/// The folders of the Go To menu, in the order and with the names of Nilesoft's `goto.nss`.
+pub fn go_to_folders() -> Vec<(&'static str, PathBuf)> {
+    let known = [
+        ("Windows", FOLDERID_Windows),
+        ("System", FOLDERID_System),
+        ("Program Files", FOLDERID_ProgramFiles),
+        ("Program Files x86", FOLDERID_ProgramFilesX86),
+        ("ProgramData", FOLDERID_ProgramData),
+        ("Users", FOLDERID_UserProfiles),
+        ("Desktop", FOLDERID_Desktop),
+        ("Downloads", FOLDERID_Downloads),
+        ("Pictures", FOLDERID_Pictures),
+        ("Documents", FOLDERID_Documents),
+        ("Startmenu", FOLDERID_StartMenu),
+        ("Profile", FOLDERID_Profile),
+        ("AppData", FOLDERID_RoamingAppData),
+    ];
+    known
+        .iter()
+        .filter_map(|(name, id)| Some((*name, known_folder(id)?)))
+        .chain(Some(("Temp", std::env::temp_dir())))
+        .collect()
 }
 
 type Changed = Box<dyn Fn() + Send + Sync>;

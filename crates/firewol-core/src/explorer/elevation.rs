@@ -132,6 +132,30 @@ pub fn launch(
     argument: Option<&ItemId>,
     owner: HWND,
 ) -> Result<()> {
+    if let Some(argument) = argument {
+        argument.verify()?;
+    }
+    let arguments = argument.map(|item| parameter(&display_path(item.path())));
+    launch_with(policy, program, arguments.as_deref(), owner)
+}
+
+/// For a command line Firewol composes itself, under the same policy and identity checks.
+pub fn launch_command(
+    policy: &ElevationPolicy,
+    program: &ItemId,
+    arguments: &str,
+    owner: HWND,
+) -> Result<()> {
+    let arguments: Vec<u16> = arguments.encode_utf16().chain([0]).collect();
+    launch_with(policy, program, Some(&arguments), owner)
+}
+
+fn launch_with(
+    policy: &ElevationPolicy,
+    program: &ItemId,
+    arguments: Option<&[u16]>,
+    owner: HWND,
+) -> Result<()> {
     ensure!(
         policy.allows(program),
         "Elevation for this executable is disabled in Admin settings"
@@ -147,9 +171,6 @@ pub fn launch(
         !directory && !reparse && identity(&pinned)? == program.identity,
         "The executable changed. Verify it and try again."
     );
-    if let Some(argument) = argument {
-        argument.verify()?;
-    }
     let executable = display_path(program.path());
     let directory = display_path(
         program
@@ -160,7 +181,6 @@ pub fn launch(
     let wide = |text: OsString| text.encode_wide().chain([0]).collect::<Vec<_>>();
     let executable = wide(executable);
     let directory = wide(directory);
-    let arguments = argument.map(|item| parameter(&display_path(item.path())));
     let _sta = Apartment::sta()?;
     let mut request = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -168,9 +188,7 @@ pub fn launch(
         hwnd: owner,
         lpVerb: w!("runas"),
         lpFile: PCWSTR(executable.as_ptr()),
-        lpParameters: arguments
-            .as_ref()
-            .map_or(PCWSTR::null(), |value| PCWSTR(value.as_ptr())),
+        lpParameters: arguments.map_or(PCWSTR::null(), |value| PCWSTR(value.as_ptr())),
         lpDirectory: PCWSTR(directory.as_ptr()),
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()

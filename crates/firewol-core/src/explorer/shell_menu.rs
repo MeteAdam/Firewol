@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, ensure};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -33,9 +33,9 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DeleteMenu, DestroyMenu, DispatchMessageW,
     GET_MENU_DEFAULT_ITEM_FLAGS, GetCursorPos, GetMenuDefaultItem, GetMenuItemCount,
-    GetMenuItemInfoW, GetMessageW, HMENU, KillTimer, MENUITEMINFOW, MF_BYPOSITION, MFS_DISABLED,
-    MFS_GRAYED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_CHECKMARKS, MIIM_FTYPE, MIIM_ID, MIIM_STATE,
-    MIIM_STRING, MIIM_SUBMENU, MSG, PostMessageW, RegisterClassW, SW_SHOWNORMAL,
+    GetMenuItemInfoW, GetMessageW, HMENU, KillTimer, MENUITEMINFOW, MF_BYPOSITION, MFS_DEFAULT,
+    MFS_DISABLED, MFS_GRAYED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_CHECKMARKS, MIIM_FTYPE, MIIM_ID,
+    MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, MSG, PostMessageW, RegisterClassW, SW_SHOWNORMAL,
     SetForegroundWindow, SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
     TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
     WM_MENUCHAR, WM_NULL, WM_TIMER, WNDCLASSW, WS_POPUP,
@@ -58,19 +58,66 @@ const OPEN_WAIT: Duration = Duration::from_secs(5);
 const SEE_MASK_UNICODE: u32 = 0x4000;
 /// `SEE_MASK_FLAG_LOG_USAGE`: a launch the user asked for, which Windows counts as recent use.
 const LOG_USAGE: u32 = 0x0400_0000;
-/// Firewol has its own versions of these commands, so its menu leaves them out.
-const FIREWOL_VERBS: [&str; 8] = [
+/// Firewol has its own versions of these commands, or they only work inside Explorer's own view,
+/// so its menu leaves them out.
+const FIREWOL_VERBS: [&str; 19] = [
     "open",
     "cut",
     "copy",
     "paste",
+    "pastelink",
     "delete",
     "rename",
-    "pintohome",
     "copyaspath",
+    "explore",
+    "opennewwindow",
+    "opennewtab",
+    "opennewprocess",
+    "view",
+    "arrange",
+    "groupby",
+    "refresh",
+    "undo",
+    "redo",
+    "customize",
+];
+/// `IExplorerCommand` class of Windows Terminal's "Open in Terminal", stable and Preview builds.
+const TERMINAL_COMMANDS: [&str; 2] = [
+    "9f156763-7844-4dc4-b2b1-901f640f5155",
+    "02db545a-3e20-46de-83a5-1329b1e88b6b",
 ];
 /// Removed from the menu entirely: administrator launches go through Firewol's elevation policy.
 const ELEVATING_VERBS: [&str; 2] = ["runas", "runasuser"];
+
+/// Where a top-level Windows command goes in Firewol's menu. Anything unrecognized is an app
+/// command, so a newly installed program shows up without Firewol knowing it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Slot {
+    #[default]
+    Apps,
+    Favorite,
+    Pin,
+    More,
+    Terminal,
+    OpenWith,
+    New,
+    Properties,
+}
+
+impl Slot {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Apps => "apps",
+            Self::Favorite => "favorite",
+            Self::Pin => "pin",
+            Self::More => "more",
+            Self::Terminal => "terminal",
+            Self::OpenWith => "open_with",
+            Self::New => "new",
+            Self::Properties => "properties",
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ShellItem {
@@ -82,6 +129,9 @@ pub struct ShellItem {
     pub disabled: bool,
     pub separator: bool,
     pub verb: String,
+    /// Windows marks this as what a double-click runs.
+    pub default: bool,
+    pub slot: Slot,
 }
 
 pub enum Target {
@@ -210,6 +260,34 @@ impl ShellMenus {
     pub fn invoke(&self, label: &str, id: u32, point: (i32, i32)) -> Result<()> {
         let label = label.to_owned();
         self.call(None, move |_| invoke(&label, id, point))?
+    }
+
+    /// Runs a command from the New menu and returns the item it created in `folder`, if any.
+    pub fn invoke_new(
+        &self,
+        label: &str,
+        id: u32,
+        point: (i32, i32),
+        folder: PathBuf,
+    ) -> Result<Option<PathBuf>> {
+        // File times have coarse resolution, so the search starts slightly before the click.
+        let since = SystemTime::now() - Duration::from_secs(1);
+        self.invoke(label, id, point)?;
+        Ok(newest_since(&folder, since))
+    }
+
+    /// Opens a Settings page or Shell folder; anything else is refused.
+    pub fn open_uri(&self, owner: isize, uri: String) -> Result<()> {
+        ensure!(allowed_uri(&uri), "Firewol does not open this address");
+        self.call(None, move |_| {
+            let flags = if uri.starts_with("shell:") {
+                SEE_MASK_INVOKEIDLIST
+            } else {
+                0
+            };
+            shell_execute(owner, &HSTRING::from(uri), PCWSTR::null(), flags)
+                .context("Windows could not open this page")
+        })?
     }
 
     /// Shows the same menu natively at the cursor and runs what the user picks.
@@ -464,7 +542,7 @@ fn open(window: HWND, label: String, owner: isize, target: Target) -> Result<Vec
     let (modern, mut items) = Modern::load(&target, &mut session.commands);
     session.modern = modern;
     items.extend(classic);
-    let items = tidy(items);
+    let items = placed(tidy(items));
     SESSIONS.with_borrow_mut(|sessions| sessions.insert(label, session));
     unsafe { SetTimer(Some(window), SWEEP_TIMER, SWEEP_MS, None) };
     Ok(items)
@@ -583,6 +661,8 @@ fn walk(session: &mut Session, menu: HMENU, depth: u32, next_icon: &mut u32) -> 
             disabled: info.fState.0 & (MFS_DISABLED.0 | MFS_GRAYED.0) != 0,
             separator: false,
             verb: name,
+            default: info.fState.0 & MFS_DEFAULT.0 != 0,
+            slot: Slot::Apps,
         });
     }
     items.reverse();
@@ -605,6 +685,87 @@ fn tidy(items: Vec<ShellItem>) -> Vec<ShellItem> {
         result.pop();
     }
     result
+}
+
+/// `None` removes the command, as Nilesoft's `modify.nss` does in Explorer. A few handlers have no
+/// verb in any language, so they are recognized by their text; if that fails they stay app commands.
+fn slot_of(verb: &str, label: &str) -> Option<Slot> {
+    if TERMINAL_COMMANDS.contains(&verb) {
+        return Some(Slot::Terminal);
+    }
+    Some(match verb {
+        "previousversions" => return None,
+        "pintohomefile" => Slot::Favorite,
+        "pintohome" | "pintostartscreen" | "taskbarpin" | "taskbarunpin" => Slot::Pin,
+        "windows.share"
+        | "windows.modernshare"
+        | "link"
+        | "setdesktopwallpaper"
+        | "rotate90"
+        | "rotate270"
+        | "print"
+        | "format"
+        | "eject" => Slot::More,
+        "cmd" | "powershell" | "wsl" => Slot::Terminal,
+        "openas" => Slot::OpenWith,
+        "new" => Slot::New,
+        "properties" => Slot::Properties,
+        _ => return slot_of_label(&label.to_lowercase()),
+    })
+}
+
+fn slot_of_label(label: &str) -> Option<Slot> {
+    Some(match label {
+        "cast to device" | "aygıta yayınla" => return None,
+        "send to"
+        | "gönder"
+        | "include in library"
+        | "kitaplığa ekle"
+        | "eject"
+        | "çıkar"
+        | "map network drive..."
+        | "disconnect network drive..." => Slot::More,
+        "open in terminal" | "terminalde aç" | "open linux shell here" => Slot::Terminal,
+        _ if label.starts_with("pin") || label.starts_with("unpin") => Slot::Pin,
+        _ => Slot::Apps,
+    })
+}
+
+/// Gives each top-level command its place. Windows' separators mean nothing once commands move.
+fn placed(items: Vec<ShellItem>) -> Vec<ShellItem> {
+    items
+        .into_iter()
+        .filter(|item| !item.separator)
+        .filter_map(|mut item| {
+            item.slot = slot_of(&item.verb, &item.label)?;
+            Some(item)
+        })
+        .collect()
+}
+
+fn newest_since(folder: &Path, since: SystemTime) -> Option<PathBuf> {
+    std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| Some((entry.metadata().ok()?.created().ok()?, entry.path())))
+        .filter(|(created, _)| *created >= since)
+        .max_by_key(|(created, _)| *created)
+        .map(|(_, path)| path)
+}
+
+/// Settings pages and Shell folders, exactly: the interface never passes arbitrary commands here.
+fn allowed_uri(uri: &str) -> bool {
+    let shell_class = uri
+        .strip_prefix("shell:::{")
+        .and_then(|rest| rest.strip_suffix('}'));
+    let settings_page = uri.strip_prefix("ms-settings:");
+    uri == "shell:appsfolder"
+        || uri == "search-ms:"
+        || shell_class.is_some_and(|class| {
+            class.len() == 36 && class.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        })
+        || settings_page
+            .is_some_and(|page| page.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
 fn store_icon(bitmap: HBITMAP, generation: u64, next: &mut u32) -> Option<String> {
@@ -760,21 +921,28 @@ fn invoke_default(menu: &IContextMenu, popup: HMENU, owner: isize, folder: &Path
 /// For a type without a default command: any verb Windows finds, else its app picker.
 fn open_without_menu(owner: isize, path: &Path) -> Result<()> {
     let file = HSTRING::from(path.as_os_str());
-    let execute = |verb: PCWSTR, flags: u32| {
-        let mut request = SHELLEXECUTEINFOW {
-            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-            fMask: SEE_MASK_INVOKEIDLIST | flags,
-            hwnd: HWND(owner as _),
-            lpVerb: verb,
-            lpFile: PCWSTR(file.as_ptr()),
-            nShow: SW_SHOWNORMAL.0,
-            ..Default::default()
-        };
-        unsafe { ShellExecuteExW(&mut request) }
-    };
-    execute(PCWSTR::null(), SEE_MASK_FLAG_NO_UI)
-        .or_else(|_| execute(w!("openas"), 0))
+    let flags = SEE_MASK_INVOKEIDLIST;
+    shell_execute(owner, &file, PCWSTR::null(), flags | SEE_MASK_FLAG_NO_UI)
+        .or_else(|_| shell_execute(owner, &file, w!("openas"), flags))
         .context("Windows could not open this item")
+}
+
+fn shell_execute(
+    owner: isize,
+    file: &HSTRING,
+    verb: PCWSTR,
+    flags: u32,
+) -> windows_core::Result<()> {
+    let mut request = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: flags | LOG_USAGE,
+        hwnd: HWND(owner as _),
+        lpVerb: verb,
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut request) }
 }
 
 fn invoke(label: &str, id: u32, point: (i32, i32)) -> Result<()> {
@@ -859,6 +1027,163 @@ mod tests {
         menus.close("test");
         assert!(lock(&menus.icons).is_empty());
         assert!(menus.invoke("test", 1, (0, 0)).is_err());
+        Ok(())
+    }
+
+    /// Lists what Windows offers per type; run by hand with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "prints this machine's menus for review"]
+    fn dump_menus_for_common_types() -> Result<()> {
+        fn print(items: &[ShellItem], depth: usize) {
+            for item in items.iter().filter(|item| !item.separator) {
+                println!("{}{:?} | {}", "  ".repeat(depth + 1), item.verb, item.label);
+                if depth < 1 {
+                    print(&item.children, depth + 1);
+                }
+            }
+        }
+        let fixture = tempfile::tempdir()?;
+        let menus = ShellMenus::default();
+        let extensions = [
+            "png",
+            "jpg",
+            "pdf",
+            "txt",
+            "mp3",
+            "mp4",
+            "lnk",
+            "bat",
+            "cmd",
+            "ps1",
+            "reg",
+            "msi",
+            "ttf",
+            "zip",
+            "iso",
+            "dll",
+            "firewolunknown",
+        ];
+        let mut targets: Vec<(String, Target)> = extensions
+            .iter()
+            .map(|extension| {
+                let file = fixture.path().join(format!("sample.{extension}"));
+                std::fs::write(&file, "x").expect("fixture");
+                (extension.to_string(), Target::Items(vec![file]))
+            })
+            .collect();
+        let windows = PathBuf::from(r"C:\Windows");
+        targets.push((
+            "exe".into(),
+            Target::Items(vec![windows.join("notepad.exe")]),
+        ));
+        targets.push((
+            "folder".into(),
+            Target::Items(vec![fixture.path().to_owned()]),
+        ));
+        targets.push(("drive".into(), Target::Items(vec![PathBuf::from(r"C:\")])));
+        targets.push((
+            "background".into(),
+            Target::Background(fixture.path().to_owned()),
+        ));
+        for (name, target) in targets {
+            let started = Instant::now();
+            let items = menus.open("dump", 0, target);
+            println!("== {name} ({} ms)", started.elapsed().as_millis());
+            match items {
+                Ok(items) => print(&items, 0),
+                Err(error) => println!("  ERROR {error:#}"),
+            }
+        }
+        menus.close("dump");
+        Ok(())
+    }
+
+    /// Every common type must read cleanly, with each command placed and none lost.
+    #[test]
+    fn menus_of_common_types_are_placed_without_losing_commands() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let menus = ShellMenus::default();
+        for extension in [
+            "png", "pdf", "txt", "mp3", "bat", "ps1", "msi", "ttf", "zip", "iso",
+        ] {
+            let file = fixture.path().join(format!("sample.{extension}"));
+            std::fs::write(&file, "x")?;
+            let items = menus.open("types", 0, Target::Items(vec![file]))?;
+            assert!(items.iter().all(|item| !item.separator), "{items:?}");
+            assert!(
+                items.iter().any(|item| item.slot == Slot::Properties),
+                "{extension}: {items:?}"
+            );
+            for item in flatten(&items) {
+                assert!(!ELEVATING_VERBS.contains(&item.verb.as_str()), "{item:?}");
+                assert_ne!(item.verb, "previousversions", "{item:?}");
+            }
+        }
+        let items = menus.open("types", 0, Target::Background(fixture.path().to_owned()))?;
+        assert!(items.iter().any(|item| item.slot == Slot::New), "{items:?}");
+        menus.close("types");
+        Ok(())
+    }
+
+    #[test]
+    fn known_commands_go_to_their_place_and_unknown_ones_are_apps() {
+        assert_eq!(slot_of("previousversions", "x"), None);
+        assert_eq!(slot_of("pintohomefile", "x"), Some(Slot::Favorite));
+        assert_eq!(slot_of("pintostartscreen", "x"), Some(Slot::Pin));
+        assert_eq!(slot_of("link", "x"), Some(Slot::More));
+        assert_eq!(slot_of("openas", "x"), Some(Slot::OpenWith));
+        assert_eq!(slot_of(TERMINAL_COMMANDS[0], "x"), Some(Slot::Terminal));
+        assert_eq!(slot_of("", "Send to"), Some(Slot::More));
+        assert_eq!(slot_of("", "Include in library"), Some(Slot::More));
+        assert_eq!(
+            slot_of("pdfcraft.createpdf", "Create PDF"),
+            Some(Slot::Apps)
+        );
+        assert_eq!(
+            slot_of("", "Scan with Microsoft Defender..."),
+            Some(Slot::Apps)
+        );
+    }
+
+    #[test]
+    fn only_settings_pages_and_shell_folders_can_be_opened() {
+        for uri in [
+            "ms-settings:",
+            "ms-settings:windowsupdate",
+            "shell:appsfolder",
+            "search-ms:",
+            "shell:::{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}",
+        ] {
+            assert!(allowed_uri(uri), "{uri}");
+        }
+        for uri in [
+            r"C:\Windows\notepad.exe",
+            "https://example.com",
+            "shell:startup",
+            "ms-settings:a b",
+            "shell:::{x}",
+        ] {
+            assert!(!allowed_uri(uri), "{uri}");
+        }
+    }
+
+    #[test]
+    fn the_new_menu_creates_an_item_and_reports_it() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let menus = ShellMenus::default();
+        let items = menus.open("new", 0, Target::Background(fixture.path().to_owned()))?;
+        let new = items
+            .iter()
+            .find(|item| item.slot == Slot::New)
+            .expect("New");
+        let text = new
+            .children
+            .iter()
+            .find(|item| item.verb == ".txt")
+            .expect(".txt");
+        let created = menus.invoke_new("new", text.id, (0, 0), fixture.path().to_owned())?;
+        let created = created.expect("the created file");
+        assert_eq!(created.extension().unwrap_or_default(), "txt");
         Ok(())
     }
 

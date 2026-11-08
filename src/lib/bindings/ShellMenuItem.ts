@@ -7,4 +7,16 @@ export type ShellMenuItem = { id: number, label: string,
 /**
  * `menu:` icon key; extension icons that draw themselves have none.
  */
-icon: string | null, children: Array<ShellMenuItem>, disabled: boolean, separator: boolean, };
+icon: string | null, children: Array<ShellMenuItem>, disabled: boolean, separator: boolean, 
+/**
+ * The language-independent name; a class id for packaged commands, empty when unknown.
+ */
+verb: string, 
+/**
+ * What a double-click runs, when that is not plain "open".
+ */
+default: boolean, 
+/**
+ * Where a top-level command goes in Firewol's menu.
+ */
+slot: 'apps' | 'favorite' | 'pin' | 'more' | 'terminal' | 'open_with' | 'new' | 'properties', };

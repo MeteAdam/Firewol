@@ -22,6 +22,7 @@
     grid: tiles = false,
     tile = 128,
     row: ROW = 32,
+    extensions = true,
     onactivate,
     onopen,
     onmenu,
@@ -37,6 +38,8 @@
     tile?: number;
     /** Details row height: 24, 32, 40 or 52 pixels. */
     row?: number;
+    /** File names show their extension. */
+    extensions?: boolean;
     onactivate: () => void;
     /** `selection` opens everything selected; a double-click opens only the item under it. */
     onopen: (entry: Entry, newTab: boolean, selection?: boolean) => void;
@@ -70,7 +73,8 @@
   const rowIcon = $derived(ROW <= 32 ? 16 : ROW === 40 ? 24 : 32);
   const rowFont = $derived(ROW === 24 ? 12 : ROW === 32 ? 13 : ROW === 40 ? 14 : 15);
   const tagged = $derived(pane.tagged);
-  const shownName = (entry: Entry) => entry.style?.alias || entry.name;
+  const withoutExtension = (name: string) => (name.lastIndexOf(".") > 0 ? name.slice(0, name.lastIndexOf(".")) : name);
+  const shownName = (entry: Entry) => entry.style?.alias || (extensions || entry.directory ? entry.name : withoutExtension(entry.name));
   const activeRow = $derived(
     pane.selected >= first && pane.selected < end ? `${id}-row-${pane.selected}` : undefined,
   );
@@ -97,7 +101,7 @@
     });
   });
 
-  function reveal(row: number) {
+  export function reveal(row: number) {
     const position = head + Math.floor(row / columns) * line;
     if (position < grid.scrollTop + head) grid.scrollTop = position - head;
     else if (position + line > grid.scrollTop + height) grid.scrollTop = position + line - height;
@@ -304,7 +308,9 @@
   function renameField(node: HTMLInputElement, directory: boolean) {
     node.focus();
     const dot = node.value.lastIndexOf(".");
-    node.setSelectionRange(0, dot > 0 && !directory ? dot : node.value.length);
+    if (pane.renamingExtension && dot > 0 && !directory) node.setSelectionRange(dot + 1, node.value.length);
+    else node.setSelectionRange(0, dot > 0 && !directory ? dot : node.value.length);
+    pane.renamingExtension = false;
   }
 
   function finishRename(entry: Entry, value: string | null) {

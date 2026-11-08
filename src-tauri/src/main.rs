@@ -16,9 +16,10 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use contract::{
-    ClipboardState, DriveSpace, DriveView, FolderStyleView, IndexState, ItemRef, Navigation,
-    OpenResult, OperationDone, Page, Pin, SearchCount, SearchRequest, Segment, SessionState,
-    SettingsView, ShellMenuItem, Startup, Step, Subfolders, TransferStatus, VolumeState,
+    ClipboardState, DriveSpace, DriveView, FolderStyleView, GoToFolder, IndexState,
+    ItemAttributesView, ItemRef, MenuPlaces, Navigation, OpenResult, OperationDone, Page, Pin,
+    SearchCount, SearchRequest, Segment, SessionState, SettingsView, ShellMenuItem, Startup, Step,
+    Subfolders, TransferStatus, VolumeState,
 };
 use firewol_core::explorer::icons::{self, Icons};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
@@ -652,7 +653,102 @@ fn shell_view(item: ShellItem) -> ShellMenuItem {
         children: item.children.into_iter().map(shell_view).collect(),
         disabled: item.disabled,
         separator: item.separator,
+        verb: item.verb,
+        default: item.default,
+        slot: item.slot.name().to_owned(),
     }
+}
+
+#[tauri::command]
+async fn menu_places() -> Result<MenuPlaces, String> {
+    blocking(|| {
+        Ok(MenuPlaces {
+            folders: firewol_core::explorer::go_to_folders()
+                .into_iter()
+                .map(|(name, path)| GoToFolder {
+                    name: name.to_owned(),
+                    path: text(&path),
+                })
+                .collect(),
+            windows_terminal: actions::windows_terminal_installed(),
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn open_terminal(kind: actions::Terminal, target: ItemRef) -> Result<(), String> {
+    let target = item_id(&target).map_err(message)?;
+    blocking(move || actions::open_terminal(kind, &target)).await
+}
+
+/// A Settings page or Shell folder from the Go To menu; the core refuses anything else.
+#[tauri::command]
+async fn open_system_uri(window: Window, state: State<'_, App>, uri: String) -> Result<(), String> {
+    let owner = owner(&window)?;
+    let menus = state.menus.clone();
+    blocking(move || menus.open_uri(owner, uri)).await
+}
+
+#[tauri::command]
+async fn item_attributes(item: ItemRef) -> Result<ItemAttributesView, String> {
+    let item = item_id(&item).map_err(message)?;
+    blocking(move || {
+        let state = actions::item_attributes(&item)?;
+        Ok(ItemAttributesView {
+            hidden: state.hidden,
+            system: state.system,
+            read_only: state.read_only,
+            archive: state.archive,
+            created: state.created,
+            modified: state.modified,
+            accessed: state.accessed,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_item_attribute(
+    item: ItemRef,
+    attribute: actions::Attribute,
+    enabled: bool,
+) -> Result<(), String> {
+    let item = item_id(&item).map_err(message)?;
+    blocking(move || actions::set_item_attribute(&item, attribute, enabled)).await
+}
+
+#[tauri::command]
+async fn create_folder(into: ItemRef, name: String) -> Result<ItemRef, String> {
+    let into = item_id(&into).map_err(message)?;
+    blocking(move || Ok(item_ref(&actions::create_folder(&into, name.as_ref())?))).await
+}
+
+#[tauri::command]
+async fn create_file(into: ItemRef, name: String, contents: String) -> Result<ItemRef, String> {
+    let into = item_id(&into).map_err(message)?;
+    blocking(move || {
+        Ok(item_ref(&actions::create_file(
+            &into,
+            name.as_ref(),
+            &contents,
+        )?))
+    })
+    .await
+}
+
+/// Blocks until the UAC prompt is answered.
+#[tauri::command]
+async fn take_ownership(
+    window: Window,
+    files: State<'_, Files>,
+    item: ItemRef,
+) -> Result<(), String> {
+    let files = files.0.clone();
+    let owner = owner(&window)?;
+    let item = item_id(&item).map_err(message)?;
+    blocking(move || actions::take_ownership(&item, &files.settings().elevation, HWND(owner as _)))
+        .await
 }
 
 fn item_ids(items: &[ItemRef]) -> Result<Vec<ItemId>, String> {
@@ -743,6 +839,30 @@ async fn shell_menu_invoke(
     let label = window.label().to_owned();
     let menus = state.menus.clone();
     blocking(move || menus.invoke(&label, id, (x, y))).await
+}
+
+/// A command from the New menu; returns what it created in `folder`, to select and rename.
+#[tauri::command]
+async fn shell_menu_invoke_new(
+    window: Window,
+    state: State<'_, App>,
+    id: u32,
+    x: i32,
+    y: i32,
+    folder: ItemRef,
+) -> Result<Option<ItemRef>, String> {
+    let label = window.label().to_owned();
+    let menus = state.menus.clone();
+    let folder = item_id(&folder).map_err(message)?;
+    blocking(move || {
+        drop(folder.verify()?);
+        let created = menus.invoke_new(&label, id, (x, y), folder.path().to_owned())?;
+        Ok(created
+            .and_then(|path| ItemId::at(path).ok())
+            .as_ref()
+            .map(item_ref))
+    })
+    .await
 }
 
 /// "Show more options": the same menu, drawn by Windows at the cursor.
@@ -1074,6 +1194,10 @@ fn main() {
             app.state::<App>()
                 .folders
                 .use_styles(move || styles.settings().folders);
+            let visibility = session.clone();
+            app.state::<App>()
+                .folders
+                .use_show_hidden(move || visibility.settings().show_hidden.unwrap_or(true));
             app.manage(Files(session));
             build_window(app.handle(), "main")?;
             Ok(())
@@ -1128,8 +1252,17 @@ fn main() {
             pick_custom_icon,
             reset_custom_icon,
             open_items,
+            menu_places,
+            open_terminal,
+            open_system_uri,
+            item_attributes,
+            set_item_attribute,
+            create_folder,
+            create_file,
+            take_ownership,
             shell_menu_open,
             shell_menu_invoke,
+            shell_menu_invoke_new,
             shell_menu_native,
             shell_menu_close,
             open_window,

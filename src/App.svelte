@@ -31,6 +31,8 @@
     type DriveSpace,
     type DriveView,
     type ShellMenuItem,
+    type MenuPlaces,
+    type ItemAttributesView,
   } from "./lib/contract";
   import FileIcon from "./lib/FileIcon.svelte";
   import FileList from "./lib/FileList.svelte";
@@ -40,8 +42,9 @@
   import { iconChanged } from "./lib/icons.svelte";
   import Icon from "./lib/Icon.svelte";
   import { NO_FILTERS, Pane, SELECT_ALL_LIMIT, itemKey } from "./lib/pane.svelte";
-  import { PRESETS, colors, hex, presetClass } from "./lib/appearance";
-  import { details, isCustom, labelOf, menuRows, parentPath, splitRows, type MenuContext, type MenuRow } from "./lib/menu";
+  import { PRESETS, colors, presetClass } from "./lib/appearance";
+  import { isCustom, menuRows, parentPath, type MenuContext, type MenuRow } from "./lib/menu";
+  import { NEW_FILES, TILE_SIZES, areaMenu, itemMenu, placeMenu as sidebarMenu, type MenuActions, type MenuCommand, type MenuEnv, type MenuNode } from "./lib/menuLayout";
   import Breadcrumb from "./lib/Breadcrumb.svelte";
   import SearchBox from "./lib/SearchBox.svelte";
   import Sheet from "./lib/Sheet.svelte";
@@ -71,7 +74,7 @@
   const sidebar = $derived(settings?.sidebar ?? true);
   const gridView = $derived(settings?.grid ?? false);
   const tile = $derived(settings?.tile ?? 128);
-  const TILES = [[160, "Large tiles", "Ctrl+Shift+2"], [128, "Medium tiles", "Ctrl+Shift+3"], [96, "Small tiles", "Ctrl+Shift+4"]] as const;
+  const TILES = TILE_SIZES;
   const rowHeight = $derived(settings?.row ?? 32);
   const ROWS = [24, 32, 40, 52];
   const preset = $derived(presetClass(settings?.appearance.preset ?? "light_morphism"));
@@ -87,11 +90,27 @@
   let menu = $state<{ kind: MenuKind; x: number; y: number; target?: Place }>();
   /** Windows' commands for the open menu: arriving, listed, or absent (off or too slow). */
   let shellMenu = $state.raw<ShellMenuItem[] | "loading" | null>(null);
-  let submenus = $state.raw<{ items: ShellMenuItem[]; x: number; y: number; row: HTMLElement }[]>([]);
+  let submenus = $state.raw<{ items: MenuNode[]; x: number; y: number; row: HTMLElement; rows?: number }[]>([]);
   let shellRequest = 0;
   let shellLive = false;
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
-  const SHELL_WAIT_MS = 1500;
+  const SHELL_WAIT_MS = 5000;
+  /** The menu waits this long for Windows' commands, usually 220 to 300 ms, so its rows do not jump. */
+  const SHELL_SETTLE_MS = 400;
+  const COMPACT_ROW = 24;
+  const NORMAL_ROW = 28;
+  /** Bumped by every open or dismissal, so a menu still waiting for Windows can be cancelled. */
+  let menuOpening = 0;
+  let menuAnchor = { x: 0, y: 0 };
+  /** The height a menu may use; the self-test shortens it to exercise the fitting steps. */
+  let menuRoom = () => window.innerHeight - 16;
+  /** The steps that keep a tall menu inside the window without a scroll bar. */
+  let menuCompact = $state(false);
+  let menuFold = $state(0);
+  let menuRowLimit = $state<number>();
+  let places = $state.raw<MenuPlaces | null>(null);
+  let menuAttributes = $state.raw<ItemAttributesView | null>(null);
+  let takeOwnAsk = $state.raw<{ item: ItemRef; path: string }>();
   let toast = $state<{ message: string; undo: boolean; error: boolean }>();
   /** The running transfer, or the last result until dismissed; sent by the core every 250 ms. */
   let transfer = $state.raw<TransferStatus | null>(null);
@@ -582,8 +601,6 @@
     void start(api.undo());
   }
 
-  const isShortcut = (entry?: Entry) => !!entry && !entry.directory && /\.lnk$/i.test(entry.name);
-
   function menuContext(onItem: boolean): MenuContext {
     return {
       item: onItem ? focused : undefined,
@@ -868,42 +885,180 @@
   /** Opens a menu that fits the window, with focus on its first enabled item. */
   async function showMenu(kind: MenuKind, x: number, y: number, target?: Place) {
     if (!menu) menuReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const opening = ++menuOpening;
+    loadAttributes(kind);
+    await Promise.race([loadShellMenu(kind, target), new Promise((resolve) => setTimeout(resolve, SHELL_SETTLE_MS))]);
+    if (opening !== menuOpening) return;
+    menuAnchor = { x, y };
     menu = { kind, x, y, target };
-    loadShellMenu(kind, target);
-    await tick();
-    if (!menuElement || !menu) return;
-    const box = menuElement.getBoundingClientRect();
-    menu.x = Math.max(8, Math.min(x, window.innerWidth - box.width - 8));
-    menu.y = Math.max(8, Math.min(y, window.innerHeight - box.height - 8));
+    await fitMenu();
     menuItems()[0]?.focus();
   }
 
-  /** Keeps Firewol's rows instant: Windows' commands join the menu when they are ready. */
-  function loadShellMenu(kind: MenuKind, target?: Place) {
+  function loadAttributes(kind: MenuKind) {
+    menuAttributes = null;
+    const target = kind === "item" && selectedCount === 1 ? focused?.id : kind === "area" ? active?.folder?.item : undefined;
+    if (!target) return;
+    const opening = menuOpening;
+    void api.itemAttributes(target).then((state) => { if (opening === menuOpening) menuAttributes = state; }, () => {});
+  }
+
+  /** Resolves when Windows' commands for this menu are listed, or will not be. */
+  function loadShellMenu(kind: MenuKind, target?: Place): Promise<void> {
     const request = ++shellRequest;
     shellMenu = null;
     submenus = [];
-    if (kind === "more" || settings?.shell_items === false) return;
+    if (kind === "more" || settings?.shell_items === false) return Promise.resolve();
     const folder = active?.folder?.item;
     const items = kind === "item" ? active?.selectedRefs() ?? []
       : kind === "area" ? (folder ? [folder] : [])
       : target?.item ? [target.item] : [];
-    if (items.length === 0 || items.length > MAX_ITEMS) return;
+    if (items.length === 0 || items.length > MAX_ITEMS) return Promise.resolve();
     shellMenu = "loading";
     shellLive = true;
     const late = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Timed out")), SHELL_WAIT_MS));
-    void Promise.race([api.shellMenuOpen(items, kind === "area"), late]).then(
+    return Promise.race([api.shellMenuOpen(items, kind === "area"), late]).then(
       (list) => { if (request === shellRequest) { shellMenu = list; void fitMenu(); } },
-      () => { if (request === shellRequest) shellMenu = null; },
+      () => { if (request === shellRequest) { shellMenu = null; void fitMenu(); } },
     );
   }
 
-  /** The Windows rows make the menu taller, so it may need to move up. */
+  /**
+   * Keeps the menu inside the window without a scroll bar: normal rows first, then compact rows,
+   * then the last app commands fold into a submenu, and columns only in a very short window.
+   */
   async function fitMenu() {
     await tick();
     if (!menuElement || !menu) return;
-    menu.y = Math.max(8, Math.min(menu.y, window.innerHeight - menuElement.getBoundingClientRect().height - 8));
+    const room = menuRoom();
+    const tall = () => !!menuElement && menuElement.offsetHeight > room;
+    menuCompact = false;
+    menuFold = 0;
+    menuRowLimit = undefined;
+    await tick();
+    if (tall()) { menuCompact = true; await tick(); }
+    if (tall()) { menuFold = Math.ceil((menuElement.offsetHeight - room) / COMPACT_ROW) + 1; await tick(); }
+    if (tall()) { menuRowLimit = Math.max(4, Math.floor((room - 12) / COMPACT_ROW)); await tick(); }
+    if (!menuElement || !menu) return;
+    const box = menuElement.getBoundingClientRect();
+    menu.x = Math.max(8, Math.min(menuAnchor.x, window.innerWidth - box.width - 8));
+    menu.y = Math.max(8, Math.min(menuAnchor.y, window.innerHeight - box.height - 8));
   }
+
+  /** Also cancels a menu that is still waiting for Windows' commands. */
+  function dismissMenu() {
+    if (!menu && shellLive) closeShellMenu();
+    menuOpening++;
+    menu = undefined;
+  }
+
+  /** The target of the open menu: the clicked item, or the open folder on empty space. */
+  const menuTarget = () => (menu?.kind === "item" ? focused?.id : active?.folder?.item) ?? undefined;
+  const reportFailure = (reason: unknown) => notify(String(reason), { error: true });
+  const canElevateShell = () => settings?.elevation.mode === "all_executables" || !!settings?.elevation.executables.some((path) => /\\system32\\cmd\.exe$/i.test(path));
+
+  /** A date and time that sorts by name, the same shape Nilesoft's New File rows use. */
+  function stamp() {
+    const now = new Date();
+    const two = (value: number) => String(value).padStart(2, "0");
+    return `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}${two(now.getHours())}${two(now.getMinutes())}${two(now.getSeconds())}${String(now.getMilliseconds()).padStart(3, "0")}`;
+  }
+
+  /** Shows an item a command just created, optionally with its rename field open. */
+  async function showCreated(pane: Pane, item: ItemRef | null, rename: boolean) {
+    await pane.refresh();
+    if (!item || !pane.folder) return;
+    const [row] = await api.locateSelection(pane.folder.id, [item]);
+    if (row === null || row === undefined) return;
+    await pane.select(row);
+    lists[slots.findIndex((slot) => slot.active?.kind === "folder" && slot.active.pane === pane)]?.reveal(row);
+    if (rename) pane.renaming = row;
+  }
+
+  const menuActions: MenuActions = {
+    row: (row) => void runEntry(row, menu?.kind === "item"),
+    openInNewTab: () => { if (focused) open(focused, true); },
+    openInNewWindow: () => { if (focused) void api.openWindow(focused.path, false).catch(reportFailure); },
+    view: (grid, size) => setView(grid, size),
+    sort: (column) => { if (active && active.sort.column !== column) void active.sortBy(column); },
+    direction: (descending) => { if (active && active.sort.descending !== descending) void active.sortBy(active.sort.column); },
+    terminal: (kind) => { const target = menuTarget(); if (target) void api.openTerminal(kind, target).catch(reportFailure); },
+    system: (uri) => void api.openSystemUri(uri).catch(reportFailure),
+    goTo: (path) => void active?.open(path),
+    copy: (text) => void navigator.clipboard.writeText(text),
+    select: (mode) => {
+      if (mode === "all") void selectAll();
+      else if (mode === "invert") void active?.invertSelection();
+      else active?.clearSelection();
+    },
+    changeExtension: () => { if (active) { active.renamingExtension = true; active.renaming = active.selected; } },
+    takeOwnership: () => {
+      const item = menuTarget();
+      const path = menu?.kind === "item" ? focused?.path : active?.folder?.path;
+      if (item && path) takeOwnAsk = { item, path };
+    },
+    showHidden: (show) => void saveSettings({ show_hidden: show }).then(() => allPanes().forEach((pane) => { if (pane.folder) void pane.refresh(); })),
+    showExtensions: (show) => void saveSettings({ show_extensions: show }),
+    attribute: (name, enabled) => {
+      const item = menuTarget();
+      const pane = active;
+      if (item) void api.setItemAttribute(item, name, enabled).then(() => pane?.refresh()).catch(reportFailure);
+    },
+    newFolder: (name) => {
+      const pane = active;
+      const into = pane?.folder?.item;
+      if (pane && into) void api.createFolder(into, name === "guid" ? crypto.randomUUID() : stamp()).then((item) => showCreated(pane, item, false)).catch(reportFailure);
+    },
+    newFile: (kind) => {
+      const pane = active;
+      const into = pane?.folder?.item;
+      if (pane && into) void api.createFile(into, `${stamp()}.${kind}`, NEW_FILES[kind]).then((item) => showCreated(pane, item, false)).catch(reportFailure);
+    },
+    togglePin: (path) => void togglePin(path),
+    changeIcon: () => void changeIcon(menuTarget()),
+    editMenu: () => openSettings("menu"),
+    windowsMenu: showNativeMenu,
+  };
+
+  function confirmTakeOwnership() {
+    const ask = takeOwnAsk;
+    takeOwnAsk = undefined;
+    if (ask) void api.takeOwnership(ask.item).catch(reportFailure);
+  }
+
+  const menuNodes = $derived.by((): MenuNode[] => {
+    if (!menu || menu.kind === "more") return [];
+    const env: MenuEnv = {
+      item: menu.kind === "item" ? focused : undefined,
+      selected: menu.kind === "item" ? active?.selectedEntries() ?? [] : [],
+      folder: active?.folder?.path,
+      rows: menuRows(settings?.menu ?? [], menuContext(menu.kind === "item")),
+      shell: shellMenu,
+      places,
+      attributes: menuAttributes,
+      grid: gridView,
+      tile,
+      sort: active?.sort ?? { column: "name", descending: false },
+      showHidden: settings?.show_hidden ?? true,
+      showExtensions: settings?.show_extensions ?? true,
+      pinned: menu.kind === "item" ? session.pins.some((pin) => pin.path === focused?.path) : pinned,
+      searching: !!active?.searching,
+      canElevate: canElevateShell(),
+      fold: menuFold,
+      act: menuActions,
+    };
+    if (menu.kind === "item") return itemMenu(env);
+    if (menu.kind === "area") return areaMenu(env);
+    const place = menu.target!;
+    return sidebarMenu(env, {
+      open: (inNewTab) => openPlace(place, inNewTab),
+      customize: place.item ? () => customizePlace(place) : undefined,
+      changeIcon: menu.kind === "pin" && place.item ? () => void changeIcon(place.item) : undefined,
+      pinned: session.pins.some((pin) => pin.path === place.path),
+      togglePin: () => void togglePin(place.path),
+      copyPath: () => copyPath(place.path),
+    });
+  });
 
   function closeShellMenu() {
     shellRequest++;
@@ -926,35 +1081,55 @@
     menu = undefined;
   }
 
-  function runShell(item: ShellMenuItem, level: number, event: MouseEvent) {
-    if (item.children.length > 0) {
-      void openSubmenu(event.currentTarget as HTMLElement, item, level, true);
-      return;
-    }
+  function runShell(node: MenuCommand, event: MouseEvent) {
     const scale = window.devicePixelRatio;
     const [x, y] = [Math.round(event.screenX * scale), Math.round(event.screenY * scale)];
+    const pane = active;
+    const folder = pane?.folder?.item;
     leaveMenu();
-    api.shellMenuInvoke(item.id, x, y).catch((reason) => notify(String(reason), { error: true }));
+    if (node.creates && pane && folder) {
+      api.shellMenuInvokeNew(node.shell!.id, x, y, folder).then((item) => showCreated(pane, item, true)).catch(reportFailure);
+    } else {
+      api.shellMenuInvoke(node.shell!.id, x, y).catch(reportFailure);
+    }
+  }
+
+  function activate(node: MenuCommand, level: number, event: MouseEvent) {
+    if (node.children) void openSubmenu(event.currentTarget as HTMLElement, node, level, true);
+    else if (node.shell) runShell(node, event);
+    else {
+      node.run?.();
+      menu = undefined;
+    }
   }
 
   function showNativeMenu() {
     leaveMenu();
-    api.shellMenuNative().catch((reason) => notify(String(reason), { error: true }));
+    api.shellMenuNative().catch(reportFailure);
   }
 
-  async function openSubmenu(row: HTMLElement, item: ShellMenuItem, level: number, focus: boolean) {
+  async function openSubmenu(row: HTMLElement, node: MenuCommand, level: number, focus: boolean) {
     clearTimeout(hoverTimer);
-    const panelAt = () => document.querySelectorAll<HTMLElement>(".shell-sub")[level];
-    const focusFirst = () => panelAt()?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    const panelAt = () => document.querySelectorAll<HTMLElement>(".sub-menu")[level];
+    const focusFirst = () => panelAt()?.querySelector<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)')?.focus();
     if (submenus[level]?.row === row) {
       if (focus) focusFirst();
       return;
     }
     const box = row.getBoundingClientRect();
-    submenus = [...submenus.slice(0, level), { items: item.children, x: box.right - 4, y: box.top - 7, row }];
+    submenus = [...submenus.slice(0, level), { items: node.children ?? [], x: box.right - 4, y: box.top - 7, row }];
     await tick();
-    const panel = panelAt();
+    let panel = panelAt();
     if (!panel || submenus[level]?.row !== row) return;
+    // A list too long for the window, such as Send to, wraps into columns instead of scrolling.
+    const room = menuRoom();
+    if (panel.offsetHeight > room) {
+      const rows = Math.max(4, Math.floor((room - 12) / (menuCompact ? COMPACT_ROW : NORMAL_ROW)));
+      submenus = submenus.map((entry, index) => (index === level ? { ...entry, rows } : entry));
+      await tick();
+      panel = panelAt();
+      if (!panel || submenus[level]?.row !== row) return;
+    }
     const size = panel.getBoundingClientRect();
     const x = box.right - 4 + size.width > window.innerWidth - 8 ? Math.max(8, box.left - size.width + 4) : box.right - 4;
     const y = Math.max(8, Math.min(box.top - 7, window.innerHeight - size.height - 8));
@@ -965,15 +1140,15 @@
     }
   }
 
-  function shellHover(row: HTMLElement, item: ShellMenuItem, level: number) {
+  function menuHover(row: HTMLElement, node: MenuCommand, level: number) {
     clearTimeout(hoverTimer);
-    if (item.children.length > 0) hoverTimer = setTimeout(() => void openSubmenu(row, item, level, false), 120);
+    if (node.children) hoverTimer = setTimeout(() => void openSubmenu(row, node, level, false), 120);
     else if (submenus.length > level) submenus = submenus.slice(0, level);
   }
 
   function submenuKey(event: KeyboardEvent, index: number) {
     const panel = event.currentTarget as HTMLElement;
-    const items = [...panel.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
+    const items = [...panel.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)')];
     const at = items.indexOf(document.activeElement as HTMLButtonElement);
     const to = (position: number) => items[(position + items.length) % items.length]?.focus();
     if (event.key === "ArrowDown") to(at + 1);
@@ -1030,27 +1205,14 @@
     menuReturn = null;
   }
 
-  /** Arrow keys move through the menu; Left and Right move along the icon row. */
+  /** Arrow keys move through the menu; Right opens a submenu. */
   function menuKey(event: KeyboardEvent) {
     const items = menuItems();
     const at = items.indexOf(document.activeElement as HTMLButtonElement);
-    const row = (item?: Element) => !!item?.closest(".quick");
     const to = (index: number) => items[(index + items.length) % items.length]?.focus();
-    if (event.key === "ArrowDown") {
-      // From the icon row, Down leaves the row instead of walking along it.
-      if (row(items[at])) {
-        const below = items.findIndex((item, index) => index > at && !row(item));
-        if (below >= 0) to(below);
-      } else to(at + 1);
-    } else if (event.key === "ArrowUp") {
-      if (row(items[at])) to(-1);
-      else if (at > 0 && row(items[at - 1])) to(items.findIndex((item) => row(item)));
-      else to(at - 1);
-    } else if ((event.key === "ArrowRight" || event.key === "ArrowLeft") && row(items[at])) {
-      const quick = items.filter((item) => row(item));
-      const next = quick[(quick.indexOf(items[at]) + (event.key === "ArrowRight" ? 1 : -1) + quick.length) % quick.length];
-      next?.focus();
-    } else if (event.key === "ArrowRight" && items[at]?.getAttribute("aria-haspopup")) {
+    if (event.key === "ArrowDown") to(at + 1);
+    else if (event.key === "ArrowUp") to(at - 1);
+    else if (event.key === "ArrowRight" && items[at]?.getAttribute("aria-haspopup")) {
       items[at].click();
     } else if (event.key === "Home") to(0);
     else if (event.key === "End") to(items.length - 1);
@@ -1212,9 +1374,12 @@
       input.dispatchEvent(new Event("input", { bubbles: true }));
     };
     const openSheet = async (kind: "item" | "area") => {
-      showMenu(kind, 40, 40);
+      await showMenu(kind, 40, 40);
       await painted();
-      const item = [...document.querySelectorAll<HTMLButtonElement>(".menu .mi")].find((entry) => entry.querySelector(".label")?.textContent?.trim() === "Customize folder…");
+      const menuRow = (text: string) => [...document.querySelectorAll<HTMLButtonElement>(".menu .mi")].find((entry) => entry.querySelector(".label")?.textContent?.trim() === text);
+      menuRow("File manage")!.click();
+      await waitFor(() => !!menuRow("Customize this folder…"), 5000, "the File manage menu");
+      const item = menuRow("Customize this folder…");
       if (!item?.disabled) item?.click();
       await waitFor(() => !!sheet(), 5000, "the folder sheet");
       return item;
@@ -1689,24 +1854,25 @@
 
   /** M4.3-h: context-menu icon row, keys and row height (the menu is open on a file). */
   async function menuKeySteps(check: Check) {
-    const quick = () => [...document.querySelectorAll<HTMLButtonElement>(".menu .quick .qi")];
-    const focusedQuick = () => quick().includes(document.activeElement as HTMLButtonElement);
-    check("the menu opens with focus on its first enabled item", focusedQuick() && document.activeElement?.getAttribute("aria-label") === "Cut", document.activeElement?.outerHTML.slice(0, 80));
-    const press = (key: string) => menuElement!.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
-    press("ArrowRight");
-    await tick();
-    check("Right moves along the icon row", focusedQuick() && document.activeElement?.getAttribute("aria-label") !== "Cut");
-    press("ArrowDown");
-    await tick();
     const row = document.activeElement as HTMLElement;
-    check("Down leaves the icon row for the 28 px rows", row.classList.contains("mi") && row.offsetHeight === 28, `${row.className} ${row.offsetHeight}`);
+    check("the menu opens with focus on its first enabled item", row.classList.contains("mi") && row.closest(".menu") === menuElement, row.outerHTML.slice(0, 80));
+    check("menu rows keep their fixed height", row.offsetHeight === (menuCompact ? COMPACT_ROW : NORMAL_ROW), `${row.offsetHeight}`);
+    const press = (key: string) => menuElement!.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
     press("ArrowDown");
     await tick();
     check("Down moves to the next row", document.activeElement !== row && !!(document.activeElement as HTMLElement).classList.contains("mi"));
     press("ArrowUp");
-    press("ArrowUp");
     await tick();
-    check("Up returns to the icon row", focusedQuick());
+    check("Up returns to the first row", document.activeElement === row);
+    const manage = [...menuElement!.querySelectorAll<HTMLButtonElement>(".mi")].find((item) => item.textContent?.includes("File manage"))!;
+    manage.focus();
+    press("ArrowRight");
+    const panel = () => document.querySelector<HTMLElement>(".sub-menu");
+    await waitFor(() => !!panel()?.contains(document.activeElement), 5000, "the File manage submenu");
+    check("Right opens a submenu with focus inside it", true);
+    panel()!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }));
+    await tick();
+    check("Left closes the submenu and returns to its row", !panel() && document.activeElement === manage);
     const before = menuReturn;
     press("Escape");
     await tick();
@@ -1869,20 +2035,21 @@
     const labels = () => [...document.querySelectorAll(".menu .mi .label")].map((label) => label.textContent?.trim()).join("|");
     const pinRow = rows()[0];
     const open = new MouseEvent("contextmenu", { clientX: 40, clientY: 40, bubbles: true, cancelable: true });
+    const shownMenu = async (kind: MenuKind) => { await waitFor(() => menu?.kind === kind && !!menuElement, 3000, `the ${kind} menu`); await painted(); };
     pinRow.dispatchEvent(open);
-    await painted();
+    await shownMenu("pin");
     check("right-clicking a pin opens Firewol's menu, not the browser's", open.defaultPrevented && menu?.kind === "pin" && labels().includes("Open in new tab") && labels().includes("Customize folder…") && labels().includes("Change icon…") && labels().includes("Unpin from sidebar") && labels().includes("Copy path"), labels());
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
     await tick();
     pinRow.focus();
     pinRow.dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true }));
-    await painted();
+    await shownMenu("pin");
     check("Shift+F10 opens the pin menu", menu?.kind === "pin");
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
     await tick();
     const driveRow = rows().find((item) => item.dataset.pin === "C:\\")!;
     driveRow.dispatchEvent(new MouseEvent("contextmenu", { clientX: 40, clientY: 40, bubbles: true, cancelable: true }));
-    await painted();
+    await shownMenu("drive");
     check("a drive has its own menu", menu?.kind === "drive" && labels().includes("Pin to sidebar") && !labels().includes("Change icon…"), labels());
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
     await tick();
@@ -1921,20 +2088,52 @@
     check("no part of the window shows the browser's menu", stray.defaultPrevented);
 
     await pane.select((pane.pages[0] ?? []).findIndex((entry) => entry.name === "note.txt"));
-    showMenu("item", 40, 40);
-    await waitFor(() => Array.isArray(shellMenu), SHELL_WAIT_MS + 500, "the Windows commands");
-    await painted();
-    check("Windows commands join the item menu with Show more options", (shellMenu as ShellMenuItem[]).some((item) => !item.separator) && labels().endsWith("Show more options"), labels());
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-    await tick();
+    await menuLayoutSteps(check, labels);
     await saveSettings({ shell_items: false });
-    showMenu("area", 40, 40);
+    await showMenu("area", 40, 40);
     await painted();
-    check("the setting hides the Windows commands", shellMenu === null && !labels().includes("Show more options"), labels());
+    check("the setting hides the Windows commands", shellMenu === null && !labels().includes("Properties"), labels());
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
     await tick();
     await saveSettings({ shell_items: true });
     void root;
+  }
+
+  /** The Explorer-style menu: its order, one-line rows, and fitting without a scroll bar. */
+  async function menuLayoutSteps(check: Check, labels: () => string) {
+    const escape = async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await tick(); };
+    const listed = async (kind: MenuKind) => { await showMenu(kind, 40, 40); await waitFor(() => Array.isArray(shellMenu), SHELL_WAIT_MS + 500, "the Windows commands"); await painted(); };
+    const inOrder = (names: string[], rows: string[]) => names.map((name) => rows.indexOf(name)).every((at, index, all) => at >= 0 && (index === 0 || at > all[index - 1]));
+    const noScroll = () => !!menuElement && menuElement.scrollHeight <= menuElement.clientHeight + 1 && menuElement.getBoundingClientRect().bottom <= window.innerHeight;
+    await listed("item");
+    check("Windows commands join the item menu", (shellMenu as ShellMenuItem[]).some((item) => !item.separator), labels());
+    check("the item menu follows the Explorer order", inOrder(["Open", "More options", "Terminal", "File manage", "Go To", "Cut", "Delete", "Rename", "Properties"], labels().split("|")), labels());
+    check("the whole menu fits the window without a scroll bar", noScroll(), `${menuElement?.offsetHeight} of ${window.innerHeight}`);
+    const windowsRow = [...menuElement!.querySelectorAll<HTMLElement>(".mi")].find((row) => row.querySelector("img"));
+    if (windowsRow) {
+      const icon = windowsRow.querySelector("img")!.getBoundingClientRect();
+      const text = windowsRow.querySelector(".label")!.getBoundingClientRect();
+      check("a Windows command keeps its icon beside its label", text.left >= icon.right && Math.abs(icon.top + icon.height / 2 - (text.top + text.height / 2)) < 8 && windowsRow.offsetHeight <= NORMAL_ROW, `${icon.top}/${text.top}/${windowsRow.offsetHeight}`);
+    }
+    await escape();
+    const fullHeight = window.innerHeight;
+    menuRoom = () => 400;
+    await listed("item");
+    const folded = menuElement!.offsetHeight <= 400 && menuElement!.querySelector<HTMLElement>(".mi")!.offsetHeight === COMPACT_ROW;
+    check("a short window gets compact rows and fewer rows instead of a scroll bar", folded && noScroll(), `${menuElement?.offsetHeight} in ${fullHeight}`);
+    await escape();
+    menuRoom = () => window.innerHeight - 16;
+    await listed("area");
+    const area = labels().split("|");
+    check("the empty-area menu follows the Explorer order", inOrder(["View", "Sort by", "Refresh", "Terminal", "File manage", "Go To", "Paste", "Undo", "New", "Properties"], area) && !area.includes("Group by"), labels());
+    const rowNamed = (name: string) => [...document.querySelectorAll<HTMLButtonElement>(".menu .mi")].find((row) => row.querySelector(".label")?.textContent?.trim() === name);
+    rowNamed("Go To")!.click();
+    await waitFor(() => !!rowNamed("Folder"), 5000, "the Go To menu");
+    rowNamed("Folder")!.click();
+    await waitFor(() => !!rowNamed("Program Files") && !!rowNamed("Temp"), 5000, "the Go To folders");
+    check("Go To lists the Windows folders", !!rowNamed("Downloads"), labels());
+    await escape();
+    await waitFor(() => !menu, 5000, "the menu to close");
   }
 
   /** Files run their Windows default action; a shortcut to a folder stays inside Firewol. */
@@ -2103,16 +2302,18 @@
       check("closing Settings returns to a folder tab", true);
       const listing = active!;
       listing.select((listing.pages[0] ?? []).findIndex((entry) => !entry.directory));
-      showMenu("item", 40, 40);
+      await showMenu("item", 40, 40);
       await painted();
       const items = () => [...document.querySelectorAll<HTMLButtonElement>(".menu .mi")];
       const labels = items().map((item) => item.querySelector(".label")?.textContent?.trim()).join("|");
-      const quick = [...document.querySelectorAll(".menu .quick .qi")].map((item) => item.getAttribute("aria-label")).join("|");
-      check("the context menu follows the saved menu", labels.includes("Self-test action") && !quick.split("|").includes("Copy") && quick.includes("Cut") && !labels.split("|").includes("Cut") && labels.includes("Edit menu…") && !labels.includes("Customize folder"), `${quick} / ${labels}`);
-      check("the icon row holds Cut, Paste, Rename and Recycle", quick === "Cut|Paste in current folder|Rename|Move to Recycle Bin" && !labels.includes("Open in new tab"), `${quick} / ${labels}`);
+      const names2 = labels.split("|");
+      check("the context menu follows the saved menu", names2.includes("Self-test action") && !names2.includes("Copy") && names2.includes("Cut") && !labels.includes("Customize"), labels);
+      check("a file's menu has Cut, Delete and Rename and no new-tab row", names2.indexOf("Cut") < names2.indexOf("Delete") && names2.indexOf("Delete") < names2.indexOf("Rename") && !names2.includes("Open in new tab"), labels);
       await menuKeySteps(check);
-      showMenu("item", 40, 40);
+      await showMenu("item", 40, 40);
       await painted();
+      items().find((item) => item.textContent?.includes("File manage"))!.click();
+      await waitFor(() => items().some((item) => item.textContent?.includes("Edit menu…")), 5000, "the File manage menu");
       items().find((item) => item.textContent?.includes("Edit menu…"))!.click();
       await waitFor(() => slots[0].active?.kind === "settings" && !!document.querySelector(".settings h2"), 5000, "Edit menu…");
       check("Edit menu… opens the Context menu section", document.querySelector(".settings h2")?.textContent === "Context menu");
@@ -2187,6 +2388,7 @@
       startup = info;
       session = info.session;
       refreshDrives();
+      void api.menuPlaces().then((list) => (places = list), () => {});
       if (info.adopt) {
         const tab = restore(info.adopt);
         slots = [new PaneSlot(tab)];
@@ -2217,34 +2419,27 @@
   });
 </script>
 
-<svelte:window onkeydown={shortcut} onmousedown={() => (menu = undefined)} />
+<svelte:window onkeydown={shortcut} onmousedown={dismissMenu} />
 
-{#snippet shellRows(items: ShellMenuItem[], level: number)}
-  {#each items as item, index (index)}
-    {#if item.separator}
+{#snippet menuList(nodes: MenuNode[], level: number)}
+  {#each nodes as node, index (index)}
+    {#if node.kind === "separator"}
       <div class="sep"></div>
+    {:else if node.kind === "info"}
+      <div class="mi info" role="presentation"><span class="menu-blank"></span><span class="label">{node.label}</span><span class="sc">{node.keys}</span></div>
     {:else}
-      <button class="mi shell" role="menuitem" aria-haspopup={item.children.length > 0 ? "menu" : undefined} disabled={item.disabled} onclick={(event) => runShell(item, level, event)} onmouseenter={(event) => shellHover(event.currentTarget, item, level)}>
-        {#if item.icon}<FileIcon icon={item.icon} />{:else}<span class="shell-blank"></span>{/if}
-        <span class="label">{item.label}</span>
-        {#if item.children.length > 0}<Icon name="chevron" size={12} weight={2} />{/if}
+      <button class="mi" class:on={node.radio} class:wait={node.wait} role={node.radio !== undefined ? "menuitemradio" : node.check !== undefined ? "menuitemcheckbox" : "menuitem"} aria-checked={node.radio ?? node.check} aria-haspopup={node.children ? "menu" : undefined} title={node.title} disabled={node.disabled} onclick={(event) => activate(node, level, event)} onmouseenter={(event) => menuHover(event.currentTarget, node, level)}>
+        {#if node.image}<FileIcon icon={node.image} />
+        {:else if node.glyph}<span class="glyph" style:color={node.color}>{node.glyph}</span>
+        {:else if node.icon && node.color}<span class="glyph" style:color={node.color}><Icon name={node.icon} /></span>
+        {:else if node.icon}<Icon name={node.icon} />
+        {:else}<span class="menu-blank"></span>{/if}
+        <span class="label">{node.label}</span>
+        {#if node.keys}<span class="sc">{node.keys}</span>{/if}
+        {#if node.children}<Icon name="chevron" size={12} weight={2} />{/if}
       </button>
     {/if}
   {/each}
-{/snippet}
-
-{#snippet shellBlock()}
-  {#if shellMenu === "loading"}
-    <div class="sep"></div>
-    <div class="mi shell-wait" aria-hidden="true"><span class="shell-blank"></span><span class="label muted">Loading Windows commands…</span></div>
-  {:else if shellMenu}
-    {#if shellMenu.some((item) => !item.separator)}
-      <div class="sep"></div>
-      {@render shellRows(shellMenu, 0)}
-    {/if}
-    <div class="sep"></div>
-    <button class="mi" role="menuitem" onclick={showNativeMenu}><Icon name="more" /><span class="label">Show more options</span></button>
-  {/if}
 {/snippet}
 
 <div class="fw p-{preset}" class:dark use:colors={settings?.appearance}>
@@ -2376,6 +2571,7 @@
             grid={gridView}
             {tile}
             row={rowHeight}
+            extensions={settings?.show_extensions ?? true}
             onactivate={() => (activeIndex = index)}
             onopen={open}
             onmenu={(x, y, onRow) => showMenu(onRow ? "item" : "area", x, y)}
@@ -2436,65 +2632,9 @@
   {/if}
 
   {#if menu}
-    <!-- svelte-ignore a11y_mouse_events_have_key_events -->
-    <div class="menu" class:scrolls={menu.kind !== "more"} role="menu" tabindex="-1" bind:this={menuElement} style:left={`${menu.x}px`} style:top={`${menu.y}px`} onmousedown={(event) => event.stopPropagation()} onkeydown={menuKey} onmouseover={(event) => { if (!(event.target as Element).closest(".shell")) { clearTimeout(hoverTimer); if (submenus.length) submenus = []; } }}>
-      {#if menu.kind === "item" || menu.kind === "area"}
-        {@const onItem = menu.kind === "item"}
-        {@const split = splitRows(menuRows(settings?.menu ?? [], menuContext(onItem)))}
-        {#if split.quick.length > 0}
-          <div class="quick" role="group" aria-label="Clipboard and file actions">
-            {#each split.quick as row (row.index)}
-              {@const label = labelOf(row.entry).replace(/…$/, "")}
-              {@const keys = details(row.entry.action).shortcut}
-              <button class="qi" role="menuitem" aria-label={label} title={keys ? `${label} (${keys})` : label} disabled={!row.enabled} style:color={row.entry.color ? hex(row.entry.color) : undefined} onclick={() => runEntry(row, onItem)}>
-                {#if row.entry.icon}<span class="glyph">{row.entry.icon}</span>{:else}<Icon name={details(row.entry.action).icon} />{/if}
-              </button>
-            {/each}
-          </div>
-          {#if split.rows.length > 0}<div class="sep"></div>{/if}
-        {/if}
-        {#each split.rows as row (row.index)}
-          {#if row.divider}<div class="sep"></div>{/if}
-          <button class="mi" role="menuitem" disabled={!row.enabled} onclick={() => runEntry(row, onItem)}>
-            {#if row.entry.icon || row.entry.color}
-              <span class="glyph" style:color={row.entry.color ? hex(row.entry.color) : undefined}>{#if row.entry.icon}{row.entry.icon}{:else}<Icon name={details(row.entry.action).icon} />{/if}</span>
-            {:else}<Icon name={details(row.entry.action).icon} />{/if}
-            <span class="label">{labelOf(row.entry)}</span><span class="sc">{details(row.entry.action).shortcut}</span>
-          </button>
-          {#if onItem && row.entry.action === "open" && focused?.directory}
-            <button class="mi" role="menuitem" disabled={!row.enabled} onclick={() => focused && open(focused, true)}><Icon name="window" /><span class="label">Open in new tab</span><span class="sc">Ctrl+Enter</span></button>
-          {/if}
-        {/each}
-        <div class="sep"></div>
-        {#if onItem}
-          {#if selectedCount === 1 && (focused?.directory || isShortcut(focused))}
-            <button class="mi" role="menuitem" onclick={() => changeIcon(focused?.id)}><Icon name="image" /><span class="label">Change icon…</span></button>
-          {/if}
-          {#if focused?.directory && selectedCount === 1}
-            <button class="mi" role="menuitem" onclick={() => togglePin(focused?.path)}><Icon name="pin" /><span class="label">{session.pins.some((pin) => pin.path === focused?.path) ? "Unpin from sidebar" : "Pin to sidebar"}</span></button>
-          {/if}
-          <button class="mi" role="menuitem" onclick={() => copyPath(focused?.path)}><Icon name="copy" /><span class="label">Copy path</span></button>
-        {:else}
-          <button class="mi" role="menuitem" onclick={() => togglePin(active?.folder?.path)}><Icon name="pin" /><span class="label">{pinned ? "Unpin this folder" : "Pin this folder"}</span></button>
-        {/if}
-        <div class="sep"></div>
-        <button class="mi" role="menuitem" onclick={() => openSettings("menu")}><Icon name="settings" /><span class="label">Edit menu…</span></button>
-        {@render shellBlock()}
-      {:else if menu.target}
-        {@const place = menu.target}
-        {@const isPinned = session.pins.some((pin) => pin.path === place.path)}
-        <button class="mi" role="menuitem" onclick={() => openPlace(place, false)}><Icon name="open" /><span class="label">Open</span></button>
-        <button class="mi" role="menuitem" onclick={() => openPlace(place, true)}><Icon name="window" /><span class="label">Open in new tab</span></button>
-        <div class="sep"></div>
-        {#if place.item}
-          <button class="mi" role="menuitem" onclick={() => customizePlace(place)}><Icon name="palette" /><span class="label">Customize folder…</span></button>
-          {#if menu.kind === "pin"}
-            <button class="mi" role="menuitem" onclick={() => changeIcon(place.item)}><Icon name="image" /><span class="label">Change icon…</span></button>
-          {/if}
-        {/if}
-        <button class="mi" role="menuitem" onclick={() => togglePin(place.path)}><Icon name="pin" /><span class="label">{isPinned ? "Unpin from sidebar" : "Pin to sidebar"}</span></button>
-        <button class="mi" role="menuitem" onclick={() => copyPath(place.path)}><Icon name="copy" /><span class="label">Copy path</span></button>
-        {@render shellBlock()}
+    <div class="menu" class:fitted={menu.kind !== "more"} class:compact={menuCompact} class:columns={!!menuRowLimit} style:--menu-rows={menuRowLimit} role="menu" tabindex="-1" bind:this={menuElement} style:left={`${menu.x}px`} style:top={`${menu.y}px`} onmousedown={(event) => event.stopPropagation()} onkeydown={menuKey}>
+      {#if menu.kind !== "more"}
+        {@render menuList(menuNodes, 0)}
       {:else}
         <button class="mi" role="menuitem" onclick={() => openSettings()}><Icon name="settings" /><span class="label">Settings</span><span class="sc">Ctrl+,</span></button>
         <div class="sep"></div>
@@ -2516,8 +2656,8 @@
     </div>
   {/if}
   {#each submenus as panel, index (index)}
-    <div class="menu scrolls shell-sub" role="menu" tabindex="-1" style:left={`${panel.x}px`} style:top={`${panel.y}px`} onmousedown={(event) => event.stopPropagation()} onkeydown={(event) => submenuKey(event, index)}>
-      {@render shellRows(panel.items, index + 1)}
+    <div class="menu fitted sub-menu" class:compact={menuCompact} class:columns={!!panel.rows} style:--menu-rows={panel.rows} role="menu" tabindex="-1" style:left={`${panel.x}px`} style:top={`${panel.y}px`} onmousedown={(event) => event.stopPropagation()} onkeydown={(event) => submenuKey(event, index)}>
+      {@render menuList(panel.items, index + 1)}
     </div>
   {/each}
   {#if folderSheet}
@@ -2538,6 +2678,16 @@
       <div class="actions">
         <button class="action" onclick={cancelRecycle}>Cancel</button>
         <button class="action primary" use:initialFocus onclick={confirmRecycle}>Move to Recycle Bin</button>
+      </div>
+    </Sheet>
+  {/if}
+  {#if takeOwnAsk}
+    <Sheet title="Take ownership?" onclose={() => (takeOwnAsk = undefined)}>
+      <p>Administrators become the owner of <strong>{takeOwnAsk.path}</strong> and everything inside it, with full control.</p>
+      <p class="muted">Windows asks for approval next, and a console shows the result. This changes the item's permissions and Undo cannot reverse it.</p>
+      <div class="actions">
+        <button class="action primary" use:initialFocus onclick={() => (takeOwnAsk = undefined)}>Cancel</button>
+        <button class="action" onclick={confirmTakeOwnership}>Take ownership</button>
       </div>
     </Sheet>
   {/if}
@@ -2626,15 +2776,13 @@
   .status { display: flex; align-items: center; gap: 12px; flex: none; height: 32px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
   .grow { flex-grow: 1; }
   .space { flex: none; white-space: nowrap; }
-  .scrolls { max-width: 420px; max-height: calc(100vh - 16px); overflow: auto; }
-  .shell-sub { z-index: 21; }
-  .shell .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .shell-blank { flex: none; width: 16px; }
-  .shell-wait { color: var(--muted); }
-  .quick { display: flex; gap: 2px; padding: 2px; }
-  .qi { display: flex; align-items: center; justify-content: center; flex: 1; height: 32px; min-width: 36px; padding: 0; border: 0; border-radius: var(--radius-s); background: transparent; color: var(--text); }
-  .qi:hover:not(:disabled), .qi:focus-visible { background: var(--hover); outline: none; }
-  .qi:disabled { opacity: .4; }
+  .fitted { max-width: 420px; }
+  .fitted.columns { display: grid; grid-auto-flow: column; grid-template-rows: repeat(var(--menu-rows), auto); grid-auto-columns: minmax(200px, 340px); column-gap: 4px; max-width: none; }
+  .compact .mi { height: 24px; }
+  .compact .sep { margin: 3px 8px; }
+  .sub-menu { z-index: 21; }
+  .menu-blank { flex: none; width: 16px; }
+  .mi.wait, .mi.info { color: var(--muted); }
   .recycle-list { margin: 16px 0 0; padding-left: 20px; line-height: 22px; }
   .recycle-list li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .error { color: var(--text); }

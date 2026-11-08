@@ -24,6 +24,9 @@ pub struct Sort {
     pub descending: bool,
 }
 
+/// `FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM`.
+const HIDDEN_ITEM: u32 = 0x2 | 0x4;
+
 /// A directory snapshot whose row numbers stay stable while enumeration proceeds.
 pub struct Directory {
     path: PathBuf,
@@ -32,6 +35,7 @@ pub struct Directory {
     count: u32,
     sort: Option<Sort>,
     sort_ms: f64,
+    hide_hidden: bool,
 }
 
 impl Directory {
@@ -59,7 +63,13 @@ impl Directory {
             count: 0,
             sort: None,
             sort_ms: 0.0,
+            hide_hidden: false,
         })
+    }
+
+    /// Leaves items marked hidden or system out of the listing; call it before enumerating.
+    pub fn hide_hidden_items(&mut self) {
+        self.hide_hidden = true;
     }
 
     pub fn path(&self) -> &Path {
@@ -126,6 +136,7 @@ impl Directory {
     }
 
     pub fn advance(&mut self, batch: u32, cancel: &Cancellation) -> Result<()> {
+        let hide = if self.hide_hidden { HIDDEN_ITEM } else { 0 };
         let Some(source) = &mut self.source else {
             return Ok(());
         };
@@ -143,6 +154,9 @@ impl Directory {
                 };
                 // On Windows the entry's metadata comes from the enumeration itself.
                 let metadata = entry.metadata()?;
+                if metadata.file_attributes() & hide != 0 {
+                    continue;
+                }
                 let directory = entry.file_type()?.is_dir();
                 insert.execute(params![
                     next,

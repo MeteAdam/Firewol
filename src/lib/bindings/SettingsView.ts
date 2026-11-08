@@ -16,4 +16,12 @@ row: number,
 /**
  * The context menu lists commands from Windows and installed apps.
  */
-shell_items: boolean, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, };
+shell_items: boolean, 
+/**
+ * Folders list items marked hidden or system.
+ */
+show_hidden: boolean, 
+/**
+ * File names show their extension.
+ */
+show_extensions: boolean, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, };

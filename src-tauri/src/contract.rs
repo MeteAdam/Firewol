@@ -145,6 +145,10 @@ pub struct SettingsView {
     pub row: u32,
     /// The context menu lists commands from Windows and installed apps.
     pub shell_items: bool,
+    /// Folders list items marked hidden or system.
+    pub show_hidden: bool,
+    /// File names show their extension.
+    pub show_extensions: bool,
     pub appearance: AppearanceView,
     pub menu: Vec<MenuEntryView>,
     pub folders: Vec<StyledFolder>,
@@ -173,6 +177,10 @@ pub struct SettingsPatch {
     pub row: Option<u32>,
     #[ts(optional)]
     pub shell_items: Option<bool>,
+    #[ts(optional)]
+    pub show_hidden: Option<bool>,
+    #[ts(optional)]
+    pub show_extensions: Option<bool>,
     #[ts(optional)]
     pub menu: Option<Vec<MenuEntryView>>,
     #[ts(optional)]
@@ -410,6 +418,47 @@ pub struct ShellMenuItem {
     pub children: Vec<ShellMenuItem>,
     pub disabled: bool,
     pub separator: bool,
+    /// The language-independent name; a class id for packaged commands, empty when unknown.
+    pub verb: String,
+    /// What a double-click runs, when that is not plain "open".
+    pub default: bool,
+    /// Where a top-level command goes in Firewol's menu.
+    #[ts(
+        type = "'apps' | 'favorite' | 'pin' | 'more' | 'terminal' | 'open_with' | 'new' | 'properties'"
+    )]
+    pub slot: String,
+}
+
+/// A folder of the Go To menu.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GoToFolder {
+    pub name: String,
+    pub path: String,
+}
+
+/// What the context menu needs from the machine; read once per window.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct MenuPlaces {
+    pub folders: Vec<GoToFolder>,
+    pub windows_terminal: bool,
+}
+
+/// The Attributes submenu of one item. Times are Unix seconds.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ItemAttributesView {
+    pub hidden: bool,
+    pub system: bool,
+    pub read_only: bool,
+    pub archive: bool,
+    #[ts(type = "number")]
+    pub created: i64,
+    #[ts(type = "number")]
+    pub modified: i64,
+    #[ts(type = "number")]
+    pub accessed: i64,
 }
 
 /// What opening items did. `navigate` is a folder the interface shows itself (a shortcut's target).

@@ -37,6 +37,9 @@ export type { DriveSpace } from "./bindings/DriveSpace";
 export type { DriveView } from "./bindings/DriveView";
 export type { ShellMenuItem } from "./bindings/ShellMenuItem";
 export type { OpenResult } from "./bindings/OpenResult";
+export type { MenuPlaces } from "./bindings/MenuPlaces";
+export type { GoToFolder } from "./bindings/GoToFolder";
+export type { ItemAttributesView } from "./bindings/ItemAttributesView";
 
 // Event names mirror the constants in contract.rs.
 export const FOLDER_PROGRESS = "folder-progress";

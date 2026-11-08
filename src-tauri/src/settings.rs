@@ -32,6 +32,8 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
             .unwrap_or(232),
         row: settings.row.filter(|row| ROWS.contains(row)).unwrap_or(32),
         shell_items: settings.shell_items.unwrap_or(true),
+        show_hidden: settings.show_hidden.unwrap_or(true),
+        show_extensions: settings.show_extensions.unwrap_or(true),
         appearance: mirror(settings.appearance)?,
         menu: mirror(&settings.menu)?,
         folders: settings
@@ -154,6 +156,12 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
         }
         if let Some(shell_items) = patch.shell_items {
             settings.shell_items = Some(shell_items);
+        }
+        if let Some(show_hidden) = patch.show_hidden {
+            settings.show_hidden = Some(show_hidden);
+        }
+        if let Some(show_extensions) = patch.show_extensions {
+            settings.show_extensions = Some(show_extensions);
         }
         if let Some(menu) = menu {
             settings.menu = menu;

@@ -215,13 +215,13 @@ pub fn default_menu() -> Vec<MenuEntry> {
         Open,
         RunAsAdministrator,
         Containing,
-        Copy,
         Cut,
+        Copy,
         Paste,
         CopyOther,
         MoveOther,
-        Rename,
         Recycle,
+        Rename,
         FolderStyle,
         Undo,
         Refresh,
@@ -229,6 +229,34 @@ pub fn default_menu() -> Vec<MenuEntry> {
     .into_iter()
     .map(MenuEntry::new)
     .collect()
+}
+
+/// A menu still in the earlier default order takes the new one; a reordered menu is left alone.
+fn adopt_default_order(menu: &mut [MenuEntry]) {
+    use MenuAction::*;
+    let earlier = [Copy, Cut, Paste, CopyOther, MoveOther, Rename, Recycle];
+    let current = [Cut, Copy, Paste, CopyOther, MoveOther, Recycle, Rename];
+    let positions: Vec<usize> = (0..menu.len())
+        .filter(|&index| earlier.contains(&menu[index].action))
+        .collect();
+    let unchanged = positions.len() == earlier.len()
+        && positions
+            .iter()
+            .zip(&earlier)
+            .all(|(&index, action)| menu[index].action == *action);
+    if !unchanged {
+        return;
+    }
+    let entry = |action: &MenuAction| {
+        menu.iter()
+            .find(|entry| entry.action == *action)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let reordered: Vec<MenuEntry> = current.iter().map(entry).collect();
+    for (index, entry) in positions.into_iter().zip(reordered) {
+        menu[index] = entry;
+    }
 }
 
 #[derive(Clone)]
@@ -250,6 +278,10 @@ pub struct Settings {
     pub row: Option<u32>,
     /// The context menu lists commands from Windows and installed apps (default on).
     pub shell_items: Option<bool>,
+    /// Folders list items marked hidden or system (default on). Firewol's own view only.
+    pub show_hidden: Option<bool>,
+    /// File names show their extension (default on). Firewol's own view only.
+    pub show_extensions: Option<bool>,
     pub appearance: Appearance,
     pub elevation: ElevationPolicy,
     pub menu: Vec<MenuEntry>,
@@ -270,6 +302,8 @@ impl Default for Settings {
             sidebar_width: None,
             row: None,
             shell_items: None,
+            show_hidden: None,
+            show_extensions: None,
             appearance: Appearance::default(),
             elevation: ElevationPolicy::default(),
             menu: default_menu(),
@@ -301,6 +335,10 @@ struct Stored {
     row: Option<u32>,
     #[serde(default)]
     shell_items: Option<bool>,
+    #[serde(default)]
+    show_hidden: Option<bool>,
+    #[serde(default)]
+    show_extensions: Option<bool>,
     #[serde(default)]
     appearance: Appearance,
     #[serde(default)]
@@ -337,6 +375,7 @@ impl Settings {
                 .menu
                 .insert(index, MenuEntry::new(MenuAction::RunAsAdministrator));
         }
+        adopt_default_order(&mut stored.menu);
         let path = |units: Vec<u16>| PathBuf::from(std::ffi::OsString::from_wide(&units));
         Ok(Self {
             version: 2,
@@ -350,6 +389,8 @@ impl Settings {
             sidebar_width: stored.sidebar_width,
             row: stored.row,
             shell_items: stored.shell_items,
+            show_hidden: stored.show_hidden,
+            show_extensions: stored.show_extensions,
             appearance: stored.appearance,
             elevation: stored.elevation,
             menu: stored.menu,
@@ -429,6 +470,8 @@ impl Settings {
             sidebar_width: self.sidebar_width,
             row: self.row,
             shell_items: self.shell_items,
+            show_hidden: self.show_hidden,
+            show_extensions: self.show_extensions,
             appearance: self.appearance,
             elevation: self.elevation.clone(),
             menu: self.menu.clone(),
@@ -449,6 +492,34 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_menu_in_the_earlier_default_order_is_reordered() {
+        use MenuAction::*;
+        let menu = |actions: Vec<MenuAction>| -> Vec<MenuEntry> {
+            actions.into_iter().map(MenuEntry::new).collect()
+        };
+        let actions = |menu: &[MenuEntry]| -> Vec<MenuAction> {
+            menu.iter().map(|entry| entry.action.clone()).collect()
+        };
+        let mut earlier = menu(vec![
+            Open, Copy, Cut, Paste, CopyOther, MoveOther, Rename, Recycle, Undo,
+        ]);
+        earlier[1].label = "Duplicate".into();
+        adopt_default_order(&mut earlier);
+        assert_eq!(
+            actions(&earlier),
+            [
+                Open, Cut, Copy, Paste, CopyOther, MoveOther, Recycle, Rename, Undo
+            ]
+        );
+        let copy = earlier.iter().find(|entry| entry.action == Copy);
+        assert_eq!(copy.map(|entry| entry.label.as_str()), Some("Duplicate"));
+        let chosen = vec![Rename, Copy, Cut, Paste, CopyOther, MoveOther, Recycle];
+        let mut reordered = menu(chosen.clone());
+        adopt_default_order(&mut reordered);
+        assert_eq!(actions(&reordered), chosen);
+    }
 
     #[test]
     fn a_pin_moves_before_another_or_to_the_end() {

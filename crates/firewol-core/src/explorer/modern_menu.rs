@@ -219,7 +219,9 @@ impl Modern {
             }) else {
                 continue;
             };
-            if let Some(row) = modern.row(command, &array, allowed, &mut next, 0) {
+            if let Some(mut row) = modern.row(command, &array, allowed, &mut next, 0) {
+                // Packaged commands have no verb; the class id names them in any language.
+                row.verb = format!("{:?}", verb.clsid).to_lowercase();
                 rows.push(row);
             }
         }
@@ -286,8 +288,8 @@ impl Modern {
             icon,
             children,
             disabled: state & ECS_DISABLED != 0,
-            separator: false,
             verb: String::new(),
+            ..Default::default()
         })
     }
 

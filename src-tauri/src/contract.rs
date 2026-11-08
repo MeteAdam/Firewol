@@ -139,6 +139,8 @@ pub struct SettingsView {
     pub tile: u32,
     /// Pixels, 180 to 360 (default 232).
     pub sidebar_width: u32,
+    /// Details row height in pixels: 24, 32 (default), 40 or 52.
+    pub row: u32,
     pub appearance: AppearanceView,
     pub menu: Vec<MenuEntryView>,
     pub folders: Vec<StyledFolder>,
@@ -162,6 +164,9 @@ pub struct SettingsPatch {
     /// 180 to 360 pixels.
     #[ts(optional)]
     pub sidebar_width: Option<u32>,
+    /// 24, 32, 40 or 52.
+    #[ts(optional)]
+    pub row: Option<u32>,
     #[ts(optional)]
     pub menu: Option<Vec<MenuEntryView>>,
     #[ts(optional)]

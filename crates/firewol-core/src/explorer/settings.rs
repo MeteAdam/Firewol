@@ -244,6 +244,8 @@ pub struct Settings {
     pub tile: Option<u32>,
     /// Sidebar width in pixels, 180 to 360.
     pub sidebar_width: Option<u32>,
+    /// Details row height in pixels: 24, 32, 40 or 52.
+    pub row: Option<u32>,
     pub appearance: Appearance,
     pub elevation: ElevationPolicy,
     pub menu: Vec<MenuEntry>,
@@ -261,6 +263,7 @@ impl Default for Settings {
             grid: None,
             tile: None,
             sidebar_width: None,
+            row: None,
             appearance: Appearance::default(),
             elevation: ElevationPolicy::default(),
             menu: default_menu(),
@@ -286,6 +289,8 @@ struct Stored {
     tile: Option<u32>,
     #[serde(default)]
     sidebar_width: Option<u32>,
+    #[serde(default)]
+    row: Option<u32>,
     #[serde(default)]
     appearance: Appearance,
     #[serde(default)]
@@ -332,6 +337,7 @@ impl Settings {
             grid: stored.grid,
             tile: stored.tile,
             sidebar_width: stored.sidebar_width,
+            row: stored.row,
             appearance: stored.appearance,
             elevation: stored.elevation,
             menu: stored.menu,
@@ -366,6 +372,7 @@ impl Settings {
             grid: self.grid,
             tile: self.tile,
             sidebar_width: self.sidebar_width,
+            row: self.row,
             appearance: self.appearance,
             elevation: self.elevation.clone(),
             menu: self.menu.clone(),

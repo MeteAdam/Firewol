@@ -63,6 +63,8 @@
   const gridView = $derived(settings?.grid ?? false);
   const tile = $derived(settings?.tile ?? 128);
   const TILES = [[160, "Large tiles", "Ctrl+Shift+2"], [128, "Medium tiles", "Ctrl+Shift+3"], [96, "Small tiles", "Ctrl+Shift+4"]] as const;
+  const rowHeight = $derived(settings?.row ?? 32);
+  const ROWS = [24, 32, 40, 52];
   const preset = $derived(presetClass(settings?.appearance.preset ?? "light_morphism"));
   const dark = $derived((preset === "light" || preset === "neu") && (settings?.appearance.follow_windows ? windowsDark.current : settings?.appearance.dark));
   let closeWarning = $state(false);
@@ -244,13 +246,17 @@
     return { destroy: () => node.removeEventListener("wheel", handler) };
   }
 
-  /** Ctrl+wheel steps through the tile sizes in grid view. */
-  function zoomTiles(event: WheelEvent) {
-    if (!event.ctrlKey || !gridView) return;
-    event.preventDefault();
-    const sizes = TILES.map(([size]) => size as number).reverse();
-    const next = sizes[Math.max(0, Math.min(sizes.length - 1, sizes.indexOf(tile) + (event.deltaY < 0 ? 1 : -1)))];
-    setView(true, next);
+  /** Ctrl+wheel steps through the row heights in details view and the tile sizes in grid view. */
+  function zoom(event: WheelEvent) {
+    if (!event.ctrlKey) return;
+    const step = (sizes: number[], now: number) => sizes[Math.max(0, Math.min(sizes.length - 1, sizes.indexOf(now) + (event.deltaY < 0 ? 1 : -1)))];
+    if (gridView) setView(true, step(TILES.map(([size]) => size as number).reverse(), tile));
+    else if (step(ROWS, rowHeight) !== rowHeight) void saveSettings({ row: step(ROWS, rowHeight) });
+  }
+
+  /** Page zoom must not work anywhere in the window, so this runs before any other handler. */
+  function blockPageZoom(event: WheelEvent) {
+    if (event.ctrlKey) event.preventDefault();
   }
 
   async function loadSettings() {
@@ -1673,6 +1679,7 @@
       }),
     ];
     for (const type of ["mousedown", "mouseup", "auxclick"] as const) window.addEventListener(type, sideButton, true);
+    window.addEventListener("wheel", blockPageZoom, { capture: true, passive: false });
     void (async () => {
       const info = await api.startup();
       await Promise.all([loadSettings(), volumes.load(), api.transferStatus().then((status) => (transfer = status))]);
@@ -1704,6 +1711,7 @@
     return () => {
       unlisten.forEach((promise) => void promise.then((stop) => stop()));
       for (const type of ["mousedown", "mouseup", "auxclick"] as const) window.removeEventListener(type, sideButton, true);
+      window.removeEventListener("wheel", blockPageZoom, true);
     };
   });
 </script>
@@ -1798,7 +1806,7 @@
           ondblclick={() => void saveSidebarWidth(232)}
         ></div>
       {/if}
-      <div class="panes" use:nonPassiveWheel={zoomTiles}>
+      <div class="panes" use:nonPassiveWheel={zoom}>
         {#each slots as slot, index (slot)}
           <div class="pane-slot">
           {#if slots.length > 1}
@@ -1824,6 +1832,7 @@
             marked={slots.length > 1 && index === activeIndex}
             grid={gridView}
             {tile}
+            row={rowHeight}
             onactivate={() => (activeIndex = index)}
             onopen={open}
             onmenu={(x, y, onRow) => showMenu(onRow ? "item" : "area", x, y)}

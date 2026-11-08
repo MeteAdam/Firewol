@@ -11,4 +11,8 @@ tile?: number,
 /**
  * 180 to 360 pixels.
  */
-sidebar_width?: number, menu?: Array<MenuEntryView>, elevation?: ElevationView, allow_all_confirmed?: boolean, migrate_appearance?: boolean, };
+sidebar_width?: number, 
+/**
+ * 24, 32, 40 or 52.
+ */
+row?: number, menu?: Array<MenuEntryView>, elevation?: ElevationView, allow_all_confirmed?: boolean, migrate_appearance?: boolean, };

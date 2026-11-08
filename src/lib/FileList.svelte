@@ -8,7 +8,6 @@
   import { PAGE, type Pane } from "./pane.svelte";
   import { tint } from "./styles";
 
-  const ROW = 32;
   const HEADER = 32;
   const OVERSCAN = 6;
   // Grid view: tiles sit in lines of `columns`, with this gap and top padding.
@@ -21,6 +20,7 @@
     marked,
     grid: tiles = false,
     tile = 128,
+    row: ROW = 32,
     onactivate,
     onopen,
     onmenu,
@@ -34,6 +34,8 @@
     /** Shows tiles of `tile` pixels instead of the details table. */
     grid?: boolean;
     tile?: number;
+    /** Details row height: 24, 32, 40 or 52 pixels. */
+    row?: number;
     onactivate: () => void;
     onopen: (entry: Entry, newWindow: boolean) => void;
     /** `onRow` is false for the empty area, which acts on the current folder. */
@@ -63,6 +65,8 @@
   const visible = $derived(Array.from({ length: Math.max(0, end - first) }, (_, index) => first + index));
   const visibleLines = $derived(Array.from({ length: Math.max(0, endLine - firstLine) }, (_, index) => firstLine + index));
   const iconSize = $derived(Math.round(tile / 2));
+  const rowIcon = $derived(ROW <= 32 ? 16 : ROW === 40 ? 24 : 32);
+  const rowFont = $derived(ROW === 24 ? 12 : ROW === 32 ? 13 : ROW === 40 ? 14 : 15);
   const tagged = $derived(pane.tagged);
   const shownName = (entry: Entry) => entry.style?.alias || entry.name;
   const activeRow = $derived(
@@ -227,7 +231,7 @@
   />
 {/snippet}
 
-<section data-pane={pane.id} class="list" class:tiles class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"}>
+<section data-pane={pane.id} class="list" class:tiles class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"} style:--row={`${ROW}px`} style:--row-font={`${rowFont}px`}>
   <div
     class="grid"
     role="grid"
@@ -318,7 +322,7 @@
           >
             {#if entry}
               <div role="gridcell" class="name">
-                {#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} />{:else}<FileIcon icon={entry.icon} />{/if}
+                {#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} size={rowIcon} />{:else}<FileIcon icon={entry.icon} size={rowIcon} />{/if}
                 {#if row === pane.renaming}
                   {@render renameInput(entry)}
                 {:else}
@@ -374,10 +378,11 @@
     grid-template-columns: minmax(0, 1fr) 150px 128px 84px;
     column-gap: 12px;
     align-items: center;
-    height: 32px;
+    height: var(--row);
     padding: 0 10px;
     border-radius: var(--radius-s);
   }
+  .row { font-size: var(--row-font); }
   .searching .cols { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) 150px 84px; }
   .tagged .cols { grid-template-columns: minmax(0, 1fr) 150px 128px 84px 168px; }
   .searching.tagged .cols { grid-template-columns: minmax(0, 1fr) minmax(0, .8fr) 150px 84px 168px; }
@@ -388,6 +393,7 @@
   .hdr {
     position: sticky;
     top: 0;
+    height: 32px;
     z-index: 1;
     font-size: 12px;
     font-weight: 600;

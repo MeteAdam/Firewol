@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::contract::{ElevationView, FolderStyleView, SettingsPatch, SettingsView, StyledFolder};
 
 pub const TILES: [u32; 3] = [96, 128, 160];
+pub const ROWS: [u32; 4] = [24, 32, 40, 52];
 pub const SIDEBAR_WIDTH: std::ops::RangeInclusive<u32> = 180..=360;
 
 fn mirror<T: Serialize, U: DeserializeOwned>(value: T) -> Result<U> {
@@ -29,6 +30,7 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
             .sidebar_width
             .filter(|width| SIDEBAR_WIDTH.contains(width))
             .unwrap_or(232),
+        row: settings.row.filter(|row| ROWS.contains(row)).unwrap_or(32),
         appearance: mirror(settings.appearance)?,
         menu: mirror(&settings.menu)?,
         folders: settings
@@ -88,6 +90,10 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
         "Grid tiles are 96, 128 or 160 pixels"
     );
     ensure!(
+        patch.row.is_none_or(|row| ROWS.contains(&row)),
+        "Details rows are 24, 32, 40 or 52 pixels high"
+    );
+    ensure!(
         patch
             .sidebar_width
             .is_none_or(|width| SIDEBAR_WIDTH.contains(&width)),
@@ -141,6 +147,9 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
         }
         if let Some(width) = patch.sidebar_width {
             settings.sidebar_width = Some(width);
+        }
+        if let Some(row) = patch.row {
+            settings.row = Some(row);
         }
         if let Some(menu) = menu {
             settings.menu = menu;
@@ -199,6 +208,25 @@ mod tests {
             },
         )?;
         assert_eq!(wide.sidebar_width, 300);
+        let tall = update(
+            &session,
+            SettingsPatch {
+                row: Some(52),
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(tall.row, 52);
+        assert_eq!(Settings::load(fixture.path())?.row, Some(52));
+        assert!(
+            update(
+                &session,
+                SettingsPatch {
+                    row: Some(33),
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        );
         assert!(
             update(
                 &session,

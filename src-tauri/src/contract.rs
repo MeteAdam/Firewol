@@ -143,6 +143,8 @@ pub struct SettingsView {
     pub sidebar_width: u32,
     /// Details row height in pixels: 24, 32 (default), 40 or 52.
     pub row: u32,
+    /// The context menu lists commands from Windows and installed apps.
+    pub shell_items: bool,
     pub appearance: AppearanceView,
     pub menu: Vec<MenuEntryView>,
     pub folders: Vec<StyledFolder>,
@@ -169,6 +171,8 @@ pub struct SettingsPatch {
     /// 24, 32, 40 or 52.
     #[ts(optional)]
     pub row: Option<u32>,
+    #[ts(optional)]
+    pub shell_items: Option<bool>,
     #[ts(optional)]
     pub menu: Option<Vec<MenuEntryView>>,
     #[ts(optional)]
@@ -393,6 +397,19 @@ pub struct Pin {
     pub item: Option<ItemRef>,
     /// Shell cache key when the folder has its own Windows icon.
     pub icon: Option<String>,
+}
+
+/// One command of the Windows context menu. `id` is valid until the menu closes.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ShellMenuItem {
+    pub id: u32,
+    pub label: String,
+    /// `menu:` icon key; extension icons that draw themselves have none.
+    pub icon: Option<String>,
+    pub children: Vec<ShellMenuItem>,
+    pub disabled: bool,
+    pub separator: bool,
 }
 
 /// A drive in the sidebar's This PC section.

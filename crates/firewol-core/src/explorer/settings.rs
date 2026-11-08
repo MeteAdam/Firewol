@@ -248,6 +248,8 @@ pub struct Settings {
     pub sidebar_width: Option<u32>,
     /// Details row height in pixels: 24, 32, 40 or 52.
     pub row: Option<u32>,
+    /// The context menu lists commands from Windows and installed apps (default on).
+    pub shell_items: Option<bool>,
     pub appearance: Appearance,
     pub elevation: ElevationPolicy,
     pub menu: Vec<MenuEntry>,
@@ -267,6 +269,7 @@ impl Default for Settings {
             tile: None,
             sidebar_width: None,
             row: None,
+            shell_items: None,
             appearance: Appearance::default(),
             elevation: ElevationPolicy::default(),
             menu: default_menu(),
@@ -296,6 +299,8 @@ struct Stored {
     sidebar_width: Option<u32>,
     #[serde(default)]
     row: Option<u32>,
+    #[serde(default)]
+    shell_items: Option<bool>,
     #[serde(default)]
     appearance: Appearance,
     #[serde(default)]
@@ -344,6 +349,7 @@ impl Settings {
             tile: stored.tile,
             sidebar_width: stored.sidebar_width,
             row: stored.row,
+            shell_items: stored.shell_items,
             appearance: stored.appearance,
             elevation: stored.elevation,
             menu: stored.menu,
@@ -404,6 +410,7 @@ impl Settings {
             tile: self.tile,
             sidebar_width: self.sidebar_width,
             row: self.row,
+            shell_items: self.shell_items,
             appearance: self.appearance,
             elevation: self.elevation.clone(),
             menu: self.menu.clone(),

@@ -210,7 +210,7 @@
           <dt>License</dt><dd>MIT</dd>
         </dl>
       {:else if section === "menu"}
-        <MenuEditor menu={settings.menu} {onsave} />
+        <MenuEditor menu={settings.menu} shellItems={settings.shell_items} {onsave} />
       {:else if section === "admin"}
         <AdminSettings elevation={settings.elevation} {onsave} />
       {/if}

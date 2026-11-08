@@ -30,7 +30,9 @@
     type VolumeState,
     type DriveSpace,
     type DriveView,
+    type ShellMenuItem,
   } from "./lib/contract";
+  import FileIcon from "./lib/FileIcon.svelte";
   import FileList from "./lib/FileList.svelte";
   import FolderIcon from "./lib/FolderIcon.svelte";
   import FolderStyleSheet from "./lib/FolderStyleSheet.svelte";
@@ -83,6 +85,13 @@
   type Place = { path: string; item: ItemRef | null; name: string };
   type MenuKind = "item" | "area" | "more" | "pin" | "drive";
   let menu = $state<{ kind: MenuKind; x: number; y: number; target?: Place }>();
+  /** Windows' commands for the open menu: arriving, listed, or absent (off or too slow). */
+  let shellMenu = $state.raw<ShellMenuItem[] | "loading" | null>(null);
+  let submenus = $state.raw<{ items: ShellMenuItem[]; x: number; y: number; row: HTMLElement }[]>([]);
+  let shellRequest = 0;
+  let shellLive = false;
+  let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+  const SHELL_WAIT_MS = 1500;
   let toast = $state<{ message: string; undo: boolean; error: boolean }>();
   /** The running transfer, or the last result until dismissed; sent by the core every 250 ms. */
   let transfer = $state.raw<TransferStatus | null>(null);
@@ -746,12 +755,126 @@
   async function showMenu(kind: MenuKind, x: number, y: number, target?: Place) {
     if (!menu) menuReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     menu = { kind, x, y, target };
+    loadShellMenu(kind, target);
     await tick();
     if (!menuElement || !menu) return;
     const box = menuElement.getBoundingClientRect();
     menu.x = Math.max(8, Math.min(x, window.innerWidth - box.width - 8));
     menu.y = Math.max(8, Math.min(y, window.innerHeight - box.height - 8));
     menuItems()[0]?.focus();
+  }
+
+  /** Keeps Firewol's rows instant: Windows' commands join the menu when they are ready. */
+  function loadShellMenu(kind: MenuKind, target?: Place) {
+    const request = ++shellRequest;
+    shellMenu = null;
+    submenus = [];
+    if (kind === "more" || settings?.shell_items === false) return;
+    const folder = active?.folder?.item;
+    const items = kind === "item" ? active?.selectedRefs() ?? []
+      : kind === "area" ? (folder ? [folder] : [])
+      : target?.item ? [target.item] : [];
+    if (items.length === 0 || items.length > MAX_ITEMS) return;
+    shellMenu = "loading";
+    shellLive = true;
+    const late = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Timed out")), SHELL_WAIT_MS));
+    void Promise.race([api.shellMenuOpen(items, kind === "area"), late]).then(
+      (list) => { if (request === shellRequest) { shellMenu = list; void fitMenu(); } },
+      () => { if (request === shellRequest) shellMenu = null; },
+    );
+  }
+
+  /** The Windows rows make the menu taller, so it may need to move up. */
+  async function fitMenu() {
+    await tick();
+    if (!menuElement || !menu) return;
+    menu.y = Math.max(8, Math.min(menu.y, window.innerHeight - menuElement.getBoundingClientRect().height - 8));
+  }
+
+  function closeShellMenu() {
+    shellRequest++;
+    clearTimeout(hoverTimer);
+    shellMenu = null;
+    submenus = [];
+    if (shellLive) {
+      shellLive = false;
+      void api.shellMenuClose();
+    }
+  }
+
+  $effect(() => {
+    if (!menu) untrack(closeShellMenu);
+  });
+
+  /** Both end the Windows menu in the core, so the interface must not close it again. */
+  function leaveMenu() {
+    shellLive = false;
+    menu = undefined;
+  }
+
+  function runShell(item: ShellMenuItem, level: number, event: MouseEvent) {
+    if (item.children.length > 0) {
+      void openSubmenu(event.currentTarget as HTMLElement, item, level, true);
+      return;
+    }
+    const scale = window.devicePixelRatio;
+    const [x, y] = [Math.round(event.screenX * scale), Math.round(event.screenY * scale)];
+    leaveMenu();
+    api.shellMenuInvoke(item.id, x, y).catch((reason) => notify(String(reason), { error: true }));
+  }
+
+  function showNativeMenu() {
+    leaveMenu();
+    api.shellMenuNative().catch((reason) => notify(String(reason), { error: true }));
+  }
+
+  async function openSubmenu(row: HTMLElement, item: ShellMenuItem, level: number, focus: boolean) {
+    clearTimeout(hoverTimer);
+    const panelAt = () => document.querySelectorAll<HTMLElement>(".shell-sub")[level];
+    const focusFirst = () => panelAt()?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    if (submenus[level]?.row === row) {
+      if (focus) focusFirst();
+      return;
+    }
+    const box = row.getBoundingClientRect();
+    submenus = [...submenus.slice(0, level), { items: item.children, x: box.right - 4, y: box.top - 7, row }];
+    await tick();
+    const panel = panelAt();
+    if (!panel || submenus[level]?.row !== row) return;
+    const size = panel.getBoundingClientRect();
+    const x = box.right - 4 + size.width > window.innerWidth - 8 ? Math.max(8, box.left - size.width + 4) : box.right - 4;
+    const y = Math.max(8, Math.min(box.top - 7, window.innerHeight - size.height - 8));
+    submenus = submenus.map((entry, index) => (index === level ? { ...entry, x, y } : entry));
+    if (focus) {
+      await tick();
+      focusFirst();
+    }
+  }
+
+  function shellHover(row: HTMLElement, item: ShellMenuItem, level: number) {
+    clearTimeout(hoverTimer);
+    if (item.children.length > 0) hoverTimer = setTimeout(() => void openSubmenu(row, item, level, false), 120);
+    else if (submenus.length > level) submenus = submenus.slice(0, level);
+  }
+
+  function submenuKey(event: KeyboardEvent, index: number) {
+    const panel = event.currentTarget as HTMLElement;
+    const items = [...panel.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const to = (position: number) => items[(position + items.length) % items.length]?.focus();
+    if (event.key === "ArrowDown") to(at + 1);
+    else if (event.key === "ArrowUp") to(at - 1);
+    else if (event.key === "Home") to(0);
+    else if (event.key === "End") to(items.length - 1);
+    else if (event.key === "ArrowRight" && items[at]?.getAttribute("aria-haspopup")) items[at].click();
+    else if (event.key === "ArrowLeft" || event.key === "Escape") {
+      const row = submenus[index].row;
+      submenus = submenus.slice(0, index);
+      row.focus();
+    } else if (event.key === "Tab") closeMenu(true);
+    else return;
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   /** Right-click, Shift+F10 or the Menu key on a sidebar row. */
@@ -813,6 +936,8 @@
       const quick = items.filter((item) => row(item));
       const next = quick[(quick.indexOf(items[at]) + (event.key === "ArrowRight" ? 1 : -1) + quick.length) % quick.length];
       next?.focus();
+    } else if (event.key === "ArrowRight" && items[at]?.getAttribute("aria-haspopup")) {
+      items[at].click();
     } else if (event.key === "Home") to(0);
     else if (event.key === "End") to(items.length - 1);
     else if (event.key === "Escape") closeMenu(true);
@@ -1525,6 +1650,149 @@
     check("double-clicking the edge restores 232 px", true);
   }
 
+  /** The design-review corrections: mouse buttons, zoom, drag selection, sidebar and Windows menus. */
+  async function designSteps(pane: Pane, root: string, check: Check) {
+    const from = pane.folder!.path;
+    const manyPath = `${from}\\z-folder\\many`;
+    const listEl = () => document.querySelector<HTMLElement>(`[data-pane="${pane.id}"] [role="grid"]`)!;
+    const rowEl = (row: number) => document.querySelector<HTMLElement>(`[data-pane="${pane.id}"] [data-row="${row}"]`)!;
+    const middle = (element: Element) => { const box = element.getBoundingClientRect(); return { x: box.left + box.width / 2, y: box.top + box.height / 2 }; };
+    const side = (button: number) => {
+      const at = middle(listEl());
+      const init = { button, clientX: at.x, clientY: at.y, bubbles: true, cancelable: true };
+      listEl().dispatchEvent(new MouseEvent("mousedown", init));
+      const up = new MouseEvent("mouseup", init);
+      listEl().dispatchEvent(up);
+      return up;
+    };
+    await pane.open(`${from}\\z-folder`);
+    let event = side(3);
+    await waitFor(() => pane.folder?.path === from, 5000, "mouse button 3");
+    check("mouse button 3 goes back without WebView2 history", event.defaultPrevented);
+    event = side(4);
+    await waitFor(() => pane.folder?.path === `${from}\\z-folder`, 5000, "mouse button 4");
+    check("mouse button 4 goes forward", event.defaultPrevented);
+    await pane.back();
+    await waitFor(() => pane.folder?.path === from, 5000, "the source again");
+
+    const wheel = (target: Element, deltaY: number) => {
+      const scroll = new WheelEvent("wheel", { deltaY, ctrlKey: true, bubbles: true, cancelable: true });
+      target.dispatchEvent(scroll);
+      return scroll;
+    };
+    await painted();
+    let scrolled = wheel(rowEl(0), -120);
+    await waitFor(() => settings?.row === 40 && rowEl(0)?.offsetHeight === 40, 5000, "Ctrl+wheel in details");
+    check("Ctrl+wheel in details makes rows taller and never zooms", scrolled.defaultPrevented && !!rowEl(0).querySelector('[width="24"], .file-icon[style*="24px"]'), rowEl(0).outerHTML.slice(0, 200));
+    scrolled = wheel(rowEl(0), 120);
+    await waitFor(() => settings?.row === 32 && rowEl(0)?.offsetHeight === 32, 5000, "Ctrl+wheel back");
+    check("Ctrl+wheel returns to 32 px rows", (await api.getSettings()).row === 32);
+    const before = settings!.row;
+    scrolled = wheel(document.querySelector(".sidebar")!, -120);
+    await sleep(50);
+    check("Ctrl+wheel outside the list only blocks page zoom", scrolled.defaultPrevented && settings!.row === before);
+
+    const down = (target: Element, at: { x: number; y: number }, ctrlKey = false) =>
+      target.dispatchEvent(new MouseEvent("mousedown", { clientX: at.x, clientY: at.y, button: 0, ctrlKey, bubbles: true, cancelable: true }));
+    const pointer = (type: string, at: { x: number; y: number }) =>
+      window.dispatchEvent(new PointerEvent(type, { clientX: at.x, clientY: at.y, buttons: type === "pointerup" ? 0 : 1, pointerId: 1, isPrimary: true, bubbles: true, cancelable: true }));
+    const shown = (row: number, what: string) => waitFor(() => pane.complete && !!rowEl(row)?.querySelector(".nm"), 5000, what);
+    await pane.open(manyPath);
+    await shown(7, "the rows of many");
+    await painted();
+    const cell = (row: number) => middle(rowEl(row).querySelector(".dim")!);
+    down(rowEl(2).querySelector(".dim")!, cell(2));
+    pointer("pointermove", cell(5));
+    await waitFor(() => pane.selection.size === 4, 5000, "the selection box");
+    check("the box draws while dragging", !!document.querySelector(".marquee"));
+    pointer("pointerup", cell(5));
+    await tick();
+    check("dragging from a row's date selects the rows it crosses", !document.querySelector(".marquee") && [2, 3, 4, 5].every((row) => pane.isSelected(row)), `${pane.selection.size}`);
+    // Row 6 is not selected, so the press starts a box and not an item drag.
+    down(rowEl(6).querySelector(".dim")!, cell(6), true);
+    pointer("pointermove", cell(4));
+    await waitFor(() => pane.selection.size === 3 && pane.isSelected(6) && !pane.isSelected(4), 5000, "Ctrl and the box");
+    pointer("pointerup", cell(4));
+    check("Ctrl flips the rows the box crosses", pane.isSelected(2) && pane.isSelected(3) && !pane.isSelected(5));
+    down(rowEl(1).querySelector(".dim")!, cell(1));
+    pointer("pointerup", cell(1));
+    await waitFor(() => pane.selection.size === 1 && pane.isSelected(1), 5000, "a click on a row's date");
+    check("a click outside the name still selects that row", true);
+    await pane.open(from);
+    await shown(0, "the rows of the source");
+    await painted();
+    const bounds = listEl().getBoundingClientRect();
+    const empty = { x: bounds.left + bounds.width / 2, y: bounds.bottom - 24 };
+    down(listEl(), empty);
+    pointer("pointermove", middle(rowEl(0)));
+    await waitFor(() => pane.selection.size === pane.rows, 5000, "the box from empty space");
+    pointer("pointerup", middle(rowEl(0)));
+    check("the box from empty space selects upward", pane.rows === 4);
+    down(listEl(), empty);
+    pointer("pointerup", empty);
+    await tick();
+    check("a click on empty space clears the selection", pane.selection.size === 0);
+    await pane.select(0);
+    setView(true, 128);
+    await waitFor(() => !!rowEl(1)?.querySelector(".nm") && !!document.querySelector(`[data-pane="${pane.id}"] .tile`), 5000, "tiles");
+    await painted();
+    const tileBox = rowEl(0).getBoundingClientRect();
+    const gap = { x: tileBox.left - 4, y: tileBox.top + 4 };
+    down(rowEl(0).parentElement!.parentElement!, gap);
+    pointer("pointermove", middle(rowEl(1)));
+    await waitFor(() => pane.isSelected(0) && pane.isSelected(1) && pane.selection.size === 2, 5000, "the box over tiles");
+    pointer("pointerup", middle(rowEl(1)));
+    check("the box selects the tiles it crosses", true);
+    setView(false);
+    await waitFor(() => !document.querySelector(`[data-pane="${pane.id}"] .tile`), 5000, "details again");
+    await painted();
+    await pane.select(0);
+
+    const seeded = (await api.session()).pins.length;
+    const rows = () => [...document.querySelectorAll<HTMLElement>(".sidebar .pin")];
+    await waitFor(() => rows().some((item) => /\(C:\)$/.test(item.textContent?.trim() ?? "")), 5000, "the drive list");
+    check("the Windows folders are pinned and This PC lists the drives", seeded >= 6 && !!settings && document.querySelector(".side-toggle")?.textContent?.includes("This PC") === true, `${seeded} pins`);
+    const labels = () => [...document.querySelectorAll(".menu .mi .label")].map((label) => label.textContent?.trim()).join("|");
+    const pinRow = rows()[0];
+    const open = new MouseEvent("contextmenu", { clientX: 40, clientY: 40, bubbles: true, cancelable: true });
+    pinRow.dispatchEvent(open);
+    await painted();
+    check("right-clicking a pin opens Firewol's menu, not the browser's", open.defaultPrevented && menu?.kind === "pin" && labels().includes("Open in new tab") && labels().includes("Customize folder…") && labels().includes("Change icon…") && labels().includes("Unpin from sidebar") && labels().includes("Copy path"), labels());
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await tick();
+    pinRow.focus();
+    pinRow.dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true }));
+    await painted();
+    check("Shift+F10 opens the pin menu", menu?.kind === "pin");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await tick();
+    const driveRow = rows().find((item) => item.dataset.pin === "C:\\")!;
+    driveRow.dispatchEvent(new MouseEvent("contextmenu", { clientX: 40, clientY: 40, bubbles: true, cancelable: true }));
+    await painted();
+    check("a drive has its own menu", menu?.kind === "drive" && labels().includes("Pin to sidebar") && !labels().includes("Change icon…"), labels());
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await tick();
+    const stray = new MouseEvent("contextmenu", { clientX: 4, clientY: 4, bubbles: true, cancelable: true });
+    document.querySelector(".status")!.dispatchEvent(stray);
+    check("no part of the window shows the browser's menu", stray.defaultPrevented);
+
+    await pane.select((pane.pages[0] ?? []).findIndex((entry) => entry.name === "note.txt"));
+    showMenu("item", 40, 40);
+    await waitFor(() => Array.isArray(shellMenu), SHELL_WAIT_MS + 500, "the Windows commands");
+    await painted();
+    check("Windows commands join the item menu with Show more options", (shellMenu as ShellMenuItem[]).some((item) => !item.separator) && labels().endsWith("Show more options"), labels());
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await tick();
+    await saveSettings({ shell_items: false });
+    showMenu("area", 40, 40);
+    await painted();
+    check("the setting hides the Windows commands", shellMenu === null && !labels().includes("Show more options"), labels());
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await tick();
+    await saveSettings({ shell_items: true });
+    void root;
+  }
+
   async function selfTest(info: Startup) {
     const steps: { step: string; ok: boolean; detail?: string }[] = [];
     const check = (step: string, ok: boolean, detail?: string) => {
@@ -1695,6 +1963,7 @@
       await waitFor(() => tabs().length === count && shown(), 5000, "closing Settings again");
       await folderStyleSelfTest(check, active!, sourcePath);
       await layoutSteps(active!, check);
+      await designSteps(active!, parentPath(sourcePath), check);
       await acceptanceSteps(active!, parentPath(sourcePath), check);
       const sidebarBefore = sidebar;
       press("b");
@@ -1785,6 +2054,34 @@
 </script>
 
 <svelte:window onkeydown={shortcut} onmousedown={() => (menu = undefined)} />
+
+{#snippet shellRows(items: ShellMenuItem[], level: number)}
+  {#each items as item, index (index)}
+    {#if item.separator}
+      <div class="sep"></div>
+    {:else}
+      <button class="mi shell" role="menuitem" aria-haspopup={item.children.length > 0 ? "menu" : undefined} disabled={item.disabled} onclick={(event) => runShell(item, level, event)} onmouseenter={(event) => shellHover(event.currentTarget, item, level)}>
+        {#if item.icon}<FileIcon icon={item.icon} />{:else}<span class="shell-blank"></span>{/if}
+        <span class="label">{item.label}</span>
+        {#if item.children.length > 0}<Icon name="chevron" size={12} weight={2} />{/if}
+      </button>
+    {/if}
+  {/each}
+{/snippet}
+
+{#snippet shellBlock()}
+  {#if shellMenu === "loading"}
+    <div class="sep"></div>
+    <div class="mi shell-wait" aria-hidden="true"><span class="shell-blank"></span><span class="label muted">Loading Windows commands…</span></div>
+  {:else if shellMenu}
+    {#if shellMenu.some((item) => !item.separator)}
+      <div class="sep"></div>
+      {@render shellRows(shellMenu, 0)}
+    {/if}
+    <div class="sep"></div>
+    <button class="mi" role="menuitem" onclick={showNativeMenu}><Icon name="more" /><span class="label">Show more options</span></button>
+  {/if}
+{/snippet}
 
 <div class="fw p-{preset}" class:dark use:colors={settings?.appearance}>
   <div class="shell">
@@ -1974,7 +2271,8 @@
   {/if}
 
   {#if menu}
-    <div class="menu" role="menu" tabindex="-1" bind:this={menuElement} style:left={`${menu.x}px`} style:top={`${menu.y}px`} onmousedown={(event) => event.stopPropagation()} onkeydown={menuKey}>
+    <!-- svelte-ignore a11y_mouse_events_have_key_events -->
+    <div class="menu" class:scrolls={menu.kind !== "more"} role="menu" tabindex="-1" bind:this={menuElement} style:left={`${menu.x}px`} style:top={`${menu.y}px`} onmousedown={(event) => event.stopPropagation()} onkeydown={menuKey} onmouseover={(event) => { if (!(event.target as Element).closest(".shell")) { clearTimeout(hoverTimer); if (submenus.length) submenus = []; } }}>
       {#if menu.kind === "item" || menu.kind === "area"}
         {@const onItem = menu.kind === "item"}
         {@const split = splitRows(menuRows(settings?.menu ?? [], menuContext(onItem)))}
@@ -2016,6 +2314,7 @@
         {/if}
         <div class="sep"></div>
         <button class="mi" role="menuitem" onclick={() => openSettings("menu")}><Icon name="settings" /><span class="label">Edit menu…</span></button>
+        {@render shellBlock()}
       {:else if menu.target}
         {@const place = menu.target}
         {@const isPinned = session.pins.some((pin) => pin.path === place.path)}
@@ -2030,6 +2329,7 @@
         {/if}
         <button class="mi" role="menuitem" onclick={() => togglePin(place.path)}><Icon name="pin" /><span class="label">{isPinned ? "Unpin from sidebar" : "Pin to sidebar"}</span></button>
         <button class="mi" role="menuitem" onclick={() => copyPath(place.path)}><Icon name="copy" /><span class="label">Copy path</span></button>
+        {@render shellBlock()}
       {:else}
         <button class="mi" role="menuitem" onclick={() => openSettings()}><Icon name="settings" /><span class="label">Settings</span><span class="sc">Ctrl+,</span></button>
         <div class="sep"></div>
@@ -2050,6 +2350,11 @@
       {/if}
     </div>
   {/if}
+  {#each submenus as panel, index (index)}
+    <div class="menu scrolls shell-sub" role="menu" tabindex="-1" style:left={`${panel.x}px`} style:top={`${panel.y}px`} onmousedown={(event) => event.stopPropagation()} onkeydown={(event) => submenuKey(event, index)}>
+      {@render shellRows(panel.items, index + 1)}
+    </div>
+  {/each}
   {#if folderSheet}
     {@const item = folderSheet.item}
     <FolderStyleSheet name={folderSheet.name} path={folderSheet.path} style={styleOf(item)} onsave={saveFolderStyle} onclose={() => (folderSheet = undefined)} onpickicon={() => api.pickCustomIcon(item)} onreseticon={() => api.resetCustomIcon(item)} />
@@ -2142,6 +2447,11 @@
   .status { display: flex; align-items: center; gap: 12px; flex: none; height: 32px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
   .grow { flex-grow: 1; }
   .space { flex: none; white-space: nowrap; }
+  .scrolls { max-width: 420px; max-height: calc(100vh - 16px); overflow: auto; }
+  .shell-sub { z-index: 21; }
+  .shell .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .shell-blank { flex: none; width: 16px; }
+  .shell-wait { color: var(--muted); }
   .quick { display: flex; gap: 2px; padding: 2px; }
   .qi { display: flex; align-items: center; justify-content: center; flex: 1; height: 32px; min-width: 36px; padding: 0; border: 0; border-radius: var(--radius-s); background: transparent; color: var(--text); }
   .qi:hover:not(:disabled), .qi:focus-visible { background: var(--hover); outline: none; }

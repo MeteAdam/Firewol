@@ -20,6 +20,7 @@ import type {
   Subfolders,
   DriveSpace,
   DriveView,
+  ShellMenuItem,
 } from "./contract";
 
 export const api = {
@@ -66,6 +67,11 @@ export const api = {
   /** Windows' Change Icon dialog; false means it was cancelled. */
   pickCustomIcon: (item: ItemRef) => invoke<boolean>("pick_custom_icon", { item }),
   resetCustomIcon: (item: ItemRef) => invoke<void>("reset_custom_icon", { item }),
+  /** `background` opens the menu of the empty area of the folder `items[0]`. */
+  shellMenuOpen: (items: ItemRef[], background: boolean) => invoke<ShellMenuItem[]>("shell_menu_open", { items, background }),
+  shellMenuInvoke: (id: number, x: number, y: number) => invoke<void>("shell_menu_invoke", { id, x, y }),
+  shellMenuNative: () => invoke<void>("shell_menu_native"),
+  shellMenuClose: () => invoke<void>("shell_menu_close"),
   togglePin: (path: string) => invoke<SessionState>("toggle_pin", { path }),
   openWindow: (path: string, split: boolean) => invoke<string>("open_window", { path, split }),
   /** `name` saves `<label>-<name>.json` for a later stage of a report run. */

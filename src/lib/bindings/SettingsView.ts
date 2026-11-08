@@ -12,4 +12,8 @@ sidebar_width: number,
 /**
  * Details row height in pixels: 24, 32 (default), 40 or 52.
  */
-row: number, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, };
+row: number, 
+/**
+ * The context menu lists commands from Windows and installed apps.
+ */
+shell_items: boolean, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, };

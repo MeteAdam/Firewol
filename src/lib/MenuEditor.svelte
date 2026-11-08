@@ -3,7 +3,7 @@
   import { defaultMenu, details, entryKey, isCustom, labelOf } from "./menu";
   import Icon from "./Icon.svelte";
 
-  let { menu, onsave }: { menu: MenuEntryView[]; onsave: (patch: SettingsPatch) => Promise<void> } = $props();
+  let { menu, shellItems, onsave }: { menu: MenuEntryView[]; shellItems: boolean; onsave: (patch: SettingsPatch) => Promise<void> } = $props();
   let error = $state("");
   let confirmReset = $state(false);
   let label = $state("");
@@ -30,6 +30,12 @@
       error = String(reason);
       return false;
     }
+  }
+
+  async function toggleShellItems(enabled: boolean) {
+    error = "";
+    try { await onsave({ shell_items: enabled }); }
+    catch (reason) { error = String(reason); }
   }
 
   function move(index: number, by: number) {
@@ -83,6 +89,9 @@
 </ol>
 {#if error}<p class="error" role="alert">{error}</p>{/if}
 
+<h3>Windows app commands</h3>
+<label class="check shell"><input type="checkbox" checked={shellItems} aria-label="Show Windows app commands" onchange={(event) => toggleShellItems(event.currentTarget.checked)} /> Show commands from Windows and installed apps, such as VS Code or WinRAR</label>
+
 <h3>Add a custom action</h3>
 <p class="muted">Runs a program with the clicked item's path as its argument (the open folder when you click empty space).</p>
 <form class="add" onsubmit={add}>
@@ -125,6 +134,7 @@
   .text { height: 34px; padding: 0 10px; border: var(--border-w) solid var(--border); border-radius: var(--radius-s); background: var(--field); font-size: 13px; }
   .text.grow { flex: 1; min-width: 240px; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
   .check { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .shell { margin-top: 8px; }
   .reset { margin-top: 24px; }
   .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; max-width: 760px; padding: 12px 14px; border: var(--border-w) solid var(--border); border-radius: var(--radius-s); background: var(--surface-2); }
   .confirm span { flex: 1; min-width: 240px; }

@@ -123,7 +123,10 @@ impl Icons {
 
 /// The Shell parses the plain form of a path; the `\\?\` form yields no item for some types.
 pub fn path_key(path: &Path) -> String {
-    format!("path:{}", PathBuf::from(super::display_path(path)).display())
+    format!(
+        "path:{}",
+        PathBuf::from(super::display_path(path)).display()
+    )
 }
 
 fn has_own_icon(extension: &str) -> bool {
@@ -186,7 +189,11 @@ fn allowed(key: &str) -> bool {
     let Some(path) = key.strip_prefix("path:").map(Path::new) else {
         return true;
     };
-    let extension = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+    let extension = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => folder_key(path, metadata.file_attributes()).is_some(),
         Ok(_) => has_own_icon(&extension),
@@ -219,7 +226,7 @@ impl Drop for Icon {
     }
 }
 
-fn bitmap_info(size: u32) -> BITMAPINFO {
+pub(super) fn bitmap_info(size: u32) -> BITMAPINFO {
     BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -474,12 +481,18 @@ mod tests {
         assert_eq!(folder_key(fixture.path(), read_only), None);
         std::fs::write(fixture.path().join("desktop.ini"), "[.ShellClassInfo]")?;
         assert_eq!(folder_key(fixture.path(), directory), None);
-        assert_eq!(folder_key(fixture.path(), read_only), Some(path_key(fixture.path())));
+        assert_eq!(
+            folder_key(fixture.path(), read_only),
+            Some(path_key(fixture.path()))
+        );
         assert_eq!(
             folder_key(fixture.path(), directory | FILE_ATTRIBUTE_SYSTEM.0),
             Some(path_key(fixture.path()))
         );
-        assert_eq!(folder_key(Path::new("C:\\"), directory).as_deref(), Some("path:C:\\"));
+        assert_eq!(
+            folder_key(Path::new("C:\\"), directory).as_deref(),
+            Some("path:C:\\")
+        );
         assert_eq!(
             path_key(Path::new(r"\\?\C:\Tools\app.exe")),
             r"path:C:\Tools\app.exe"

@@ -68,7 +68,10 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 fn from_wide(units: &[u16]) -> String {
-    let end = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
+    let end = units
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(units.len());
     String::from_utf16_lossy(&units[..end])
 }
 

@@ -6,9 +6,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Storage::FileSystem::{
-    GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
-};
+use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::WindowsProgramming::{DRIVE_CDROM, DRIVE_REMOTE, DRIVE_REMOVABLE};
@@ -18,8 +16,8 @@ use windows::Win32::UI::Shell::{
     SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG,
-    RegisterClassW, WINDOW_EX_STYLE, WM_DEVICECHANGE, WNDCLASSW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, RegisterClassW,
+    WINDOW_EX_STYLE, WM_DEVICECHANGE, WNDCLASSW, WS_POPUP,
 };
 use windows_core::{GUID, HSTRING, PCWSTR, w};
 
@@ -39,7 +37,10 @@ pub struct Drive {
 }
 
 fn from_wide(units: &[u16]) -> String {
-    let end = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
+    let end = units
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(units.len());
     String::from_utf16_lossy(&units[..end])
 }
 
@@ -97,8 +98,9 @@ pub fn drives() -> Vec<Drive> {
                     }
                     match label.filter(|label| !label.is_empty()) {
                         Some(label) => format!("{label} ({letter}:)"),
-                        None => shell_name(&root)
-                            .unwrap_or_else(|| format!("Local Disk ({letter}:)")),
+                        None => {
+                            shell_name(&root).unwrap_or_else(|| format!("Local Disk ({letter}:)"))
+                        }
                     }
                 }
             };
@@ -168,7 +170,6 @@ pub fn watch_devices(changed: impl Fn() + Send + Sync + 'static) -> Result<()> {
             };
             let class = w!("FirewolDeviceWatch");
             RegisterClassW(&WNDCLASSW {
-                style: CS_HREDRAW,
                 lpfnWndProc: Some(device_window),
                 hInstance: module.into(),
                 lpszClassName: class,
@@ -210,7 +211,7 @@ mod tests {
         let drives = drives();
         let system = drives
             .iter()
-            .find(|drive| drive.path == PathBuf::from("C:\\"))
+            .find(|drive| drive.path == std::path::Path::new("C:\\"))
             .expect("C: is listed");
         assert!(system.name.ends_with("(C:)"), "{}", system.name);
     }

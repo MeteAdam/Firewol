@@ -477,7 +477,7 @@
     </div>
     {/if}
     {#if box}
-      <div class="box" aria-hidden="true" style:left={`${box.left}px`} style:top={`${box.top}px`} style:width={`${box.width}px`} style:height={`${box.height}px`}></div>
+      <div class="marquee" aria-hidden="true" style:left={`${box.left}px`} style:top={`${box.top}px`} style:width={`${box.width}px`} style:height={`${box.height}px`}></div>
     {/if}
     {#if rows === 0}
       <p class="empty">
@@ -577,7 +577,7 @@
   .tile .placeholder { width: 60%; }
   :global(.drop-target).row, :global(.drop-target).tile { outline: 2px dashed var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .list:global(.drop-target) { outline: 2px dashed var(--accent); outline-offset: -4px; }
-  .box { position: absolute; z-index: 2; border: 1px solid var(--accent); border-radius: 2px; background: color-mix(in srgb, var(--accent) 18%, transparent); pointer-events: none; }
+  .marquee { position: absolute; z-index: 2; border: 1px solid var(--accent); border-radius: 2px; background: color-mix(in srgb, var(--accent) 18%, transparent); pointer-events: none; }
   .placeholder { height: 8px; width: 40%; border-radius: 4px; background: var(--sep); }
   .empty { position: absolute; inset: 56px 24px auto 24px; margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

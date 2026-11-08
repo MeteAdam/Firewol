@@ -31,6 +31,7 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
             .filter(|width| SIDEBAR_WIDTH.contains(width))
             .unwrap_or(232),
         row: settings.row.filter(|row| ROWS.contains(row)).unwrap_or(32),
+        shell_items: settings.shell_items.unwrap_or(true),
         appearance: mirror(settings.appearance)?,
         menu: mirror(&settings.menu)?,
         folders: settings
@@ -150,6 +151,9 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
         }
         if let Some(row) = patch.row {
             settings.row = Some(row);
+        }
+        if let Some(shell_items) = patch.shell_items {
+            settings.shell_items = Some(shell_items);
         }
         if let Some(menu) = menu {
             settings.menu = menu;

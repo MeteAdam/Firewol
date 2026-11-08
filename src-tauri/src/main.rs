@@ -16,13 +16,15 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use contract::{
-    ClipboardState, DriveSpace, DriveView, FolderStyleView, IndexState, ItemRef, Navigation, OperationDone,
-    Page, Pin, SearchCount, SearchRequest, Segment, SessionState, SettingsView, Startup, Step,
-    Subfolders, TransferStatus, VolumeState,
+    ClipboardState, DriveSpace, DriveView, FolderStyleView, IndexState, ItemRef, Navigation,
+    OperationDone, Page, Pin, SearchCount, SearchRequest, Segment, SessionState, SettingsView,
+    ShellMenuItem, Startup, Step, Subfolders, TransferStatus, VolumeState,
 };
 use firewol_core::explorer::icons::{self, Icons};
+use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
 use firewol_core::explorer::{
-    ItemId, MenuAction, Operation, Session, actions, custom_icon, data_dir, home,
+    ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, Session, actions, custom_icon, data_dir,
+    display_path, home,
 };
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::{
@@ -47,6 +49,7 @@ const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreen
 struct App {
     folders: Arc<Folders>,
     icons: Arc<Icons>,
+    menus: Arc<ShellMenus>,
     windows: Mutex<HashMap<String, WindowRequest>>,
     next_window: AtomicU32,
     window_count: AtomicU32,
@@ -625,6 +628,89 @@ async fn reset_custom_icon(
     .await
 }
 
+fn shell_view(item: ShellItem) -> ShellMenuItem {
+    ShellMenuItem {
+        id: item.id,
+        label: item.label,
+        icon: item.icon,
+        children: item.children.into_iter().map(shell_view).collect(),
+        disabled: item.disabled,
+        separator: item.separator,
+    }
+}
+
+/// Opens the Windows menu of `items`, or of the empty area of the folder `items[0]`.
+#[tauri::command]
+async fn shell_menu_open(
+    window: Window,
+    state: State<'_, App>,
+    items: Vec<ItemRef>,
+    background: bool,
+) -> Result<Vec<ShellMenuItem>, String> {
+    let owner = owner(&window)?;
+    let label = window.label().to_owned();
+    let menus = state.menus.clone();
+    let items = items
+        .iter()
+        .map(item_id)
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(message)?;
+    blocking(move || {
+        anyhow::ensure!(
+            (1..=MAX_TRANSFER_ITEMS).contains(&items.len()),
+            "Select between 1 and {MAX_TRANSFER_ITEMS} items"
+        );
+        let mut paths = Vec::with_capacity(items.len());
+        for item in &items {
+            drop(item.verify()?);
+            paths.push(PathBuf::from(display_path(item.path())));
+        }
+        let target = if background {
+            Target::Background(paths.swap_remove(0))
+        } else {
+            Target::Items(paths)
+        };
+        Ok(menus
+            .open(&label, owner, target)?
+            .into_iter()
+            .map(shell_view)
+            .collect())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn shell_menu_invoke(
+    window: Window,
+    state: State<'_, App>,
+    id: u32,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    let label = window.label().to_owned();
+    let menus = state.menus.clone();
+    blocking(move || menus.invoke(&label, id, (x, y))).await
+}
+
+/// "Show more options": the same menu, drawn by Windows at the cursor.
+#[tauri::command]
+async fn shell_menu_native(window: Window, state: State<'_, App>) -> Result<(), String> {
+    let label = window.label().to_owned();
+    let menus = state.menus.clone();
+    blocking(move || menus.native(&label)).await
+}
+
+#[tauri::command]
+async fn shell_menu_close(window: Window, state: State<'_, App>) -> Result<(), String> {
+    let label = window.label().to_owned();
+    let menus = state.menus.clone();
+    blocking(move || {
+        menus.close(&label);
+        Ok(())
+    })
+    .await
+}
+
 fn session_state(session: &Session) -> SessionState {
     SessionState {
         pins: session
@@ -888,13 +974,16 @@ fn main() {
     let closing = folders.clone();
     let shell_icons = Arc::new(Icons::start().expect("Start Shell icon worker"));
     let served_icons = shell_icons.clone();
+    let shell_menus = Arc::new(ShellMenus::default());
+    let served_menus = shell_menus.clone();
     tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol("icon", move |_context, request, responder| {
-            icon_protocol::respond(&served_icons, request, responder);
+            icon_protocol::respond(&served_icons, &served_menus, request, responder);
         })
         .manage(App {
             folders,
             icons: shell_icons,
+            menus: shell_menus,
             windows: Mutex::default(),
             next_window: AtomicU32::new(0),
             window_count: AtomicU32::new(1),
@@ -984,6 +1073,10 @@ fn main() {
             run_as_administrator,
             pick_custom_icon,
             reset_custom_icon,
+            shell_menu_open,
+            shell_menu_invoke,
+            shell_menu_native,
+            shell_menu_close,
             open_window,
             save_report,
             await_signal

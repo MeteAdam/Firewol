@@ -35,6 +35,7 @@ export type { VolumeState } from "./bindings/VolumeState";
 export type { Subfolders } from "./bindings/Subfolders";
 export type { DriveSpace } from "./bindings/DriveSpace";
 export type { DriveView } from "./bindings/DriveView";
+export type { ShellMenuItem } from "./bindings/ShellMenuItem";
 
 // Event names mirror the constants in contract.rs.
 export const FOLDER_PROGRESS = "folder-progress";

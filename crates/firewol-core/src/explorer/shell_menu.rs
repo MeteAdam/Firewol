@@ -31,9 +31,9 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DeleteMenu, DestroyMenu, DispatchMessageW,
-    GetCursorPos, GetMenuItemCount, GetMenuItemInfoW, GetMessageW, HMENU, KillTimer, MF_BYPOSITION,
-    MFS_DISABLED, MFS_GRAYED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_CHECKMARKS, MIIM_FTYPE, MIIM_ID,
-    MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, MENUITEMINFOW, MSG, PostMessageW, RegisterClassW,
+    GetCursorPos, GetMenuItemCount, GetMenuItemInfoW, GetMessageW, HMENU, KillTimer, MENUITEMINFOW,
+    MF_BYPOSITION, MFS_DISABLED, MFS_GRAYED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_CHECKMARKS,
+    MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, MSG, PostMessageW, RegisterClassW,
     SW_SHOWNORMAL, SetForegroundWindow, SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
     TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
     WM_MENUCHAR, WM_NULL, WM_TIMER, WNDCLASSW, WS_POPUP,
@@ -467,7 +467,10 @@ fn verb(session: &Session, id: u32) -> String {
     if found.is_err() {
         return String::new();
     }
-    let end = name.iter().position(|&unit| unit == 0).unwrap_or(name.len());
+    let end = name
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(name.len());
     String::from_utf16_lossy(&name[..end]).to_lowercase()
 }
 
@@ -738,8 +741,7 @@ mod tests {
         let fixture = tempfile::tempdir()?;
         let menus = ShellMenus::default();
         for _ in 0..3 {
-            let items =
-                menus.open("test", 0, Target::Background(fixture.path().to_owned()))?;
+            let items = menus.open("test", 0, Target::Background(fixture.path().to_owned()))?;
             assert!(items.iter().any(|item| !item.separator), "{items:?}");
         }
         menus.close("test");

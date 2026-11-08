@@ -9,6 +9,7 @@ mod places;
 mod search;
 mod session;
 mod settings;
+pub mod shell_menu;
 pub mod volume;
 mod watch;
 

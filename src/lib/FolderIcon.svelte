@@ -1,10 +1,18 @@
 <script lang="ts">
-  // A folder style's glyph replaces the folder shape, drawn in the style's colour (as in Win32).
-  let { color = "var(--folder)", glyph = "", size = 16 }: { color?: string; glyph?: string; size?: number } = $props();
+  import { devicePixelRatio } from "svelte/reactivity/window";
+  import { iconSource } from "./icons.svelte";
+
+  // A folder style's glyph comes first, drawn in the style's colour (as in Win32); then the
+  // folder's own Windows icon; the theme's folder shape is the default and the fallback.
+  let { color = "var(--folder)", glyph = "", size = 16, icon = null }: { color?: string; glyph?: string; size?: number; icon?: string | null } = $props();
+  const source = $derived(glyph ? "" : iconSource(icon, size, devicePixelRatio.current ?? 1));
+  let failed = $state("");
 </script>
 
 {#if glyph}
   <span class="folder-glyph" aria-hidden="true" style:color={color} style:width={`${size}px`} style:height={`${size}px`} style:font-size={`${Math.round(size * 0.9)}px`}>{glyph}</span>
+{:else if source && failed !== source}
+  <img class="folder-image" src={source} width={size} height={size} alt="" decoding="async" draggable="false" onerror={() => (failed = source)} />
 {:else}
   <svg class="folder-icon" viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" style:color={color}>
     <path
@@ -17,5 +25,6 @@
 
 <style>
   .folder-icon { flex: none; }
+  .folder-image { display: block; flex: none; object-fit: contain; }
   .folder-glyph { display: inline-flex; align-items: center; justify-content: center; flex: none; overflow: hidden; line-height: 1; font-family: "Segoe UI Symbol", "Segoe UI Emoji", var(--font, "Segoe UI"), sans-serif; white-space: nowrap; }
 </style>

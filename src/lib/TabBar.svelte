@@ -56,7 +56,7 @@
             if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); onselect(slot.tabs[(index + (event.key === "ArrowLeft" ? -1 : 1) + slot.tabs.length) % slot.tabs.length]); }
             else if (event.key === "Enter" || event.key === " ") onselect(tab);
           }}>
-          {#if tab.kind === "folder"}{@const style = styleOf(tab)}<FolderIcon color={tint(style)} glyph={style?.icon} />{:else}<Icon name="settings" />{/if}<span>{label(tab)}</span>
+          {#if tab.kind === "folder"}{@const style = styleOf(tab)}<FolderIcon color={tint(style)} glyph={style?.icon} icon={tab.pane.icon} />{:else}<Icon name="settings" />{/if}<span>{label(tab)}</span>
         </button>
         <button class="ib sm close" title={`Close ${label(tab)}`} aria-label={`Close ${label(tab)}`} onclick={() => onclose(tab)}><Icon name="close" size={12} /></button>
       </div>

@@ -47,6 +47,8 @@ export class Pane {
   folder = $state.raw<FolderView>();
   /** The open folder's identity; kept while the tab is suspended so its alias still shows. */
   identity = $state.raw<ItemRef | null>(null);
+  /** The open folder's own Windows icon; kept while the tab is suspended, like its identity. */
+  icon = $state<string | null>(null);
   count = $state(0);
   complete = $state(false);
   pages = $state.raw<Record<number, Entry[]>>({});
@@ -223,6 +225,7 @@ export class Pane {
     this.#pending.clear();
     this.folder = view;
     this.identity = view.item;
+    this.icon = view.icon;
     this.#tagged = tagged(view.page.items);
     this.path = view.path;
     this.label = view.segments.at(-1)?.name ?? view.path;

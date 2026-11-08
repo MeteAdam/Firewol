@@ -12,6 +12,7 @@
     OPERATION_DONE,
     SESSION_CHANGED,
     SETTINGS_CHANGED,
+    ICON_CHANGED,
     type SettingsView,
     type SettingsPatch,
     type AppearanceView,
@@ -31,6 +32,7 @@
   import FolderIcon from "./lib/FolderIcon.svelte";
   import FolderStyleSheet from "./lib/FolderStyleSheet.svelte";
   import { formatCount, formatSize, useLocale } from "./lib/format";
+  import { iconChanged } from "./lib/icons.svelte";
   import Icon from "./lib/Icon.svelte";
   import { NO_FILTERS, Pane, SELECT_ALL_LIMIT } from "./lib/pane.svelte";
   import { PRESETS, colors, hex, presetClass } from "./lib/appearance";
@@ -535,6 +537,8 @@
     void start(api.undo());
   }
 
+  const isShortcut = (entry?: Entry) => !!entry && !entry.directory && /\.lnk$/i.test(entry.name);
+
   function menuContext(onItem: boolean): MenuContext {
     return {
       item: onItem ? focused : undefined,
@@ -602,6 +606,21 @@
 
   async function saveOrThrow(patch: SettingsPatch) {
     settings = withPending(await api.updateSettings(patch));
+  }
+
+  /** Windows' Change Icon dialog for one folder or shortcut; the result reaches every window. */
+  async function changeIcon(item: ItemRef | null | undefined) {
+    menu = undefined;
+    if (!item) return;
+    try { await api.pickCustomIcon(item); }
+    catch (reason) { notify(String(reason), { error: true }); }
+  }
+
+  /** A changed icon can add or remove a folder's key, which the listing reads from disk. */
+  function windowsIconChanged(key: string) {
+    iconChanged(key);
+    for (const pane of panes) void pane.refresh();
+    void api.session().then((state) => (session = state));
   }
 
   async function togglePin(path: string | undefined) {
@@ -1668,6 +1687,7 @@
       listen<OperationDone>(OPERATION_DONE, (event) => finished(event.payload)),
       listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
       listen<SettingsView>(SETTINGS_CHANGED, (event) => (settings = withPending(event.payload))),
+      listen<string>(ICON_CHANGED, (event) => windowsIconChanged(event.payload)),
       appWindow.onCloseRequested(async (event) => {
         // Not prevented: the API then destroys the window, which needs `core:window:allow-destroy`.
         if (allowClose) return;
@@ -1744,6 +1764,7 @@
       {:else}
         <Breadcrumb
           segments={active?.folder?.segments ?? []}
+          icon={active?.icon}
           onopen={(path) => void active?.open(path)}
           onedit={editAddress}
           onrefresh={() => void active?.refresh()}
@@ -1783,7 +1804,7 @@
           {#each session.pins as pin (pin.path)}
             {@const style = styleOf(pin.item)}
             <button class="pin" data-pin={pin.path} class:on={pin.path === active?.folder?.path} title={pin.path} onclick={() => active?.open(pin.path)}>
-              <FolderIcon color={tint(style)} glyph={style?.icon} /><span>{style?.alias || pin.name}</span>
+              <FolderIcon color={tint(style)} glyph={style?.icon} icon={pin.icon} /><span>{style?.alias || pin.name}</span>
             </button>
           {:else}
             <p class="muted side-empty">Pin folders you use often. They stay here until you unpin them.</p>
@@ -1923,6 +1944,9 @@
         {/each}
         <div class="sep"></div>
         {#if onItem}
+          {#if selectedCount === 1 && (focused?.directory || isShortcut(focused))}
+            <button class="mi" role="menuitem" onclick={() => changeIcon(focused?.id)}><Icon name="image" /><span class="label">Change icon…</span></button>
+          {/if}
           {#if focused?.directory && selectedCount === 1}
             <button class="mi" role="menuitem" onclick={() => togglePin(focused?.path)}><Icon name="pin" /><span class="label">{session.pins.some((pin) => pin.path === focused?.path) ? "Unpin from sidebar" : "Pin to sidebar"}</span></button>
           {/if}
@@ -1953,7 +1977,8 @@
     </div>
   {/if}
   {#if folderSheet}
-    <FolderStyleSheet name={folderSheet.name} path={folderSheet.path} style={styleOf(folderSheet.item)} onsave={saveFolderStyle} onclose={() => (folderSheet = undefined)} />
+    {@const item = folderSheet.item}
+    <FolderStyleSheet name={folderSheet.name} path={folderSheet.path} style={styleOf(item)} onsave={saveFolderStyle} onclose={() => (folderSheet = undefined)} onpickicon={() => api.pickCustomIcon(item)} onreseticon={() => api.resetCustomIcon(item)} />
   {/if}
   {#if recycleAsk}
     {@const items = recycleAsk}

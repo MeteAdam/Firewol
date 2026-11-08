@@ -3,4 +3,8 @@
 /**
  * A folder shown in the breadcrumb or the sidebar.
  */
-export type Segment = { name: string, path: string, };
+export type Segment = { name: string, path: string, 
+/**
+ * Shell cache key when the folder has its own Windows icon.
+ */
+icon: string | null, };

@@ -2,7 +2,7 @@
 
 mod contract;
 mod folders;
-mod icons;
+mod icon_protocol;
 mod settings;
 mod transfers;
 mod volumes;
@@ -17,10 +17,13 @@ use std::time::Instant;
 use anyhow::Context as _;
 use contract::{
     ClipboardState, DriveSpace, FolderStyleView, IndexState, ItemRef, Navigation, OperationDone,
-    Page, Pin, SearchCount, SearchRequest, SessionState, SettingsView, Startup, Step, Subfolders,
-    TransferStatus, VolumeState,
+    Page, Pin, SearchCount, SearchRequest, Segment, SessionState, SettingsView, Startup, Step,
+    Subfolders, TransferStatus, VolumeState,
 };
-use firewol_core::explorer::{ItemId, MenuAction, Operation, Session, actions, data_dir, home};
+use firewol_core::explorer::icons::{self, Icons};
+use firewol_core::explorer::{
+    ItemId, MenuAction, Operation, Session, actions, custom_icon, data_dir, home,
+};
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::{
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
@@ -43,6 +46,7 @@ const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreen
 
 struct App {
     folders: Arc<Folders>,
+    icons: Arc<Icons>,
     windows: Mutex<HashMap<String, WindowRequest>>,
     next_window: AtomicU32,
     window_count: AtomicU32,
@@ -387,7 +391,13 @@ async fn subfolders(path: String) -> Result<Subfolders, String> {
     blocking(move || {
         let (folders, more) = firewol_core::explorer::subfolders(Path::new(&path), 256)?;
         Ok(Subfolders {
-            folders: folders.iter().map(|folder| segment(folder)).collect(),
+            folders: folders
+                .iter()
+                .map(|folder| Segment {
+                    icon: icons::folder_icon(folder),
+                    ..segment(folder)
+                })
+                .collect(),
             more,
         })
     })
@@ -553,6 +563,50 @@ async fn run_as_administrator(
     .await
 }
 
+/// Tells every window that an item's Windows icon changed, after dropping the cached images.
+fn icon_changed(app: &AppHandle, icons: &Icons, key: String) {
+    icons.forget(key.clone());
+    let _ = app.emit(contract::ICON_CHANGED, key);
+}
+
+/// Windows' Change Icon dialog for one folder or shortcut. Returns false when it was cancelled.
+#[tauri::command]
+async fn pick_custom_icon(
+    app: AppHandle,
+    window: Window,
+    state: State<'_, App>,
+    item: ItemRef,
+) -> Result<bool, String> {
+    let owner = owner(&window)?;
+    let item = item_id(&item).map_err(message)?;
+    let icons = state.icons.clone();
+    blocking(move || {
+        let chosen = custom_icon::pick(owner, &item)?;
+        let picked = chosen.is_some();
+        if let Some(key) = chosen {
+            icon_changed(&app, &icons, key);
+        }
+        Ok(picked)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn reset_custom_icon(
+    app: AppHandle,
+    state: State<'_, App>,
+    item: ItemRef,
+) -> Result<(), String> {
+    let item = item_id(&item).map_err(message)?;
+    let icons = state.icons.clone();
+    blocking(move || {
+        let key = custom_icon::reset(&item)?;
+        icon_changed(&app, &icons, key);
+        Ok(())
+    })
+    .await
+}
+
 fn session_state(session: &Session) -> SessionState {
     SessionState {
         pins: session
@@ -565,6 +619,7 @@ fn session_state(session: &Session) -> SessionState {
                     name: segment.name,
                     path: segment.path,
                     item: ItemId::at(pin.clone()).ok().as_ref().map(item_ref),
+                    icon: icons::folder_icon(pin),
                 }
             })
             .collect(),
@@ -813,13 +868,15 @@ fn main() {
     STARTED.get_or_init(Instant::now);
     let folders = Arc::new(Folders::default());
     let closing = folders.clone();
-    let icons = firewol_core::explorer::icons::Icons::start().expect("Start Shell icon worker");
+    let shell_icons = Arc::new(Icons::start().expect("Start Shell icon worker"));
+    let served_icons = shell_icons.clone();
     tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol("icon", move |_context, request, responder| {
-            icons::respond(&icons, request, responder);
+            icon_protocol::respond(&served_icons, request, responder);
         })
         .manage(App {
             folders,
+            icons: shell_icons,
             windows: Mutex::default(),
             next_window: AtomicU32::new(0),
             window_count: AtomicU32::new(1),
@@ -900,6 +957,8 @@ fn main() {
             operation_busy,
             run_menu_action,
             run_as_administrator,
+            pick_custom_icon,
+            reset_custom_icon,
             open_window,
             save_report,
             await_signal

@@ -7,8 +7,10 @@
   import FolderIcon from "./FolderIcon.svelte";
   import Icon from "./Icon.svelte";
 
-  let { segments, onopen, onedit, onrefresh, onerror }: {
+  let { segments, icon = null, onopen, onedit, onrefresh, onerror }: {
     segments: Segment[];
+    /** The open folder's own Windows icon, when it has one. */
+    icon?: string | null;
     onopen: (path: string) => void;
     onedit: () => void;
     onrefresh: () => void;
@@ -111,7 +113,7 @@
 <svelte:window onmousedown={outside} onresize={() => (drop = undefined)} />
 
 <nav class="field address" aria-label="Folder path" bind:this={nav}>
-  <span class="muted icon"><Icon name="drive" /></span>
+  <span class="muted icon">{#if icon}<FolderIcon {icon} />{:else}<Icon name="drive" />{/if}</span>
   <div class="crumbs" bind:this={crumbs}>
     {#if hidden > 0}
       <button class="crumb more" aria-label="Hidden folders" aria-haspopup="menu" aria-expanded={drop?.label === "Hidden folders"} title={segments.slice(0, hidden).map((segment) => segment.name).join(" › ")} onclick={ellipsis}>…</button>
@@ -132,7 +134,7 @@
 {#if drop}
   <div class="menu crumb-menu" role="menu" aria-label={drop.label} tabindex="-1" bind:this={list} style:left={`${drop.x}px`} style:top={`${drop.y}px`} onkeydown={listKey}>
     {#each drop.folders as folder (folder.path)}
-      <button class="mi" class:on={folder.path === drop.current} role="menuitem" title={folder.path} onclick={() => choose(folder.path)}><FolderIcon /><span class="label">{folder.name}</span></button>
+      <button class="mi" class:on={folder.path === drop.current} role="menuitem" title={folder.path} onclick={() => choose(folder.path)}><FolderIcon icon={folder.icon} /><span class="label">{folder.name}</span></button>
     {:else}
       <p class="muted empty">No folders</p>
     {/each}

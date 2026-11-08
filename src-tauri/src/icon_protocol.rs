@@ -14,6 +14,8 @@ pub fn respond(icons: &Icons, request: Request<Vec<u8>>, responder: UriSchemeRes
             }
         }
     }
+    // The file behind a `path:` key can change, so only type icons stay in WebView2's disk cache.
+    let lasting = key.starts_with("ext:");
     let reply = icons.request(key, size);
     tauri::async_runtime::spawn_blocking(move || {
         let data = reply.and_then(|reply| reply.recv_timeout(TIMEOUT).ok().flatten());
@@ -22,7 +24,7 @@ pub fn respond(icons: &Icons, request: Request<Vec<u8>>, responder: UriSchemeRes
             .header("Content-Type", "image/png")
             .header(
                 "Cache-Control",
-                if data.is_some() {
+                if data.is_some() && lasting {
                     "private, max-age=3600"
                 } else {
                     "no-store"

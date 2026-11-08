@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 use firewol_core::explorer::{
     Cancellation, Directory, Filters, FolderKey, FolderStyle, History, Item, ItemId, ItemPage,
     PAGE_SIZE, SearchIndex, SearchQuery, SearchReader, Sort, SortColumn, data_dir, display_path,
-    page,
+    icons, page,
 };
 
 use crate::contract::{
@@ -286,6 +286,7 @@ impl Folders {
         FolderView {
             id,
             item: ItemId::at(path.to_owned()).ok().as_ref().map(item_ref),
+            icon: firewol_core::explorer::icons::folder_icon(path),
             path: text(path),
             segments: segments(path),
             count,
@@ -561,7 +562,11 @@ pub fn segment(path: &Path) -> Segment {
         || path.trim_end_matches('\\').to_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
-    Segment { name, path }
+    Segment {
+        name,
+        path,
+        icon: None,
+    }
 }
 
 fn segments(path: &Path) -> Vec<Segment> {
@@ -603,7 +608,12 @@ fn entry(item: &Item, styles: &Styles) -> Entry {
         name: item.name().to_string_lossy().into_owned(),
         path: text(&item.path),
         directory: item.directory,
-        icon: (!item.directory).then(|| firewol_core::explorer::icons::key(&item.path)),
+        icon: if item.directory {
+            item.attributes
+                .and_then(|attributes| icons::folder_key(&item.path, attributes))
+        } else {
+            Some(icons::key(&item.path))
+        },
         size: item.size,
         modified: item.modified,
         hidden: item

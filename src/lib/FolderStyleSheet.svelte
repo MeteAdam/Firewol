@@ -6,7 +6,7 @@
   import Sheet from "./Sheet.svelte";
   import { GLYPHS, LIMITS, SWATCHES, splitTags } from "./styles";
 
-  let { name, path, style, onsave, onclose }: {
+  let { name, path, style, onsave, onclose, onpickicon, onreseticon }: {
     name: string;
     path: string;
     /** The saved style, if the folder has one. */
@@ -14,6 +14,9 @@
     /** Saves the style (`null` clears it); a rejection shows inline. */
     onsave: (style: FolderStyleView | null) => Promise<void>;
     onclose: () => void;
+    /** Writes the Windows icon of the folder itself; a rejection shows inline. */
+    onpickicon: () => Promise<unknown>;
+    onreseticon: () => Promise<unknown>;
   } = $props();
 
   // The sheet edits a copy; nothing is saved until Save or Clear style.
@@ -70,6 +73,12 @@
     finally { saving = false; }
   }
 
+  async function windowsIcon(change: () => Promise<unknown>) {
+    error = "";
+    try { await change(); }
+    catch (reason) { error = String(reason); }
+  }
+
   function submit(event: SubmitEvent) {
     event.preventDefault();
     error = "";
@@ -114,6 +123,15 @@
         {/each}
         <input class="text custom" aria-label="Custom icon" placeholder="Other" maxlength={LIMITS.icon} spellcheck="false" bind:value={icon} />
       </div>
+    </div>
+
+    <div class="group">
+      <span class="caption">Windows icon</span>
+      <div class="choices">
+        <button type="button" class="action" onclick={() => windowsIcon(onpickicon)}>Change…</button>
+        <button type="button" class="action" onclick={() => windowsIcon(onreseticon)}>Default</button>
+      </div>
+      <span class="hint muted">Written to the folder, so Explorer shows it too.</span>
     </div>
 
     <div class="group">

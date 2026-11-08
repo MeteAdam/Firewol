@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod custom_icon;
 mod directory;
 pub mod elevation;
 pub mod icons;

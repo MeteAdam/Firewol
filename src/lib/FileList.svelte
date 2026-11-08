@@ -279,7 +279,7 @@
                 oncontextmenu={(event) => rowMenu(event, row)}
               >
                 {#if entry}
-                  <span class="art">{#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} size={iconSize} />{:else}<FileIcon icon={entry.icon} size={iconSize} />{/if}</span>
+                  <span class="art">{#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} icon={entry.icon} size={iconSize} />{:else}<FileIcon icon={entry.icon} size={iconSize} />{/if}</span>
                   {#if row === pane.renaming}{@render renameInput(entry)}{:else}<span class="nm">{shownName(entry)}</span>{/if}
                 {:else}
                   <span class="placeholder"></span>
@@ -322,7 +322,7 @@
           >
             {#if entry}
               <div role="gridcell" class="name">
-                {#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} size={rowIcon} />{:else}<FileIcon icon={entry.icon} size={rowIcon} />{/if}
+                {#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} icon={entry.icon} size={rowIcon} />{:else}<FileIcon icon={entry.icon} size={rowIcon} />{/if}
                 {#if row === pane.renaming}
                   {@render renameInput(entry)}
                 {:else}

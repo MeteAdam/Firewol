@@ -61,6 +61,9 @@ export const api = {
   cancelTransfer: () => invoke<void>("cancel_transfer"),
   runMenuAction: (index: number, executable: string, target: ItemRef) => invoke<void>("run_menu_action", { index, executable, target }),
   runAsAdministrator: (target: ItemRef) => invoke<void>("run_as_administrator", { target }),
+  /** Windows' Change Icon dialog; false means it was cancelled. */
+  pickCustomIcon: (item: ItemRef) => invoke<boolean>("pick_custom_icon", { item }),
+  resetCustomIcon: (item: ItemRef) => invoke<void>("reset_custom_icon", { item }),
   togglePin: (path: string) => invoke<SessionState>("toggle_pin", { path }),
   openWindow: (path: string, split: boolean) => invoke<string>("open_window", { path, split }),
   /** `name` saves `<label>-<name>.json` for a later stage of a report run. */

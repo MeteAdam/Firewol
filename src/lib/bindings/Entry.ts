@@ -4,7 +4,7 @@ import type { ItemRef } from "./ItemRef";
 
 export type Entry = { name: string, path: string, directory: boolean, 
 /**
- * Shell cache key; folders keep the theme's vector icon.
+ * Shell cache key; only folders with their own Windows icon have one.
  */
 icon: string | null, 
 /**

@@ -3,4 +3,8 @@ import type { ItemRef } from "./ItemRef";
 import type { Page } from "./Page";
 import type { Segment } from "./Segment";
 
-export type FolderView = { id: number, path: string, item: ItemRef | null, segments: Array<Segment>, count: number, complete: boolean, sort_ms: number, page: Page, };
+export type FolderView = { id: number, path: string, item: ItemRef | null, 
+/**
+ * Shell cache key when the open folder has its own Windows icon.
+ */
+icon: string | null, segments: Array<Segment>, count: number, complete: boolean, sort_ms: number, page: Page, };

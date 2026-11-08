@@ -12,6 +12,7 @@ pub const TRANSFER_PROGRESS: &str = "transfer-progress";
 pub const OPERATION_DONE: &str = "operation-done";
 pub const SESSION_CHANGED: &str = "session-changed";
 pub const SETTINGS_CHANGED: &str = "settings-changed";
+pub const ICON_CHANGED: &str = "icon-changed";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "camelCase")]
@@ -183,6 +184,8 @@ pub struct SettingsPatch {
 pub struct Segment {
     pub name: String,
     pub path: String,
+    /// Shell cache key when the folder has its own Windows icon.
+    pub icon: Option<String>,
 }
 
 /// The folders a breadcrumb chevron lists: the children of the segment before it.
@@ -220,7 +223,7 @@ pub struct Entry {
     pub name: String,
     pub path: String,
     pub directory: bool,
-    /// Shell cache key; folders keep the theme's vector icon.
+    /// Shell cache key; only folders with their own Windows icon have one.
     pub icon: Option<String>,
     /// File length in bytes; `null` for folders.
     #[ts(type = "number | null")]
@@ -251,6 +254,8 @@ pub struct FolderView {
     pub id: u64,
     pub path: String,
     pub item: Option<ItemRef>,
+    /// Shell cache key when the open folder has its own Windows icon.
+    pub icon: Option<String>,
     pub segments: Vec<Segment>,
     pub count: u32,
     pub complete: bool,
@@ -385,6 +390,8 @@ pub struct Pin {
     pub name: String,
     pub path: String,
     pub item: Option<ItemRef>,
+    /// Shell cache key when the folder has its own Windows icon.
+    pub icon: Option<String>,
 }
 
 /// Emitted as `session-changed` to every window when pins or the clipboard change.

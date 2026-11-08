@@ -1,7 +1,8 @@
 //! Bounded Shell icon work, kept off the UI and file-operation COM threads.
 use std::collections::VecDeque;
 use std::mem::size_of;
-use std::path::Path;
+use std::os::windows::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
@@ -9,7 +10,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, ensure};
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM,
+};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::*;
@@ -28,13 +31,19 @@ struct Job {
     reply: SyncSender<Reply>,
 }
 
+enum Message {
+    Get(Job),
+    /// Drops every cached size of a key whose icon changed.
+    Forget(String),
+}
+
 /// Only one STA touches Shell extensions. A stuck extension cannot block the UI;
 /// callers time out and the bounded queue rejects overload without spawning workers.
-pub struct Icons(SyncSender<Job>);
+pub struct Icons(SyncSender<Message>);
 
 impl Icons {
     pub fn start() -> Result<Self> {
-        let (send, receive) = mpsc::sync_channel::<Job>(64);
+        let (send, receive) = mpsc::sync_channel::<Message>(64);
         std::thread::Builder::new()
             .name("shell-icons".into())
             .spawn(move || {
@@ -43,7 +52,20 @@ impl Icons {
                 }
                 let mut cache: VecDeque<(String, u32, Arc<Vec<u8>>)> = VecDeque::new();
                 let mut bytes = 0;
-                while let Ok(job) = receive.recv() {
+                while let Ok(message) = receive.recv() {
+                    let job = match message {
+                        Message::Get(job) => job,
+                        Message::Forget(key) => {
+                            cache.retain(|(cached, _, data)| {
+                                let keep = *cached != key;
+                                if !keep {
+                                    bytes -= data.len();
+                                }
+                                keep
+                            });
+                            continue;
+                        }
+                    };
                     if Instant::now() >= job.deadline {
                         continue;
                     }
@@ -55,6 +77,8 @@ impl Icons {
                         let data = entry.2.clone();
                         cache.push_back(entry);
                         Some(data)
+                    } else if !allowed(&job.key) {
+                        None
                     } else {
                         extract(&job.key, job.size).ok().map(|data| {
                             let data = Arc::new(data);
@@ -81,15 +105,29 @@ impl Icons {
         }
         let (send, receive) = mpsc::sync_channel(1);
         self.0
-            .try_send(Job {
+            .try_send(Message::Get(Job {
                 key,
                 size,
                 deadline: Instant::now() + TIMEOUT,
                 reply: send,
-            })
+            }))
             .ok()?;
         Some(receive)
     }
+
+    /// Makes the next request read the changed icon again.
+    pub fn forget(&self, key: String) {
+        let _ = self.0.send(Message::Forget(key));
+    }
+}
+
+/// The Shell parses the plain form of a path; the `\\?\` form yields no item for some types.
+pub fn path_key(path: &Path) -> String {
+    format!("path:{}", PathBuf::from(super::display_path(path)).display())
+}
+
+fn has_own_icon(extension: &str) -> bool {
+    matches!(extension, "exe" | "lnk" | "ico" | "url")
 }
 
 pub fn key(path: &Path) -> String {
@@ -98,13 +136,38 @@ pub fn key(path: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase();
-    if matches!(extension.as_str(), "exe" | "lnk" | "ico" | "url") {
-        format!("path:{}", path.display())
+    if has_own_icon(&extension) {
+        path_key(path)
     } else {
         format!("ext:{extension}")
     }
 }
 
+fn is_drive_root(path: &Path) -> bool {
+    let path = PathBuf::from(super::display_path(path));
+    let name = path.as_os_str().to_string_lossy();
+    let bytes = name.as_bytes();
+    bytes.len() == 3 && bytes[0].is_ascii_alphabetic() && &bytes[1..] == b":\\"
+}
+
+/// Windows honours `desktop.ini` only on a read-only or system folder, so ordinary folders stay
+/// cheap: only these two attributes make a listing look for the file.
+fn customized(path: &Path, attributes: u32) -> bool {
+    attributes & (FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_SYSTEM.0) != 0
+        && path.join("desktop.ini").exists()
+}
+
+/// The icon key of a folder with its own Windows icon, or of a drive; `None` for a plain folder.
+pub fn folder_key(path: &Path, attributes: u32) -> Option<String> {
+    (is_drive_root(path) || customized(path, attributes)).then(|| path_key(path))
+}
+
+/// [`folder_key`] for a folder whose attributes the caller has not read.
+pub fn folder_icon(path: &Path) -> Option<String> {
+    folder_key(path, std::fs::metadata(path).ok()?.file_attributes())
+}
+
+/// Shape only: this runs on the protocol callback and must not touch the disk.
 fn valid_key(key: &str) -> bool {
     if key.contains('\0') {
         return false;
@@ -112,9 +175,22 @@ fn valid_key(key: &str) -> bool {
     if let Some(extension) = key.strip_prefix("ext:") {
         extension.len() <= 64 && !extension.contains(['/', '\\', ':'])
     } else if let Some(path) = key.strip_prefix("path:") {
-        Path::new(path).is_absolute() && self::key(Path::new(path)).starts_with("path:")
+        Path::new(path).is_absolute()
     } else {
         false
+    }
+}
+
+/// The worker's check of a `path:` key: only icons a listing could have asked for.
+fn allowed(key: &str) -> bool {
+    let Some(path) = key.strip_prefix("path:").map(Path::new) else {
+        return true;
+    };
+    let extension = path.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => folder_key(path, metadata.file_attributes()).is_some(),
+        Ok(_) => has_own_icon(&extension),
+        Err(_) => false,
     }
 }
 
@@ -221,7 +297,11 @@ fn extract(key: &str, size: u32) -> Result<Vec<u8>> {
             }
         }
     };
-    // Shell bitmaps are premultiplied BGRA; PNG uses straight RGBA.
+    encode_png(&mut pixels, size, size)
+}
+
+/// Encodes premultiplied BGRA (what the Shell draws) as straight-alpha RGBA PNG.
+pub(super) fn encode_png(pixels: &mut [u8], width: u32, height: u32) -> Result<Vec<u8>> {
     for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
         let alpha = u32::from(pixel[3]);
@@ -234,10 +314,10 @@ fn extract(key: &str, size: u32) -> Result<Vec<u8>> {
     }
     let mut png = Vec::new();
     {
-        let mut encoder = png::Encoder::new(&mut png, size, size);
+        let mut encoder = png::Encoder::new(&mut png, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        encoder.write_header()?.write_image_data(&pixels)?;
+        encoder.write_header()?.write_image_data(pixels)?;
     }
     Ok(png)
 }
@@ -370,8 +450,59 @@ mod tests {
             let decoder = png::Decoder::new(std::io::Cursor::new(data.as_slice())).read_info()?;
             assert_eq!((decoder.info().width, decoder.info().height), (size, size));
         }
-        assert!(icons.request("path:C:\\test.txt".into(), 16).is_none());
+        // The worker refuses a path no listing would have sent.
+        assert!(
+            icons
+                .request(format!("path:{}", std::env::temp_dir().display()), 16)
+                .unwrap()
+                .recv_timeout(TIMEOUT)
+                .unwrap()
+                .is_none()
+        );
+        assert!(icons.request("path:relative.exe".into(), 16).is_none());
         assert!(icons.request("ext:txt".into(), 1024).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn only_customized_folders_and_drives_get_a_path_key() -> Result<()> {
+        use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+        let fixture = tempfile::tempdir()?;
+        let directory = FILE_ATTRIBUTE_DIRECTORY.0;
+        let read_only = directory | FILE_ATTRIBUTE_READONLY.0;
+        assert_eq!(folder_key(fixture.path(), directory), None);
+        assert_eq!(folder_key(fixture.path(), read_only), None);
+        std::fs::write(fixture.path().join("desktop.ini"), "[.ShellClassInfo]")?;
+        assert_eq!(folder_key(fixture.path(), directory), None);
+        assert_eq!(folder_key(fixture.path(), read_only), Some(path_key(fixture.path())));
+        assert_eq!(
+            folder_key(fixture.path(), directory | FILE_ATTRIBUTE_SYSTEM.0),
+            Some(path_key(fixture.path()))
+        );
+        assert_eq!(folder_key(Path::new("C:\\"), directory).as_deref(), Some("path:C:\\"));
+        assert_eq!(
+            path_key(Path::new(r"\\?\C:\Tools\app.exe")),
+            r"path:C:\Tools\app.exe"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_changed_icon_is_read_again() -> Result<()> {
+        let icons = Icons::start()?;
+        let program = key(&std::env::current_exe()?);
+        let fetch = || {
+            icons
+                .request(program.clone(), 16)
+                .unwrap()
+                .recv_timeout(TIMEOUT)
+                .unwrap()
+                .unwrap()
+        };
+        let first = fetch();
+        assert!(Arc::ptr_eq(&first, &fetch()));
+        icons.forget(program.clone());
+        assert!(!Arc::ptr_eq(&first, &fetch()));
         Ok(())
     }
 }

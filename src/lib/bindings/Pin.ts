@@ -5,4 +5,8 @@ import type { ItemRef } from "./ItemRef";
  * A pinned folder. `item` is its identity (when the folder exists), which the interface
  * matches against `SettingsView.folders` so aliases and colours follow style edits live.
  */
-export type Pin = { name: string, path: string, item: ItemRef | null, };
+export type Pin = { name: string, path: string, item: ItemRef | null, 
+/**
+ * Shell cache key when the folder has its own Windows icon.
+ */
+icon: string | null, };

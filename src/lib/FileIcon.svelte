@@ -1,9 +1,10 @@
 <script lang="ts">
   import { devicePixelRatio } from "svelte/reactivity/window";
   import Icon from "./Icon.svelte";
+  import { iconSource } from "./icons.svelte";
 
   let { icon, size = 16 }: { icon: string | null; size?: number } = $props();
-  const source = $derived(icon ? `http://icon.localhost/?key=${encodeURIComponent(icon)}&s=${Math.min(256, Math.max(16, Math.ceil(size * (devicePixelRatio.current ?? 1))))}` : "");
+  const source = $derived(iconSource(icon, size, devicePixelRatio.current ?? 1));
   let failed = $state("");
 </script>
 

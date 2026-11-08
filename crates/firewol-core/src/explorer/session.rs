@@ -206,6 +206,12 @@ impl Session {
             .map(drop)
     }
 
+    /// Moves a pinned folder before `before`, or to the end of the pins when that is `None`.
+    pub fn move_pin(&self, folder: &Path, before: Option<&Path>) -> Result<()> {
+        self.update_settings(|settings| settings.move_pin(folder, before))
+            .map(drop)
+    }
+
     /// Pins the folder, or unpins it when it is already pinned. Returns whether it is pinned.
     pub fn toggle_pin(&self, folder: &Path) -> Result<bool> {
         let mut pinned = false;

@@ -639,6 +639,85 @@
     drivesTimer = setTimeout(() => void api.drives().then((list) => (drives = list), () => {}), delay);
   }
 
+  // Reordering pins: pointer events on the sidebar, like file drags and the tab strip.
+  const PIN_DRAG_THRESHOLD = 6;
+  let pinDrag = $state<{ path: string; before: string | null }>();
+  let pinPress: { path: string; x: number; y: number; pointerY: number; frame: number } | undefined;
+  const pinRows = () => [...document.querySelectorAll<HTMLElement>(".sidebar .pin[data-pinned]")];
+
+  function pinDown(event: PointerEvent, path: string) {
+    if (event.button !== 0) return;
+    pinPress = { path, x: event.clientX, y: event.clientY, pointerY: event.clientY, frame: 0 };
+    window.addEventListener("pointermove", pinMove, true);
+    window.addEventListener("pointerup", pinUp, true);
+    window.addEventListener("pointercancel", endPinDrag, true);
+    window.addEventListener("keydown", pinKey, true);
+  }
+
+  /** The pin the dragged row would land in front of; `null` is the end of the list. */
+  function pinTarget(y: number) {
+    const row = pinRows().find((item) => {
+      const box = item.getBoundingClientRect();
+      return y < box.top + box.height / 2;
+    });
+    return row?.dataset.pin ?? null;
+  }
+
+  function pinMove(event: PointerEvent) {
+    if (!pinPress) return;
+    pinPress.pointerY = event.clientY;
+    if (!pinDrag) {
+      if (Math.hypot(event.clientX - pinPress.x, event.clientY - pinPress.y) < PIN_DRAG_THRESHOLD) return;
+      menu = undefined;
+      pinPress.frame = requestAnimationFrame(pinScroll);
+    }
+    pinDrag = { path: pinPress.path, before: pinTarget(event.clientY) };
+  }
+
+  /** Long pin lists scroll while the pointer rests near the sidebar's edges. */
+  function pinScroll() {
+    if (!pinPress) return;
+    const side = document.querySelector<HTMLElement>(".sidebar");
+    if (side && pinDrag && edgeScroll(side, pinPress.pointerY)) pinDrag = { ...pinDrag, before: pinTarget(pinPress.pointerY) };
+    pinPress.frame = requestAnimationFrame(pinScroll);
+  }
+
+  /** The drop would leave the row where it is, so no insertion line is shown for it. */
+  function pinStays(path: string, before: string | null) {
+    const pins = session.pins.map((pin) => pin.path);
+    const at = pins.indexOf(path);
+    return before === path || (before ?? null) === (pins[at + 1] ?? null);
+  }
+
+  function pinUp() {
+    const moved = pinDrag;
+    endPinDrag();
+    if (!moved) return;
+    // The button that was pressed would otherwise open its folder when the press ends.
+    const swallow = (event: Event) => { event.preventDefault(); event.stopPropagation(); };
+    window.addEventListener("click", swallow, { capture: true, once: true });
+    setTimeout(() => window.removeEventListener("click", swallow, true));
+    if (pinStays(moved.path, moved.before)) return;
+    api.movePin(moved.path, moved.before).then((state) => (session = state), (reason) => notify(String(reason), { error: true }));
+  }
+
+  function pinKey(event: KeyboardEvent) {
+    if (event.key !== "Escape" || !pinDrag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    endPinDrag();
+  }
+
+  function endPinDrag() {
+    if (pinPress) cancelAnimationFrame(pinPress.frame);
+    pinPress = undefined;
+    pinDrag = undefined;
+    window.removeEventListener("pointermove", pinMove, true);
+    window.removeEventListener("pointerup", pinUp, true);
+    window.removeEventListener("pointercancel", endPinDrag, true);
+    window.removeEventListener("keydown", pinKey, true);
+  }
+
   function togglePcSection() {
     pcOpen = !pcOpen;
     try { localStorage.setItem("firewol.pc-open", String(pcOpen)); } catch { /* Only a convenience. */ }
@@ -1772,6 +1851,36 @@
     check("a drive has its own menu", menu?.kind === "drive" && labels().includes("Pin to sidebar") && !labels().includes("Change icon…"), labels());
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
     await tick();
+    const pinPaths = () => session.pins.map((pin) => pin.path);
+    const pinAt = (path: string) => document.querySelector<HTMLElement>(`.sidebar .pin[data-pinned][data-pin="${CSS.escape(path)}"]`)!;
+    const edge = (path: string) => { const box = pinAt(path).getBoundingClientRect(); return { x: box.left + 20, y: box.top + 2 }; };
+    const pressPin = (path: string) => {
+      const box = pinAt(path).getBoundingClientRect();
+      pinAt(path).dispatchEvent(new PointerEvent("pointerdown", { clientX: box.left + 20, clientY: box.top + box.height / 2, button: 0, pointerId: 1, isPrimary: true, bubbles: true, cancelable: true }));
+    };
+    const [first, second, third, fourth] = pinPaths();
+    const order = pinPaths().join();
+    pressPin(first);
+    pointer("pointermove", edge(fourth));
+    await tick();
+    check("dragging a pin shows where it will land", pinAt(first).classList.contains("moving") && pinAt(fourth).classList.contains("line-before"));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await tick();
+    pointer("pointerup", edge(fourth));
+    await tick();
+    check("Escape cancels a pin drag", pinPaths().join() === order && !document.querySelector(".pin.moving, .pin.line-before"));
+    pressPin(first);
+    pointer("pointermove", edge(fourth));
+    pointer("pointerup", edge(fourth));
+    await waitFor(() => pinPaths()[2] === first, 5000, "the moved pin");
+    check("dropping a pin reorders the sidebar", pinPaths().slice(0, 4).join() === [second, third, first, fourth].join());
+    check("the new order persists through the core", (await api.session()).pins[2].path === first);
+    check("a pin drag does not open the folder", pane.folder?.path === from);
+    pressPin(first);
+    pointer("pointermove", edge(second));
+    pointer("pointerup", edge(second));
+    await waitFor(() => pinPaths().join() === order, 5000, "the original pin order");
+    await tick();
     const stray = new MouseEvent("contextmenu", { clientX: 4, clientY: 4, bubbles: true, cancelable: true });
     document.querySelector(".status")!.dispatchEvent(stray);
     check("no part of the window shows the browser's menu", stray.defaultPrevented);
@@ -2149,7 +2258,8 @@
           {#each session.pins as pin (pin.path)}
             {@const style = styleOf(pin.item)}
             {@const place = { path: pin.path, item: pin.item, name: style?.alias || pin.name }}
-            <button class="pin" data-pin={pin.path} class:on={pin.path === active?.folder?.path} title={pin.path} onclick={() => active?.open(pin.path)} oncontextmenu={(event) => placeMenu(event, "pin", place)} onkeydown={(event) => placeMenu(event, "pin", place)}>
+            {@const showLine = !!pinDrag && !pinStays(pinDrag.path, pinDrag.before)}
+            <button class="pin" data-pin={pin.path} data-pinned class:on={pin.path === active?.folder?.path} class:moving={pinDrag?.path === pin.path} class:line-before={showLine && pinDrag?.before === pin.path} class:line-after={showLine && pinDrag?.before === null && pin === session.pins.at(-1)} title={pin.path} onpointerdown={(event) => pinDown(event, pin.path)} onclick={() => active?.open(pin.path)} oncontextmenu={(event) => placeMenu(event, "pin", place)} onkeydown={(event) => placeMenu(event, "pin", place)}>
               <FolderIcon color={tint(style)} glyph={style?.icon} icon={pin.icon} /><span>{style?.alias || pin.name}</span>
             </button>
           {:else}
@@ -2431,6 +2541,11 @@
   .turn.open { transform: rotate(90deg); }
   .side-empty { margin: 0; padding: 4px 12px; font-size: 12px; line-height: 18px; }
   .pin { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 12px; border: 0; border-radius: var(--radius-s); background: transparent; font-size: 13px; text-align: left; }
+  .pin { position: relative; }
+  .pin.moving { opacity: .5; }
+  .pin.line-before::before, .pin.line-after::after { content: ""; position: absolute; left: 8px; right: 8px; height: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; }
+  .pin.line-before::before { top: -2px; }
+  .pin.line-after::after { bottom: -2px; }
   .pin span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pin:hover { background: var(--hover); }
   .pin.on { background: var(--sel); color: var(--sel-text); box-shadow: var(--sel-shadow); font-weight: 600; }

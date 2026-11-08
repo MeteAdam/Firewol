@@ -73,6 +73,8 @@ export const api = {
   shellMenuNative: () => invoke<void>("shell_menu_native"),
   shellMenuClose: () => invoke<void>("shell_menu_close"),
   togglePin: (path: string) => invoke<SessionState>("toggle_pin", { path }),
+  /** `before` is the pin to land in front of; `null` moves to the end. */
+  movePin: (path: string, before: string | null) => invoke<SessionState>("move_pin", { path, before }),
   openWindow: (path: string, split: boolean) => invoke<string>("open_window", { path, split }),
   /** `name` saves `<label>-<name>.json` for a later stage of a report run. */
   saveReport: (report: object, name?: string) => invoke<void>("save_report", { report, name: name ?? null }),

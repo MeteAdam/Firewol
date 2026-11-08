@@ -478,6 +478,22 @@ async fn toggle_pin(
     .await
 }
 
+/// Moves a pin before the pin `before`, or to the end when `before` is `null`.
+#[tauri::command]
+async fn move_pin(
+    app: AppHandle,
+    files: State<'_, Files>,
+    path: String,
+    before: Option<String>,
+) -> Result<SessionState, String> {
+    let files = files.0.clone();
+    blocking(move || {
+        files.move_pin(Path::new(&path), before.as_deref().map(Path::new))?;
+        Ok(broadcast(&app, &files))
+    })
+    .await
+}
+
 #[tauri::command]
 async fn get_settings(files: State<'_, Files>) -> Result<contract::SettingsView, String> {
     let files = files.0.clone();
@@ -1065,6 +1081,7 @@ fn main() {
             pause_transfer,
             cancel_transfer,
             toggle_pin,
+            move_pin,
             get_settings,
             update_settings,
             set_folder_style,

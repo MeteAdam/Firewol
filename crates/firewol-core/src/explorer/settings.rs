@@ -357,6 +357,24 @@ impl Settings {
         })
     }
 
+    /// Moves a pin so it sits before `before`, or last when `before` is `None`. Unknown paths
+    /// and a move onto itself change nothing.
+    pub fn move_pin(&mut self, folder: &Path, before: Option<&Path>) {
+        let Some(from) = self.pins.iter().position(|pin| pin == folder) else {
+            return;
+        };
+        if before == Some(folder)
+            || before.is_some_and(|path| !self.pins.iter().any(|pin| pin == path))
+        {
+            return;
+        }
+        let pin = self.pins.remove(from);
+        let to = before
+            .and_then(|path| self.pins.iter().position(|pin| pin == path))
+            .unwrap_or(self.pins.len());
+        self.pins.insert(to, pin);
+    }
+
     /// Puts `folders` first, in order, once per profile. The user's other pins stay after them
     /// and a folder that is already pinned moves into place instead of repeating.
     pub fn seed_pins(&mut self, folders: &[PathBuf]) {
@@ -431,6 +449,33 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pin_moves_before_another_or_to_the_end() {
+        let path = |name: &str| PathBuf::from(format!("D:\\{name}"));
+        let names = |settings: &Settings| {
+            settings
+                .pins
+                .iter()
+                .map(|pin| pin.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("")
+        };
+        let mut settings = Settings {
+            pins: ["a", "b", "c", "d"].map(path).to_vec(),
+            ..Settings::default()
+        };
+        settings.move_pin(&path("a"), Some(&path("d")));
+        assert_eq!(names(&settings), "bcad");
+        settings.move_pin(&path("d"), Some(&path("b")));
+        assert_eq!(names(&settings), "dbca");
+        settings.move_pin(&path("d"), None);
+        assert_eq!(names(&settings), "bcad");
+        settings.move_pin(&path("c"), Some(&path("c")));
+        settings.move_pin(&path("c"), Some(&path("missing")));
+        settings.move_pin(&path("missing"), None);
+        assert_eq!(names(&settings), "bcad");
+    }
 
     #[test]
     fn default_pins_are_added_once_in_order_without_repeats() {

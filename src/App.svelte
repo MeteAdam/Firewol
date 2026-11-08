@@ -75,7 +75,10 @@
   let allowClose = false;
   let editing = $state(false);
   let address = $state("");
-  let menu = $state<{ kind: "item" | "area" | "more"; x: number; y: number }>();
+  /** A sidebar row: a pinned folder or a drive. */
+  type Place = { path: string; item: ItemRef | null; name: string };
+  type MenuKind = "item" | "area" | "more" | "pin" | "drive";
+  let menu = $state<{ kind: MenuKind; x: number; y: number; target?: Place }>();
   let toast = $state<{ message: string; undo: boolean; error: boolean }>();
   /** The running transfer, or the last result until dismissed; sent by the core every 250 ms. */
   let transfer = $state.raw<TransferStatus | null>(null);
@@ -724,15 +727,46 @@
   }
 
   /** Opens a menu that fits the window, with focus on its first enabled item. */
-  async function showMenu(kind: "item" | "area" | "more", x: number, y: number) {
+  async function showMenu(kind: MenuKind, x: number, y: number, target?: Place) {
     if (!menu) menuReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    menu = { kind, x, y };
+    menu = { kind, x, y, target };
     await tick();
     if (!menuElement || !menu) return;
     const box = menuElement.getBoundingClientRect();
     menu.x = Math.max(8, Math.min(x, window.innerWidth - box.width - 8));
     menu.y = Math.max(8, Math.min(y, window.innerHeight - box.height - 8));
     menuItems()[0]?.focus();
+  }
+
+  /** Right-click, Shift+F10 or the Menu key on a sidebar row. */
+  function placeMenu(event: MouseEvent | KeyboardEvent, kind: "pin" | "drive", place: Place) {
+    if (event instanceof KeyboardEvent && event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    if (event instanceof MouseEvent) void showMenu(kind, event.clientX, event.clientY, place);
+    else void showMenu(kind, box.left + 24, box.bottom, place);
+  }
+
+  function openPlace(place: Place, inNewTab: boolean) {
+    menu = undefined;
+    if (inNewTab) void newTab(place.path);
+    else void active?.open(place.path);
+  }
+
+  function customizePlace(place: Place) {
+    menu = undefined;
+    if (place.item) folderSheet = { item: place.item, name: place.name, path: place.path };
+  }
+
+  function copyPath(path: string | undefined) {
+    menu = undefined;
+    if (path) void navigator.clipboard.writeText(path);
+  }
+
+  /** Windows' browser menu (Back, Print, …) must never appear; text fields keep theirs. */
+  function blockBrowserMenu(event: MouseEvent) {
+    if (!(event.target as Element | null)?.closest("input, textarea, [contenteditable]")) event.preventDefault();
   }
 
   const menuItems = () => [...(menuElement?.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)') ?? [])];
@@ -1693,6 +1727,7 @@
     ];
     for (const type of ["mousedown", "mouseup", "auxclick"] as const) window.addEventListener(type, sideButton, true);
     window.addEventListener("wheel", blockPageZoom, { capture: true, passive: false });
+    window.addEventListener("contextmenu", blockBrowserMenu, true);
     void (async () => {
       const info = await api.startup();
       await Promise.all([loadSettings(), volumes.load(), api.transferStatus().then((status) => (transfer = status))]);
@@ -1725,6 +1760,7 @@
       unlisten.forEach((promise) => void promise.then((stop) => stop()));
       for (const type of ["mousedown", "mouseup", "auxclick"] as const) window.removeEventListener(type, sideButton, true);
       window.removeEventListener("wheel", blockPageZoom, true);
+      window.removeEventListener("contextmenu", blockBrowserMenu, true);
     };
   });
 </script>
@@ -1796,7 +1832,8 @@
           </div>
           {#each session.pins as pin (pin.path)}
             {@const style = styleOf(pin.item)}
-            <button class="pin" data-pin={pin.path} class:on={pin.path === active?.folder?.path} title={pin.path} onclick={() => active?.open(pin.path)}>
+            {@const place = { path: pin.path, item: pin.item, name: style?.alias || pin.name }}
+            <button class="pin" data-pin={pin.path} class:on={pin.path === active?.folder?.path} title={pin.path} onclick={() => active?.open(pin.path)} oncontextmenu={(event) => placeMenu(event, "pin", place)} onkeydown={(event) => placeMenu(event, "pin", place)}>
               <FolderIcon color={tint(style)} glyph={style?.icon} icon={pin.icon} /><span>{style?.alias || pin.name}</span>
             </button>
           {:else}
@@ -1943,12 +1980,26 @@
           {#if focused?.directory && selectedCount === 1}
             <button class="mi" role="menuitem" onclick={() => togglePin(focused?.path)}><Icon name="pin" /><span class="label">{session.pins.some((pin) => pin.path === focused?.path) ? "Unpin from sidebar" : "Pin to sidebar"}</span></button>
           {/if}
-          <button class="mi" role="menuitem" onclick={() => { if (focused) void navigator.clipboard.writeText(focused.path); menu = undefined; }}><Icon name="copy" /><span class="label">Copy path</span></button>
+          <button class="mi" role="menuitem" onclick={() => copyPath(focused?.path)}><Icon name="copy" /><span class="label">Copy path</span></button>
         {:else}
           <button class="mi" role="menuitem" onclick={() => togglePin(active?.folder?.path)}><Icon name="pin" /><span class="label">{pinned ? "Unpin this folder" : "Pin this folder"}</span></button>
         {/if}
         <div class="sep"></div>
         <button class="mi" role="menuitem" onclick={() => openSettings("menu")}><Icon name="settings" /><span class="label">Edit menu…</span></button>
+      {:else if menu.target}
+        {@const place = menu.target}
+        {@const isPinned = session.pins.some((pin) => pin.path === place.path)}
+        <button class="mi" role="menuitem" onclick={() => openPlace(place, false)}><Icon name="open" /><span class="label">Open</span></button>
+        <button class="mi" role="menuitem" onclick={() => openPlace(place, true)}><Icon name="window" /><span class="label">Open in new tab</span></button>
+        <div class="sep"></div>
+        {#if place.item}
+          <button class="mi" role="menuitem" onclick={() => customizePlace(place)}><Icon name="palette" /><span class="label">Customize folder…</span></button>
+          {#if menu.kind === "pin"}
+            <button class="mi" role="menuitem" onclick={() => changeIcon(place.item)}><Icon name="image" /><span class="label">Change icon…</span></button>
+          {/if}
+        {/if}
+        <button class="mi" role="menuitem" onclick={() => togglePin(place.path)}><Icon name="pin" /><span class="label">{isPinned ? "Unpin from sidebar" : "Pin to sidebar"}</span></button>
+        <button class="mi" role="menuitem" onclick={() => copyPath(place.path)}><Icon name="copy" /><span class="label">Copy path</span></button>
       {:else}
         <button class="mi" role="menuitem" onclick={() => openSettings()}><Icon name="settings" /><span class="label">Settings</span><span class="sc">Ctrl+,</span></button>
         <div class="sep"></div>

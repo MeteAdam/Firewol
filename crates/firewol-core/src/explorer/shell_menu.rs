@@ -998,6 +998,13 @@ fn native(window: HWND, label: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// The app has one worker. Several in one process corrupt the heap now and then, in code not
+    /// yet traced, which only tests running in parallel can reach.
+    fn one_worker() -> MutexGuard<'static, ()> {
+        static WORKER: Mutex<()> = Mutex::new(());
+        WORKER.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn flatten(items: &[ShellItem]) -> Vec<&ShellItem> {
         items
             .iter()
@@ -1010,6 +1017,7 @@ mod tests {
         let fixture = tempfile::tempdir()?;
         let file = fixture.path().join("note.txt");
         std::fs::write(&file, "x")?;
+        let _one_at_a_time = one_worker();
         let menus = ShellMenus::default();
         let items = menus.open("test", 0, Target::Items(vec![file]))?;
         assert!(items.iter().any(|item| !item.separator), "{items:?}");
@@ -1024,6 +1032,7 @@ mod tests {
     #[test]
     fn a_folder_background_has_commands_and_closing_is_clean() -> Result<()> {
         let fixture = tempfile::tempdir()?;
+        let _one_at_a_time = one_worker();
         let menus = ShellMenus::default();
         for _ in 0..3 {
             let items = menus.open("test", 0, Target::Background(fixture.path().to_owned()))?;
@@ -1048,6 +1057,7 @@ mod tests {
             }
         }
         let fixture = tempfile::tempdir()?;
+        let _one_at_a_time = one_worker();
         let menus = ShellMenus::default();
         let extensions = [
             "png",
@@ -1107,6 +1117,7 @@ mod tests {
     #[test]
     fn menus_of_common_types_are_placed_without_losing_commands() -> Result<()> {
         let fixture = tempfile::tempdir()?;
+        let _one_at_a_time = one_worker();
         let menus = ShellMenus::default();
         for extension in [
             "png", "pdf", "txt", "mp3", "bat", "ps1", "msi", "ttf", "zip", "iso",
@@ -1175,6 +1186,7 @@ mod tests {
     #[test]
     fn the_new_menu_creates_an_item_and_reports_it() -> Result<()> {
         let fixture = tempfile::tempdir()?;
+        let _one_at_a_time = one_worker();
         let menus = ShellMenus::default();
         let items = menus.open("new", 0, Target::Background(fixture.path().to_owned()))?;
         let new = items
@@ -1198,6 +1210,7 @@ mod tests {
         let script = fixture.path().join("open me.cmd");
         let marker = fixture.path().join("opened.txt");
         std::fs::write(&script, "@echo opened> \"%~dp0opened.txt\"\r\n")?;
+        let _one_at_a_time = one_worker();
         let menus = ShellMenus::default();
         menus.open_default(0, vec![script])?;
         let started = Instant::now();

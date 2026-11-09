@@ -14,8 +14,8 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
-    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    ReadFile, SECURITY_ANONYMOUS, SECURITY_SQOS_PRESENT,
 };
 use windows::Win32::System::Com::CoCreateGuid;
 use windows::Win32::System::Pipes::{
@@ -30,6 +30,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::core::{PCWSTR, w};
 
+use super::super::elevation::system_directory;
 use super::Cancellation;
 use crate::recycle::Apartment;
 
@@ -54,6 +55,7 @@ impl Pipe {
             "--ntfs-helper {drive} {serial} {name} {}",
             std::process::id()
         )));
+        let directory = wide(system_directory()?.as_os_str());
         cancel.check()?;
         let mut request = SHELLEXECUTEINFOW {
             cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -61,6 +63,7 @@ impl Pipe {
             lpVerb: w!("runas"),
             lpFile: PCWSTR(program.as_ptr()),
             lpParameters: PCWSTR(args.as_ptr()),
+            lpDirectory: PCWSTR(directory.as_ptr()),
             nShow: SW_HIDE.0,
             ..Default::default()
         };
@@ -187,7 +190,8 @@ impl Sender {
                 FILE_SHARE_MODE(0),
                 None,
                 OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
+                // The elevated helper must never lend its token to whoever owns the pipe.
+                SECURITY_SQOS_PRESENT | SECURITY_ANONYMOUS,
                 None,
             )?
         };
@@ -215,4 +219,22 @@ impl Sender {
 
 fn wide(text: &OsStr) -> Vec<u16> {
     text.encode_wide().chain([0]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_helper_connects_without_lending_its_token() -> Result<()> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let name = format!("{PREFIX}{stamp:032x}");
+        let _server = Pipe::listen(&name)?;
+        let sender = Sender::connect(&name, std::process::id())?;
+        assert!(sender.connected());
+        assert!(Sender::connect(&name, std::process::id() + 1).is_err());
+        Ok(())
+    }
 }

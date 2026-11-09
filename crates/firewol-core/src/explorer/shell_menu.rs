@@ -832,7 +832,7 @@ fn run_command(session: &Session, id: u32, point: (i32, i32)) -> Result<()> {
         return result.context("Windows could not run this command");
     }
     // Handlers read a value above 0xFFFF as a string pointer, and an extension chooses its own ids.
-    anyhow::ensure!(
+    ensure!(
         (FIRST_ID..=LAST_ID).contains(&id),
         "Windows reported an invalid menu command"
     );

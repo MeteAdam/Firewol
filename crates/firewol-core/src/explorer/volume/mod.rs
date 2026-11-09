@@ -21,6 +21,9 @@ use windows::Win32::Storage::FileSystem::{
     GetFinalPathNameByHandleW, OpenFileById,
 };
 use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::System::LibraryLoader::{
+    LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+};
 use windows::Win32::System::Ioctl::{
     FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0,
     USN_REASON_BASIC_INFO_CHANGE, USN_REASON_DATA_EXTEND, USN_REASON_DATA_TRUNCATION,
@@ -278,6 +281,8 @@ fn update_reference(db: &Connection, row: i64, item: Option<&VisibleItem>) -> Re
 }
 
 pub fn run_helper(drive: char, serial: u32, name: &str, parent: u32) -> Result<()> {
+    // The helper runs elevated: nothing it loads may come from a folder a user can write to.
+    unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)? };
     let mut pipe = Sender::connect(name, parent)?;
     let result = feed_journal(drive, serial, &mut pipe);
     if let Err(error) = &result {

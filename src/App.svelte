@@ -38,7 +38,7 @@
   import FileList from "./lib/FileList.svelte";
   import FolderIcon from "./lib/FolderIcon.svelte";
   import FolderStyleSheet from "./lib/FolderStyleSheet.svelte";
-  import { formatCount, formatSize, useLocale } from "./lib/format";
+  import { formatCount, formatSize, useLocale, visibleName, withoutExtension } from "./lib/format";
   import { iconChanged } from "./lib/icons.svelte";
   import Icon from "./lib/Icon.svelte";
   import { NO_FILTERS, Pane, SELECT_ALL_LIMIT, itemKey } from "./lib/pane.svelte";
@@ -1977,6 +1977,9 @@
 
   /** The design-review corrections: mouse buttons, zoom, drag selection, sidebar and Windows menus. */
   async function designSteps(pane: Pane, root: string, check: Check) {
+    check("a text-direction control in a name is shown, not obeyed", visibleName("a\u202Efdp.exe") === "a[U+202E]fdp.exe");
+    check("a hidden extension never hides a program's", withoutExtension("invoice.pdf.exe") === "invoice.pdf.exe" && withoutExtension("note.txt") === "note");
+    check("names are isolated from the text around them", getComputedStyle(document.querySelector(".grid .nm")!).unicodeBidi === "isolate");
     const from = pane.folder!.path;
     const manyPath = `${from}\\z-folder\\many`;
     const listEl = () => document.querySelector<HTMLElement>(`[data-pane="${pane.id}"] [role="grid"]`)!;
@@ -2757,7 +2760,7 @@
   {/if}
   {#if recycleAsk}
     {@const items = recycleAsk}
-    {@const name = (entry: Entry) => entry.style?.alias || entry.name}
+    {@const name = (entry: Entry) => visibleName(entry.style?.alias || entry.name)}
     <Sheet title={items.length === 1 ? `Move “${name(items[0])}” to the Recycle Bin?` : `Move ${items.length} items to the Recycle Bin?`} onclose={cancelRecycle}>
       {#if items.length > 1}
         <ul class="recycle-list">
@@ -2774,7 +2777,7 @@
   {/if}
   {#if takeOwnAsk}
     <Sheet title="Take ownership?" onclose={() => (takeOwnAsk = undefined)}>
-      <p>Administrators become the owner of <strong>{takeOwnAsk.path}</strong> and everything inside it, with full control.</p>
+      <p>Administrators become the owner of <strong>{visibleName(takeOwnAsk.path)}</strong> and everything inside it, with full control.</p>
       <p class="muted">Windows asks for approval next, and a console shows the result. This changes the item's permissions and Undo cannot reverse it.</p>
       <div class="actions">
         <button class="action primary" use:initialFocus onclick={() => (takeOwnAsk = undefined)}>Cancel</button>

@@ -3,7 +3,7 @@
   import type { ColumnWidthsView, Entry } from "./contract";
   import FolderIcon from "./FolderIcon.svelte";
   import FileIcon from "./FileIcon.svelte";
-  import { formatDate, formatSize, location, typeName } from "./format";
+  import { formatDate, formatSize, location, typeName, visibleName, withoutExtension } from "./format";
   import { edgeScroll } from "./autoscroll";
   import Icon from "./Icon.svelte";
   import { PAGE, type Pane } from "./pane.svelte";
@@ -146,8 +146,9 @@
     void saveColumn(column, limited(column, shownWidth(column) + steps[event.key]));
   }
 
-  const withoutExtension = (name: string) => (name.lastIndexOf(".") > 0 ? name.slice(0, name.lastIndexOf(".")) : name);
-  const shownName = (entry: Entry) => entry.style?.alias || (extensions || entry.directory ? entry.name : withoutExtension(entry.name));
+  const shownName = (entry: Entry) => visibleName(entry.style?.alias || (extensions || entry.directory ? entry.name : withoutExtension(entry.name)));
+  /** Tiles clamp long names, so the whole name and the real type are one hover away. */
+  const fullName = (entry: Entry) => `${visibleName(entry.name)}\n${typeName(entry)}`;
   const activeRow = $derived(
     pane.selected >= first && pane.selected < end ? `${id}-row-${pane.selected}` : undefined,
   );
@@ -491,7 +492,7 @@
                 data-row={row}
                 aria-colindex={(row % columns) + 1}
                 aria-selected={pane.isSelected(row)}
-                title={entry ? (pane.searching ? location(entry) : entry.style?.alias ? entry.name : undefined) : undefined}
+                title={entry ? (pane.searching ? `${fullName(entry)}\n${location(entry)}` : fullName(entry)) : undefined}
                 style:width={`${tile}px`}
                 style:height={`${tile}px`}
                 onmousedown={(event) => press(event, row)}
@@ -546,7 +547,7 @@
                 {#if row === pane.renaming}
                   {@render renameInput(entry)}
                 {:else}
-                  <span class="nm" title={entry.style?.alias ? entry.name : undefined}>{shownName(entry)}</span>
+                  <span class="nm" title={fullName(entry)}>{shownName(entry)}</span>
                 {/if}
               </div>
               {#if pane.searching}<div role="gridcell" class="dim">{location(entry)}</div>{/if}
@@ -640,6 +641,7 @@
   .row.hidden .name { opacity: .6; }
   .name { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .nm, .dim { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nm { unicode-bidi: isolate; }
   .dim { color: var(--muted); }
   .row.sel .dim { color: inherit; opacity: .85; }
   .size { text-align: right; }

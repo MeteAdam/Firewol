@@ -38,6 +38,19 @@ export function formatCount(count: number): string {
   return whole.format(count);
 }
 
+/** Text-direction controls can make `invoice_\u202Efdp.exe` read as a PDF, so they are shown. */
+export function visibleName(name: string): string {
+  return name.replace(/[\u202A-\u202E\u2066-\u2069]/g, (mark) => `[U+${mark.charCodeAt(0).toString(16).toUpperCase()}]`);
+}
+
+const RUNNABLE = new Set(["bat", "cmd", "com", "exe", "hta", "jar", "js", "jse", "lnk", "msi", "pif", "ps1", "reg", "scr", "url", "vbe", "vbs", "wsf"]);
+
+/** Hides a name's extension, unless that would make a program look like a document. */
+export function withoutExtension(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && !RUNNABLE.has(name.slice(dot + 1).toLowerCase()) ? name.slice(0, dot) : name;
+}
+
 export function typeName(entry: Entry): string {
   if (entry.directory) return "File folder";
   const dot = entry.name.lastIndexOf(".");

@@ -3,6 +3,7 @@
   import { PaneSlot, type Tab } from "./tabs.svelte";
   import FolderIcon from "./FolderIcon.svelte";
   import Icon from "./Icon.svelte";
+  import { visibleName } from "./format";
   import { tint } from "./styles";
   let { slot, styleOf, onselect, onclose, onnew, ondetach }: {
     slot: PaneSlot; styleOf: (tab: Tab) => FolderStyleView | undefined;
@@ -12,7 +13,7 @@
   let strip: HTMLDivElement;
   let drag: { tab: Tab; x: number; y: number; moved: boolean } | undefined;
   let context = $state<Tab>();
-  const label = (tab: Tab) => tab.kind === "settings" ? "Settings" : styleOf(tab)?.alias || tab.pane.label;
+  const label = (tab: Tab) => tab.kind === "settings" ? "Settings" : visibleName(styleOf(tab)?.alias || tab.pane.label);
   function down(event: PointerEvent, tab: Tab) {
     if (event.button !== 0 || (event.target as HTMLElement).closest(".close")) return;
     drag = { tab, x: event.clientX, y: event.clientY, moved: false };

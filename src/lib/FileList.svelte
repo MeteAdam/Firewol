@@ -251,8 +251,17 @@
   const contentX = (clientX: number) => clientX - grid.getBoundingClientRect().left + grid.scrollLeft;
   const contentY = (clientY: number) => clientY - grid.getBoundingClientRect().top + grid.scrollTop;
 
+  /** A middle click opens a folder in a new tab, as in Explorer; files ignore it. */
+  function middleClick(event: MouseEvent, entry: Entry | undefined) {
+    if (event.button !== 1 || !entry?.directory) return;
+    event.preventDefault();
+    onopen(entry, true);
+  }
+
   function gridDown(event: MouseEvent) {
     onactivate();
+    // Without this a middle press starts the browser's autoscroll.
+    if (event.button === 1) event.preventDefault();
     if (event.button !== 0 || (event.target as Element).closest("[data-row], .hdr, .rename")) return;
     const bounds = grid.getBoundingClientRect();
     // A press on the list's own scroll bars is not a press on the list.
@@ -498,6 +507,7 @@
                 style:height={`${tile}px`}
                 onmousedown={(event) => press(event, row)}
                 ondblclick={() => entry && onopen(entry, false)}
+                onauxclick={(event) => middleClick(event, entry)}
                 oncontextmenu={(event) => rowMenu(event, row)}
               >
                 {#if entry}
@@ -540,6 +550,7 @@
             aria-selected={pane.isSelected(row)}
             onmousedown={(event) => press(event, row)}
             ondblclick={() => entry && onopen(entry, false)}
+            onauxclick={(event) => middleClick(event, entry)}
             oncontextmenu={(event) => rowMenu(event, row)}
           >
             {#if entry}

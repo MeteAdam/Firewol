@@ -1,6 +1,51 @@
 #![cfg(windows)]
 
 #[test]
+fn sorting_by_date_mixes_folders_with_files() -> anyhow::Result<()> {
+    use firewol_core::explorer::{Cancellation, Directory, Sort, SortColumn, page};
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::time::{Duration, SystemTime};
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let fixture = tempfile::tempdir()?;
+    let stamp = |name: &str, age_days: u64| -> anyhow::Result<()> {
+        // A handle to a folder needs the backup flag; files accept it too.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(fixture.path().join(name))?
+            .set_modified(SystemTime::now() - Duration::from_secs(age_days * 86_400))?;
+        Ok(())
+    };
+    std::fs::write(fixture.path().join("old.txt"), b"old")?;
+    std::fs::write(fixture.path().join("new.txt"), b"new")?;
+    std::fs::create_dir(fixture.path().join("middle"))?;
+    stamp("old.txt", 30)?;
+    stamp("middle", 10)?;
+    stamp("new.txt", 1)?;
+    let cancel = Cancellation::default();
+    let mut directory = Directory::open(fixture.path())?;
+    directory.advance(128, &cancel)?;
+    let mut names = |descending| -> anyhow::Result<Vec<String>> {
+        directory.sort(
+            Sort {
+                column: SortColumn::Modified,
+                descending,
+            },
+            &cancel,
+        )?;
+        Ok(directory
+            .list_dir(page(0), &cancel)?
+            .items
+            .iter()
+            .map(|item| item.name().to_string_lossy().into_owned())
+            .collect())
+    };
+    assert_eq!(names(false)?, ["old.txt", "middle", "new.txt"]);
+    assert_eq!(names(true)?, ["new.txt", "middle", "old.txt"]);
+    Ok(())
+}
+
+#[test]
 fn natural_sort_keeps_folders_first_and_pages_stable() -> anyhow::Result<()> {
     use firewol_core::explorer::{Cancellation, Directory, Sort, SortColumn, page};
     let fixture = tempfile::tempdir()?;

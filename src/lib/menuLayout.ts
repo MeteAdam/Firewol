@@ -191,9 +191,10 @@ function fileManageMenu(env: MenuEnv): MenuCommand {
   const { act, item, selected } = env;
   const single = selected.length <= 1;
   const onFile = !!item && !item.directory;
-  const style = pick(env, ["folder_style"]).map((row) => rowNode(env, row));
+  // A single folder has these two at the top level of its menu (`itemMenu`).
+  const style = item?.directory && single ? [] : pick(env, ["folder_style"]).map((row) => rowNode(env, row));
   const shortcut = onFile && /\.lnk$/i.test(item.name);
-  const iconRow = single && (item ? item.directory || shortcut : true) ? [command("Change icon…", "image", act.changeIcon)] : [];
+  const iconRow = single && (item ? shortcut : true) ? [command("Change icon…", "image", act.changeIcon)] : [];
   const attributes = attributesMenu(env);
   return submenu("File manage", "settings", groups(
     [
@@ -297,6 +298,7 @@ export function itemMenu(env: MenuEnv): MenuNode[] {
   const pinned = folderItem && item ? [command(env.pinned ? "Unpin from sidebar" : "Pin to sidebar", "pin", () => act.togglePin(item.path))] : [];
   const pins = [...pinned, ...shellSlot(env, "pin")];
   const live = Array.isArray(env.shell);
+  const customize: MenuNode[] = folderItem ? [...pick(env, ["folder_style"]).map((row) => rowNode(env, row)), command("Change icon…", "image", act.changeIcon)] : [];
   const edit = pick(env, EDIT).filter((row) => row.entry.action !== "paste" || row.enabled).map((row) => rowNode(env, row));
   return groups(
     [
@@ -307,6 +309,7 @@ export function itemMenu(env: MenuEnv): MenuNode[] {
       ...(pins.length > 0 ? [submenu("Pin/Unpin", "pin", pins)] : []),
       ...(live ? [submenu("More options", "more", [...shellSlot(env, "more"), separator, windowsMenuRow(env)])] : []),
     ],
+    customize,
     [terminalMenu(env), fileManageMenu(env)],
     [goToMenu(env)],
     [...shellSlot(env, "open_with"), ...edit],

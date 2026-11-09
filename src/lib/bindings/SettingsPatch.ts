@@ -4,15 +4,15 @@ import type { ColumnWidthsView } from "./ColumnWidthsView";
 import type { ElevationView } from "./ElevationView";
 import type { MenuEntryView } from "./MenuEntryView";
 
-export type SettingsPatch = { appearance?: AppearancePatch, sidebar?: boolean, grid?: boolean,
+export type SettingsPatch = { appearance?: AppearancePatch, sidebar?: boolean, grid?: boolean, 
 /**
  * 96, 128 or 160.
  */
-tile?: number,
+tile?: number, 
 /**
  * 180 to 360 pixels.
  */
-sidebar_width?: number,
+sidebar_width?: number, 
 /**
  * 24, 32, 40 or 52.
  */

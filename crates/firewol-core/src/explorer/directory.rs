@@ -120,13 +120,19 @@ impl Directory {
             SortColumn::Size => "size",
         };
         let direction = if sort.descending { "DESC" } else { "ASC" };
+        // As in Explorer, a date order is about time: folders take their place among the files.
+        let folders_first = if sort.column == SortColumn::Modified {
+            ""
+        } else {
+            "directory DESC, "
+        };
         let interrupted = cancel.clone();
         self.db
             .progress_handler(1000, Some(move || interrupted.is_cancelled()))?;
         let result = (|| -> Result<()> {
             let tx = self.db.transaction()?;
             tx.execute("DELETE FROM ordering", [])?;
-            tx.execute(&format!("INSERT INTO ordering(row) SELECT row FROM listing ORDER BY directory DESC, {column} {direction}, sort_name COLLATE windows_natural ASC, row ASC"), [])?;
+            tx.execute(&format!("INSERT INTO ordering(row) SELECT row FROM listing ORDER BY {folders_first}{column} {direction}, sort_name COLLATE windows_natural ASC, row ASC"), [])?;
             tx.commit()?;
             Ok(())
         })();

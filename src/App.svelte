@@ -2,6 +2,8 @@
   import { emit, listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick, untrack } from "svelte";
+  import { cubicOut } from "svelte/easing";
+  import { fade, fly } from "svelte/transition";
   import { MediaQuery } from "svelte/reactivity";
   import { api } from "./lib/api";
   import { edgeScroll } from "./lib/autoscroll";
@@ -387,7 +389,7 @@
   function notify(message: string, options: { undo?: boolean; error?: boolean } = {}) {
     clearTimeout(toastTimer);
     toast = { message, undo: options.undo ?? false, error: options.error ?? false };
-    toastTimer = setTimeout(() => (toast = undefined), options.error ? 8000 : 6000);
+    toastTimer = setTimeout(() => (toast = undefined), options.error ? 8000 : 2000);
   }
 
   /** Runs a command that starts a file operation; failures to start show at once. */
@@ -870,13 +872,15 @@
   }
 
   async function closeTab(slot: PaneSlot, tab: Tab, detached = false) {
+    // The window's only tab closes the window. The tab stays intact until the usual close checks pass.
+    if (!detached && slots.length === 1 && slot.tabs.length === 1) { await appWindow.close(); return; }
     if (tab.kind === "folder") { if (detached) tab.pane.release(); else tab.pane.close(); }
     const index = slot.tabs.indexOf(tab);
     const wasActive = slot.activeTab === tab.id;
     slot.tabs = slot.tabs.filter(current => current.id !== tab.id);
     if (!slot.tabs.length) {
-      if (slots.length > 1) { slots = slots.filter(current => current !== slot); activeIndex = 0; }
-      else await newTab(startup?.path, slot);
+      slots = slots.filter(current => current !== slot);
+      activeIndex = 0;
     } else if (wasActive) {
       const next = slot.tabs[Math.min(index, slot.tabs.length - 1)];
       slot.activeTab = "";
@@ -892,6 +896,8 @@
   }
 
   async function detachTab(slot: PaneSlot, tab: Tab) {
+    // A window's only tab already has a window of its own.
+    if (slots.length === 1 && slot.tabs.length === 1) return;
     try { await api.adoptPane(snapshot(tab)); await closeTab(slot, tab, true); }
     catch (reason) { notify(String(reason), { error: true }); if (tab.kind === "folder") await tab.pane.resume(); }
   }
@@ -1228,6 +1234,13 @@
     else void active?.open(place.path);
   }
 
+  /** A middle click opens a sidebar row in a new tab. */
+  function placeAuxClick(event: MouseEvent, place: Place) {
+    if (event.button !== 1) return;
+    event.preventDefault();
+    openPlace(place, true);
+  }
+
   function customizePlace(place: Place) {
     menu = undefined;
     if (place.item) folderSheet = { item: place.item, name: place.name, path: place.path };
@@ -1443,8 +1456,9 @@
       await showMenu(kind, 40, 40);
       await painted();
       const menuRow = (text: string) => [...document.querySelectorAll<HTMLButtonElement>(".menu .mi")].find((entry) => entry.querySelector(".label")?.textContent?.trim() === text);
-      menuRow("File manage")!.click();
-      await waitFor(() => !!menuRow("Customize this folder…"), 5000, "the File manage menu");
+      // A folder has the row at the top level; the open folder's own menu keeps it in File manage.
+      if (kind === "area") menuRow("File manage")!.click();
+      await waitFor(() => !!menuRow("Customize this folder…"), 5000, "the Customize row");
       const item = menuRow("Customize this folder…");
       if (!item?.disabled) item?.click();
       await waitFor(() => !!sheet(), 5000, "the folder sheet");
@@ -2284,6 +2298,51 @@
   }
 
   /** Files run their Windows default action; a shortcut to a folder stays inside Firewol. */
+  /** Runs after the tab strip is back to one tab, so a new tab is easy to tell apart. */
+  async function middleClickSteps(pane: Pane, slot: PaneSlot, check: Check) {
+    const items = pane.pages[0] ?? [];
+    const rowOf = (row: number) => document.querySelector<HTMLElement>(`[data-pane="${pane.id}"] [data-row="${row}"]`);
+    const middle = (node: Element | null) => node?.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true }));
+    const closeExtra = async () => {
+      const extra = slot.tabs.find((tab) => tab.id !== slot.tabs[0].id);
+      if (extra) await closeTab(slot, extra);
+      await tick();
+    };
+    await tick();
+    middle(rowOf(items.findIndex((entry) => !entry.directory)));
+    await tick();
+    check("a middle click on a file opens no tab", slot.tabs.length === 1, String(slot.tabs.length));
+    const folderRow = items.findIndex((entry) => entry.directory);
+    const folder = items[folderRow];
+    middle(rowOf(folderRow));
+    await waitFor(() => slot.tabs.length === 2 && slot.active?.kind === "folder" && slot.active.pane.folder?.path === folder?.path, 5000, "the middle-clicked folder");
+    check("a middle click on a folder opens it in a new tab", slot.active?.kind === "folder" && slot.active.pane.folder?.path === folder?.path);
+    await closeExtra();
+    const pin = document.querySelector(".sidebar .pin[data-pinned]");
+    if (pin) {
+      middle(pin);
+      await waitFor(() => slot.tabs.length === 2, 5000, "the middle-clicked pin");
+      check("a middle click on a pin opens a new tab", slot.tabs.length === 2);
+      await closeExtra();
+    }
+    await waitFor(() => slot.activeTab === slot.tabs[0].id && !!pane.folder, 5000, "the first tab again");
+  }
+
+  async function toastSteps(check: Check) {
+    // An earlier step's toast must be gone, or this one only swaps its text and does not slide in.
+    toast = undefined;
+    await waitFor(() => !document.querySelector(".toast"), 5000, "the previous toast to leave");
+    const started = performance.now();
+    notify("Self-test toast");
+    await tick();
+    // Svelte starts the real animation one frame after a zero-length one.
+    await waitFor(() => (document.querySelector(".toast")?.getAnimations().length ?? 0) > 0, 1000, "the toast animation");
+    check("the toast slides in", true);
+    await waitFor(() => !document.querySelector(".toast"), 5000, "the toast to leave");
+    const lasted = performance.now() - started;
+    check("the toast leaves after two seconds and its fade", lasted > 2300 && lasted < 3400, String(Math.round(lasted)));
+  }
+
   async function openSteps(pane: Pane, root: string, check: Check) {
     const from = pane.folder!.path;
     await pane.open(`${root}\\launch`);
@@ -2418,6 +2477,8 @@
       await source.search("");
       if (extra) { slot.reorder(extra.id, originalTab.id); check("tabs reorder", slot.tabs[0].id === extra.id); await closeTab(slot, extra); }
       check("closing a tab preserves the active tab", slot.activeTab === originalTab.id && slot.tabs.length === 1);
+      await middleClickSteps(source, slot, check);
+      await toastSteps(check);
       await toggleSplit();
       check("closing split view merges tabs", slots.length === 1 && slots[0].tabs.length === 2);
       // Shortcuts go through the same window handler a real key press reaches.
@@ -2551,7 +2612,7 @@
       if (info.selfTest && info.label === "main") await selfTest(info);
       else if (info.selfTest) await api.saveReport({ label: info.label, ready: true, adopted: info.adopt?.kind ?? null, path: active?.folder?.path ?? null });
       // The self-test ends with a real click on each window's close button (see Test-Interface.ps1).
-      if (info.selfTest) { await api.awaitSignal("close"); document.querySelector<HTMLButtonElement>(".cap.close")!.click(); }
+      if (info.selfTest) { await api.awaitSignal("close"); document.querySelector<HTMLButtonElement>(info.adopt ? ".tab .close" : ".cap.close")!.click(); }
       else if (info.report && !info.adopt) {
         await benchmark(info, firstListMs).catch((reason) =>
           api.saveReport({ label: info.label, error: String(reason) }),
@@ -2657,7 +2718,7 @@
             {@const style = styleOf(pin.item)}
             {@const place = { path: pin.path, item: pin.item, name: style?.alias || pin.name }}
             {@const showLine = !!pinDrag && !pinStays(pinDrag.path, pinDrag.before)}
-            <button class="pin" data-pin={pin.path} data-pinned class:on={pin.path === active?.folder?.path} class:moving={pinDrag?.path === pin.path} class:line-before={showLine && pinDrag?.before === pin.path} class:line-after={showLine && pinDrag?.before === null && pin === session.pins.at(-1)} title={pin.path} onpointerdown={(event) => pinDown(event, pin.path)} onclick={() => active?.open(pin.path)} oncontextmenu={(event) => placeMenu(event, "pin", place)} onkeydown={(event) => placeMenu(event, "pin", place)}>
+            <button class="pin" data-pin={pin.path} data-pinned class:on={pin.path === active?.folder?.path} class:moving={pinDrag?.path === pin.path} class:line-before={showLine && pinDrag?.before === pin.path} class:line-after={showLine && pinDrag?.before === null && pin === session.pins.at(-1)} title={pin.path} onpointerdown={(event) => pinDown(event, pin.path)} onclick={() => active?.open(pin.path)} onauxclick={(event) => placeAuxClick(event, place)} oncontextmenu={(event) => placeMenu(event, "pin", place)} onkeydown={(event) => placeMenu(event, "pin", place)}>
               <FolderIcon color={tint(style)} glyph={style?.icon} icon={pin.icon} /><span>{style?.alias || pin.name}</span>
             </button>
           {:else}
@@ -2669,7 +2730,7 @@
           {#if pcOpen}
             {#each drives as drive (drive.path)}
               {@const place = { path: drive.path, item: drive.item, name: drive.name }}
-              <button class="pin" data-pin={drive.path} class:on={drive.path === active?.folder?.path} title={drive.path} onclick={() => active?.open(drive.path)} oncontextmenu={(event) => placeMenu(event, "drive", place)} onkeydown={(event) => placeMenu(event, "drive", place)}>
+              <button class="pin" data-pin={drive.path} class:on={drive.path === active?.folder?.path} title={drive.path} onclick={() => active?.open(drive.path)} onauxclick={(event) => placeAuxClick(event, place)} oncontextmenu={(event) => placeMenu(event, "drive", place)} onkeydown={(event) => placeMenu(event, "drive", place)}>
                 <FolderIcon icon={drive.icon} /><span>{drive.name}</span>
               </button>
             {/each}
@@ -2774,7 +2835,7 @@
   {/if}
 
   {#if toast}
-    <div class="toast" class:error={toast.error} role="alert">
+    <div class="toast" class:error={toast.error} role="alert" in:fly={{ y: 24, duration: 320, easing: cubicOut }} out:fade={{ duration: 450 }}>
       <span>{toast.message}</span>
       {#if toast.undo}<button class="toast-action" onclick={undo}>Undo <kbd class="kbd">Ctrl Z</kbd></button>{/if}
       <button class="ib xs" aria-label="Dismiss" onclick={() => (toast = undefined)}><Icon name="close" size={12} /></button>

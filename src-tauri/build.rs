@@ -13,6 +13,7 @@ fn main() {
             "list_page",
             "folder_progress",
             "default_apps",
+            "set_dialog_probe",
             "set_default_folders",
             "folder_groups",
             "locate_selection",

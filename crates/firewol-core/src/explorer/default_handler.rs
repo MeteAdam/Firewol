@@ -303,6 +303,21 @@ fn is_empty(key: &Key) -> bool {
     read.is_ok() && keys == 0 && values == 0
 }
 
+fn delete_key_if_empty(full: &str) -> Result<()> {
+    let Some(key) = open_key(full) else {
+        return Ok(());
+    };
+    if !is_empty(&key) {
+        return Ok(());
+    }
+    drop(key);
+    let name = wide(full);
+    checked(
+        unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(name.as_ptr())) },
+        "Remove a registry key",
+    )
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedCommand {
     /// Relative to the classes root.
@@ -485,19 +500,7 @@ impl FolderHandler {
     }
 
     fn delete_if_empty(&self, path: &str) -> Result<()> {
-        let full = self.full(path);
-        let Some(key) = open_key(&full) else {
-            return Ok(());
-        };
-        if !is_empty(&key) {
-            return Ok(());
-        }
-        drop(key);
-        let name = wide(&full);
-        checked(
-            unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(name.as_ptr())) },
-            "Remove a registry key",
-        )
+        delete_key_if_empty(&self.full(path))
     }
 
     fn tell_shell(&self) {
@@ -507,8 +510,169 @@ impl FolderHandler {
     }
 }
 
-/// Turns the registration off from the command line, for when the interface cannot start.
+/// Windows' Open and Save window classes.
+const DIALOG_CLASSES: [&str; 2] = [
+    "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}",
+    "{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}",
+];
+const PROBE_NAME: &str = "firewol-picker";
+const PROBE_LOG: &str = "file-dialog-probe.log";
+const PROBE_BUILD_NAME: &str = "firewol_picker.dll";
+
+/// Copies the probe beside the installed program, named by its contents: a loaded DLL is locked,
+/// so a new build can never replace one that programs still have open.
+pub fn install_probe(current_executable: &Path, folder: &Path) -> Result<PathBuf> {
+    let built = current_executable
+        .parent()
+        .context("The program has no folder")?
+        .join(PROBE_BUILD_NAME);
+    ensure!(
+        built.is_file(),
+        "{PROBE_BUILD_NAME} was not built next to Firewol"
+    );
+    let hash: String = digest(&built)?[..4]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    fs::create_dir_all(folder)?;
+    let installed = folder.join(format!("{PROBE_NAME}-{hash}.dll"));
+    if !installed.is_file() {
+        fs::copy(&built, &installed).context("Copy the file dialog probe")?;
+    }
+    Ok(installed)
+}
+
+/// Asks at the PC itself. The probe is loaded into every program that opens a file window.
+pub fn confirm_probe(owner: HWND) -> bool {
+    let answer = unsafe {
+        MessageBoxW(
+            Some(owner),
+            w!(
+                "Programs that open an Open or Save window will load a small Firewol DLL.\n\n\
+                 It writes down the program's name and shows the normal Windows window. Windows \
+                 or antivirus software may flag this technique.\n\n\
+                 You can turn this off in Settings, or run firewol-tauri.exe --restore-explorer."
+            ),
+            w!("Record which programs use file windows?"),
+            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    };
+    answer == IDOK
+}
+
+/// The per-user registration that puts the probe in front of Windows' file windows.
+pub struct DialogProbe {
+    root: String,
+}
+
+impl DialogProbe {
+    pub fn for_user() -> Self {
+        Self {
+            root: USER_CLASSES.to_owned(),
+        }
+    }
+
+    fn server(&self, class: &str) -> String {
+        format!(r"{}\CLSID\{class}\InprocServer32", self.root)
+    }
+
+    fn registered(&self, class: &str) -> Option<String> {
+        read_value(&open_key(&self.server(class))?, PCWSTR::null())
+    }
+
+    fn is_ours(value: &str) -> bool {
+        value.to_lowercase().contains(PROBE_NAME)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        DIALOG_CLASSES.iter().all(|class| {
+            self.registered(class)
+                .is_some_and(|value| Self::is_ours(&value))
+        })
+    }
+
+    /// Refuses to replace another program's registration.
+    pub fn enable(&self, dll: &Path) -> Result<()> {
+        for class in DIALOG_CLASSES {
+            if let Some(value) = self.registered(class) {
+                ensure!(
+                    Self::is_ours(&value),
+                    "Another program already handles file windows"
+                );
+            }
+        }
+        let written = DIALOG_CLASSES.iter().try_for_each(|class| {
+            let key = create_key(&self.server(class))?;
+            write_value(&key, PCWSTR::null(), &dll.display().to_string())?;
+            write_value(&key, w!("ThreadingModel"), "Apartment")
+        });
+        if written.is_err() {
+            let _ = self.disable();
+        }
+        written
+    }
+
+    pub fn disable(&self) -> Result<()> {
+        for class in DIALOG_CLASSES {
+            let server = self.server(class);
+            let Some(key) = open_key(&server) else {
+                continue;
+            };
+            if !read_value(&key, PCWSTR::null()).is_some_and(|value| Self::is_ours(&value)) {
+                continue;
+            }
+            clear_value(&key, PCWSTR::null())?;
+            clear_value(&key, w!("ThreadingModel"))?;
+            drop(key);
+            delete_key_if_empty(&server)?;
+            delete_key_if_empty(&format!(r"{}\CLSID\{class}", self.root))?;
+        }
+        Ok(())
+    }
+}
+
+/// Starts a new measurement.
+pub fn clear_probe_log(data: &Path) {
+    let _ = fs::remove_file(data.join(PROBE_LOG));
+}
+
+/// The programs seen so far, such as `Claude.exe (Open, Save)`, in the order they first appeared.
+pub fn probe_summary(data: &Path) -> Vec<String> {
+    let text = fs::read_to_string(data.join(PROBE_LOG)).unwrap_or_default();
+    let mut seen: Vec<(String, bool, bool)> = Vec::new();
+    for line in text.lines() {
+        let Some((kind, program)) = line.split_once('\t') else {
+            continue;
+        };
+        let name = Path::new(program).file_name().map_or_else(
+            || program.to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let index = seen
+            .iter()
+            .position(|entry| entry.0 == name)
+            .unwrap_or_else(|| {
+                seen.push((name, false, false));
+                seen.len() - 1
+            });
+        match kind {
+            "open" => seen[index].1 = true,
+            "save" => seen[index].2 = true,
+            _ => {}
+        }
+    }
+    seen.into_iter()
+        .map(|(name, open, save)| match (open, save) {
+            (true, true) => format!("{name} (Open, Save)"),
+            (true, false) => format!("{name} (Open)"),
+            _ => format!("{name} (Save)"),
+        })
+        .collect()
+}
+
+/// Turns everything off from the command line, for when the interface cannot start.
 pub fn restore_from_command_line(data: &Path) -> Result<()> {
+    DialogProbe::for_user().disable()?;
     FolderHandler::for_user(data).disable()
 }
 
@@ -616,6 +780,64 @@ mod tests {
         assert_eq!(
             fixture.value(WIN_E, PCWSTR::null()).as_deref(),
             Some(r"C:\Other\manager.exe")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_probe_registers_both_windows_and_leaves_nothing() -> Result<()> {
+        let fixture = Fixture::new("probe")?;
+        let probe = DialogProbe {
+            root: fixture.handler.root.clone(),
+        };
+        let dll = Path::new(r"C:\Apps\firewol-picker-ab12.dll");
+        probe.enable(dll)?;
+        assert!(probe.is_enabled());
+        let key = open_key(&probe.server(DIALOG_CLASSES[1])).context("the key")?;
+        assert_eq!(
+            read_value(&key, w!("ThreadingModel")).as_deref(),
+            Some("Apartment")
+        );
+        drop(key);
+        probe.disable()?;
+        assert!(!probe.is_enabled());
+        let class = format!(r"{}\CLSID\{}", probe.root, DIALOG_CLASSES[0]);
+        assert!(open_key(&class).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_probe_will_not_replace_another_program() -> Result<()> {
+        let fixture = Fixture::new("foreign")?;
+        let probe = DialogProbe {
+            root: fixture.handler.root.clone(),
+        };
+        let foreign = create_key(&probe.server(DIALOG_CLASSES[0]))?;
+        write_value(&foreign, PCWSTR::null(), r"C:\Other\dialog.dll")?;
+        drop(foreign);
+        assert!(
+            probe
+                .enable(Path::new(r"C:\Apps\firewol-picker-ab12.dll"))
+                .is_err()
+        );
+        probe.disable()?;
+        assert_eq!(
+            probe.registered(DIALOG_CLASSES[0]).as_deref(),
+            Some(r"C:\Other\dialog.dll")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_summary_lists_each_program_once() -> Result<()> {
+        let data = tempfile::tempdir()?;
+        fs::write(
+            data.path().join(PROBE_LOG),
+            "open\tC:\\A\\Claude.exe\nsave\tC:\\A\\Claude.exe\nopen\tC:\\B\\app.exe\nopen\tC:\\A\\Claude.exe\n",
+        )?;
+        assert_eq!(
+            probe_summary(data.path()),
+            ["Claude.exe (Open, Save)", "app.exe (Open)"]
         );
         Ok(())
     }

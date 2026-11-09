@@ -8,11 +8,15 @@
 
   void api.defaultApps().then((view) => (status = view), (reason) => (error = String(reason)));
 
-  async function setFolders(enabled: boolean) {
+  const setFolders = (enabled: boolean) => change(api.setDefaultFolders(enabled));
+  const setProbe = (enabled: boolean) => change(api.setDialogProbe(enabled));
+  const reload = () => change(api.defaultApps());
+
+  async function change(request: Promise<DefaultAppsView>) {
     busy = true;
     error = "";
     try {
-      status = await api.setDefaultFolders(enabled);
+      status = await request;
     } catch (reason) {
       error = String(reason);
     } finally {
@@ -40,6 +44,21 @@
     <button class="action" disabled={busy} onclick={() => setFolders(true)}>Update copy</button>
   </div>
 {/if}
+<div class="card spaced" aria-label="File window test">
+  <div class="text">
+    <strong>Open and Save windows (test)</strong>
+    <span class="muted">Records which programs ask Windows for a file window, so Firewol can learn which ones it could serve. Those windows stay exactly as they are for now.</span>
+  </div>
+  {#if status}
+    <button class="action" class:primary={!status.dialog_probe} disabled={busy} aria-pressed={status.dialog_probe} onclick={() => setProbe(!status!.dialog_probe)}>{status.dialog_probe ? "Stop test" : "Start test"}</button>
+  {/if}
+</div>
+{#if status && (status.dialog_probe || status.probe_seen.length > 0)}
+  <div class="seen">
+    <div class="seen-head"><strong>Programs seen</strong><button class="link" disabled={busy} onclick={reload}>Refresh</button></div>
+    {#each status.probe_seen as program (program)}<div class="mono">{program}</div>{:else}<div class="muted">None yet. Open a file window in another program, then refresh.</div>{/each}
+  </div>
+{/if}
 {#if error}<p class="error" role="alert">{error}</p>{/if}
 
 <h3>What stays with Explorer</h3>
@@ -47,7 +66,6 @@
   <li>The desktop and the taskbar, which Explorer itself draws.</li>
   <li>The File Explorer icon pinned to the taskbar.</li>
   <li>Virtual folders such as the Recycle Bin, Control Panel and This PC.</li>
-  <li>Open and Save windows inside other apps.</li>
 </ul>
 
 <h3>Where it runs from</h3>
@@ -64,7 +82,11 @@
   p { margin: 0 0 12px; font-size: 12px; }
   ul { margin: 4px 0 0; padding-left: 18px; font-size: 12px; line-height: 20px; }
   .card { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 640px; padding: 12px 14px; border: var(--border-w) solid var(--border); border-radius: var(--radius-s); background: var(--surface-2); }
-  .notice { margin-top: 8px; font-size: 13px; }
+  .notice, .spaced { margin-top: 8px; }
+  .notice { font-size: 13px; }
+  .seen { display: flex; flex-direction: column; gap: 4px; max-width: 640px; margin-top: 8px; padding: 10px 14px; font-size: 12px; }
+  .seen-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
+  .link { padding: 2px 6px; border: 0; background: transparent; color: var(--accent); font-size: 12px; }
   .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 13px; }
   .text .muted { font-size: 12px; }
   .action { flex: none; }

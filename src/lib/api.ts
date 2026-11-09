@@ -50,6 +50,7 @@ export const api = {
   folderProgress: (id: number) => invoke<FolderProgress>("folder_progress", { id }),
   defaultApps: () => invoke<DefaultAppsView>("default_apps"),
   setDefaultFolders: (enabled: boolean) => invoke<DefaultAppsView>("set_default_folders", { enabled }),
+  setDialogProbe: (enabled: boolean) => invoke<DefaultAppsView>("set_dialog_probe", { enabled }),
   folderGroups: (id: number) => invoke<FolderGroup[]>("folder_groups", { id }),
   locateSelection: (id: number, items: ItemRef[]) => invoke<(number | null)[]>("locate_selection", { id, items }),
   startIndex: (id: number) => invoke<IndexState>("start_index", { id }),

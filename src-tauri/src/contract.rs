@@ -330,6 +330,10 @@ pub struct DefaultAppsView {
     pub installed_path: String,
     /// The installed copy is not this build of Firewol.
     pub outdated: bool,
+    /// The file window probe is registered.
+    pub dialog_probe: bool,
+    /// Programs the probe has seen asking for an Open or Save window.
+    pub probe_seen: Vec<String>,
 }
 
 /// One date section of a grouped listing. Bucket 0 is Today, 7 is A long time ago.

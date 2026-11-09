@@ -11,4 +11,12 @@ other_handler: string | null, installed_path: string,
 /**
  * The installed copy is not this build of Firewol.
  */
-outdated: boolean, };
+outdated: boolean, 
+/**
+ * The file window probe is registered.
+ */
+dialog_probe: boolean, 
+/**
+ * Programs the probe has seen asking for an Open or Save window.
+ */
+probe_seen: Array<string>, };

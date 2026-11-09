@@ -995,6 +995,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "firewol-picker"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "firewol-tauri"
 version = "0.1.0"
 dependencies = [

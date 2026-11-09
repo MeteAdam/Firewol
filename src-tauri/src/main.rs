@@ -21,7 +21,7 @@ use contract::{
     Page, Pin, SearchCount, SearchRequest, Segment, SessionState, SettingsView, ShellMenuItem,
     Startup, Step, Subfolders, TransferStatus, VolumeState,
 };
-use default_handler::{FolderHandler, Launch};
+use default_handler::{DialogProbe, FolderHandler, Launch};
 use firewol_core::explorer::icons::{self, Icons};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
 use firewol_core::explorer::{
@@ -420,7 +420,41 @@ fn default_apps_view(data: &Path) -> anyhow::Result<DefaultAppsView> {
         installed_path: installed.display().to_string(),
         outdated: folders
             && default_handler::installed_copy_outdated(&std::env::current_exe()?, &installed),
+        dialog_probe: DialogProbe::for_user().is_enabled(),
+        probe_seen: default_handler::probe_summary(data),
     })
+}
+
+/// Records which programs use Windows' file windows; they keep working exactly as before.
+#[tauri::command]
+async fn set_dialog_probe(
+    window: Window,
+    state: State<'_, App>,
+    enabled: bool,
+) -> Result<DefaultAppsView, String> {
+    if state.report.is_some() {
+        return Err("Default apps cannot change during a test run".into());
+    }
+    let owner = owner(&window)?;
+    blocking(move || {
+        let data = data_dir()?;
+        let probe = DialogProbe::for_user();
+        if enabled {
+            if !default_handler::confirm_probe(HWND(owner as _)) {
+                return default_apps_view(&data);
+            }
+            let dll = default_handler::install_probe(
+                &std::env::current_exe()?,
+                &default_handler::install_dir()?,
+            )?;
+            default_handler::clear_probe_log(&data);
+            probe.enable(&dll)?;
+        } else {
+            probe.disable()?;
+        }
+        default_apps_view(&data)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1307,7 +1341,10 @@ fn restore_explorer() -> Option<i32> {
     let result = data_dir().and_then(|data| default_handler::restore_from_command_line(&data));
     Some(match result {
         Ok(()) => {
-            elevation::alert("Firewol", "Folders and Win+E open in File Explorer again.");
+            elevation::alert(
+                "Firewol",
+                "Folders, Win+E and file windows use Windows again.",
+            );
             0
         }
         Err(error) => {
@@ -1477,6 +1514,7 @@ fn main() {
             startup,
             default_apps,
             set_default_folders,
+            set_dialog_probe,
             navigate,
             close_pane,
             suspend_pane,

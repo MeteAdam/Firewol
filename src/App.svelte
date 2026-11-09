@@ -2387,7 +2387,8 @@
     await waitFor(() => !!document.querySelector('[aria-label="Folders and Win+E"] button'), 5000, "the Default apps section");
     check("Default apps shows the folder switch", true);
     const refused = await api.setDefaultFolders(true).then(() => false, (reason) => String(reason).includes("test run"));
-    check("a test run cannot change the default apps", refused);
+    const probeRefused = await api.setDialogProbe(true).then(() => false, (reason) => String(reason).includes("test run"));
+    check("a test run cannot change the default apps", refused && probeRefused);
     settingsSection = "appearance";
     const slot = slots[0];
     const settingsTab = slot.tabs.find((tab) => tab.kind === "settings");

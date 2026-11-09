@@ -37,6 +37,9 @@ enum Message {
     Forget(String),
 }
 
+const MAX_ICO_BYTES: u64 = 8 << 20;
+const MAX_ICO_SIDE: u32 = 256;
+
 /// Only one STA touches Shell extensions. A stuck extension cannot block the UI;
 /// callers time out and the bounded queue rejects overload without spawning workers.
 pub struct Icons(SyncSender<Message>);
@@ -196,9 +199,40 @@ fn allowed(key: &str) -> bool {
         .to_lowercase();
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => folder_key(path, metadata.file_attributes()).is_some(),
-        Ok(_) => has_own_icon(&extension),
+        Ok(metadata) => {
+            has_own_icon(&extension) && (extension != "ico" || safe_ico(path, metadata.len()))
+        }
         Err(_) => false,
     }
+}
+
+/// Windows decodes an icon frame in full whatever the directory claims, so a small crafted file
+/// can demand gigabytes in this process. Real icons stop at 256 pixels a side.
+fn safe_ico(path: &Path, length: u64) -> bool {
+    length <= MAX_ICO_BYTES && std::fs::read(path).is_ok_and(|data| plausible_ico(&data))
+}
+
+fn plausible_ico(data: &[u8]) -> bool {
+    let word = |at: usize| Some(u16::from_le_bytes(data.get(at..at + 2)?.try_into().ok()?));
+    let long = |at: usize| Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?));
+    let big = |at: usize| Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?));
+    let frame_fits = |entry: usize| -> Option<bool> {
+        let offset = long(entry + 12)? as usize;
+        let header = data.get(offset..offset.checked_add(24)?)?;
+        let (width, height) = if header.starts_with(b"\x89PNG\r\n\x1a\n") {
+            (big(offset + 16)?, big(offset + 20)?)
+        } else {
+            // A BMP frame stores its height doubled, for the AND mask.
+            let width = (long(offset + 4)? as i32).unsigned_abs();
+            let height = (long(offset + 8)? as i32).unsigned_abs();
+            (width, height / 2)
+        };
+        Some((1..=MAX_ICO_SIDE).contains(&width) && (1..=MAX_ICO_SIDE).contains(&height))
+    };
+    let (Some(0), Some(1 | 2), Some(count)) = (word(0), word(2), word(4)) else {
+        return false;
+    };
+    count > 0 && (0..usize::from(count)).all(|index| frame_fits(6 + 16 * index) == Some(true))
 }
 
 struct Bitmap(HBITMAP);
@@ -426,6 +460,41 @@ fn draw(dc: &Dc, icon: &Icon, size: u32, background: u8) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ico_with(frame: &[u8]) -> Vec<u8> {
+        let mut data = vec![0, 0, 1, 0, 1, 0];
+        data.extend([0u8; 8]);
+        data.extend((frame.len() as u32).to_le_bytes());
+        data.extend(22u32.to_le_bytes());
+        data.extend(frame);
+        data
+    }
+
+    fn png_frame(width: u32, height: u32) -> Vec<u8> {
+        let mut frame = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        frame.extend(width.to_be_bytes());
+        frame.extend(height.to_be_bytes());
+        frame
+    }
+
+    fn bmp_frame(width: i32, height: i32) -> Vec<u8> {
+        let mut frame = 40u32.to_le_bytes().to_vec();
+        frame.extend(width.to_le_bytes());
+        frame.extend(height.to_le_bytes());
+        frame.extend([0u8; 12]);
+        frame
+    }
+
+    #[test]
+    fn only_icons_of_a_normal_size_reach_the_shell() {
+        assert!(plausible_ico(&ico_with(&png_frame(256, 256))));
+        assert!(plausible_ico(&ico_with(&bmp_frame(48, 96))));
+        assert!(!plausible_ico(&ico_with(&png_frame(14_000, 14_000))));
+        assert!(!plausible_ico(&ico_with(&png_frame(16, 257))));
+        assert!(!plausible_ico(&ico_with(&bmp_frame(4096, 96))));
+        assert!(!plausible_ico(b"not an icon"));
+        assert!(!plausible_ico(&[0, 0, 1, 0, 200, 0]));
+    }
 
     #[test]
     fn shell_png_and_lru_hit() -> Result<()> {

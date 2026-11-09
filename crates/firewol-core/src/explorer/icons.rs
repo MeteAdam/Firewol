@@ -1,10 +1,10 @@
 //! Bounded Shell icon work, kept off the UI and file-operation COM threads.
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::mem::size_of;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, ensure};
@@ -37,6 +37,9 @@ enum Message {
     Forget(String),
 }
 
+const NETWORK_KEY: &str = r"path:\\";
+const ISSUED_LIMIT: usize = 4096;
+static ISSUED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 const MAX_ICO_BYTES: u64 = 8 << 20;
 const MAX_ICO_SIDE: u32 = 256;
 
@@ -126,10 +129,22 @@ impl Icons {
 
 /// The Shell parses the plain form of a path; the `\\?\` form yields no item for some types.
 pub fn path_key(path: &Path) -> String {
-    format!(
+    let key = format!(
         "path:{}",
         PathBuf::from(super::display_path(path)).display()
-    )
+    );
+    if key.starts_with(NETWORK_KEY) {
+        let mut issued = lock_issued();
+        if issued.len() >= ISSUED_LIMIT {
+            issued.clear();
+        }
+        issued.insert(key.clone());
+    }
+    key
+}
+
+fn lock_issued() -> MutexGuard<'static, HashSet<String>> {
+    ISSUED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn has_own_icon(extension: &str) -> bool {
@@ -181,7 +196,9 @@ fn valid_key(key: &str) -> bool {
     if let Some(extension) = key.strip_prefix("ext:") {
         extension.len() <= 64 && !extension.contains(['/', '\\', ':'])
     } else if let Some(path) = key.strip_prefix("path:") {
+        // A request can name any path, so a share or device must be one a listing produced.
         Path::new(path).is_absolute()
+            && (!key.starts_with(NETWORK_KEY) || lock_issued().contains(key))
     } else {
         false
     }
@@ -483,6 +500,21 @@ mod tests {
         frame.extend(height.to_le_bytes());
         frame.extend([0u8; 12]);
         frame
+    }
+
+    #[test]
+    fn network_and_device_keys_must_come_from_a_listing() {
+        for forged in [
+            r"path:\\attacker\share\a.exe",
+            r"path:\\.\pipe\anything",
+            r"path:\\?\C:\Windows\a.exe",
+        ] {
+            assert!(!valid_key(forged), "{forged}");
+        }
+        let key = path_key(Path::new(r"\\?\UNC\server\share\listed.exe"));
+        assert_eq!(key, r"path:\\server\share\listed.exe");
+        assert!(valid_key(&key));
+        assert!(valid_key(r"path:C:\Tools\app.exe"));
     }
 
     #[test]

@@ -327,7 +327,7 @@ impl Operations {
                 "Copied and verified file",
             ));
         }
-        Self::copy(item, into)
+        Self::copy(item, into, control)
     }
 
     pub fn undo(&mut self) -> Result<OperationResult> {
@@ -411,7 +411,11 @@ impl Operations {
         })
     }
 
-    fn copy(item: &ItemId, into: &ItemId) -> Result<(TransferUndo, &'static str)> {
+    fn copy(
+        item: &ItemId,
+        into: &ItemId,
+        control: &TransferControl,
+    ) -> Result<(TransferUndo, &'static str)> {
         let name = name_of(item.path())?;
         let destination = destination(item, into, &name)?;
         if Stamp::read(&item.verify()?)?.directory {
@@ -426,9 +430,10 @@ impl Operations {
         if extended(item.path()) || extended(&staged_path) {
             let directory = Stamp::read(&item.verify()?)?.directory;
             staging_parent.verify()?;
-            copy_extended(item.path(), &staged_path, directory)?;
+            copy_extended(item.path(), &staged_path, directory, control)?;
         } else {
-            let actual = shell_transfer(item, &staging_parent, &staged_path, Transfer::Copy)?;
+            let actual =
+                shell_transfer(item, &staging_parent, &staged_path, Transfer::Copy, control)?;
             ensure!(
                 display_path(&actual) == display_path(&staged_path),
                 "The copy did not retain its original name"
@@ -491,7 +496,13 @@ fn move_item(item: &ItemId, into: &ItemId, name: &OsStr) -> Result<ItemId> {
         } else {
             Transfer::Move
         };
-        shell_transfer(item, into, &destination, transfer)?
+        shell_transfer(
+            item,
+            into,
+            &destination,
+            transfer,
+            &TransferControl::default(),
+        )?
     };
     let moved = ItemId::at(actual.clone())?;
     ensure!(
@@ -517,7 +528,7 @@ fn extended(path: &Path) -> bool {
     display_path(path).encode_wide().count() >= 260
 }
 
-fn copy_extended(from: &Path, to: &Path, directory: bool) -> Result<()> {
+fn copy_extended(from: &Path, to: &Path, directory: bool, control: &TransferControl) -> Result<()> {
     if !directory {
         let from = wide(from.as_os_str());
         let to = wide(to.as_os_str());
@@ -527,6 +538,7 @@ fn copy_extended(from: &Path, to: &Path, directory: bool) -> Result<()> {
     fs::create_dir(to)?;
     let mut pending = vec![(fs::read_dir(from)?, to.to_owned())];
     while let Some((entries, target)) = pending.last_mut() {
+        control.checkpoint()?;
         let Some(entry) = entries.next().transpose()? else {
             pending.pop();
             continue;
@@ -541,7 +553,7 @@ fn copy_extended(from: &Path, to: &Path, directory: bool) -> Result<()> {
             fs::create_dir(&target)?;
             pending.push((fs::read_dir(entry.path())?, target));
         } else {
-            copy_extended(&entry.path(), &target, false)?;
+            copy_extended(&entry.path(), &target, false, control)?;
         }
     }
     Ok(())
@@ -670,6 +682,7 @@ fn shell_transfer(
     parent: &ItemId,
     target: &Path,
     transfer: Transfer,
+    control: &TransferControl,
 ) -> Result<PathBuf> {
     let item = shell_item(source.path())?;
     let into = shell_item(parent.path())?;
@@ -680,6 +693,7 @@ fn shell_transfer(
         parent: parent.clone(),
         target: target.to_owned(),
         result: Rc::clone(&result),
+        control: control.clone(),
     }
     .into();
     let operation: IFileOperation =
@@ -702,6 +716,7 @@ fn shell_transfer(
         }
         operation.PerformOperations()
     };
+    control.checkpoint()?;
     let reported = result.borrow_mut().take();
     if let Some(Err(error)) = reported {
         return Err(error);
@@ -722,11 +737,14 @@ struct TransferSink {
     parent: ItemId,
     target: PathBuf,
     result: TransferResult,
+    control: TransferControl,
 }
 
 impl TransferSink {
     fn before(&self, item: Ref<IShellItem>) -> windows::core::Result<()> {
         let checked = (|| -> Result<()> {
+            // Called for every item of a folder, so Pause and Cancel take effect between files.
+            self.control.checkpoint()?;
             let path = filesystem_path(item.ok()?)?;
             if display_path(&path) == display_path(self.source.path()) {
                 self.source.verify()?;
@@ -927,11 +945,40 @@ mod tests {
         junction(&source.join("deep").join("link"), &target)?;
         let into = root.join("into");
         fs::create_dir(&into)?;
-        let error = Operations::copy(&ItemId::at(source)?, &ItemId::at(into.clone())?)
+        let control = TransferControl::default();
+        let error = Operations::copy(&ItemId::at(source)?, &ItemId::at(into.clone())?, &control)
             .err()
             .context("A folder with a link was copied")?;
         assert!(format!("{error:#}").contains("link or junction"));
         assert_eq!(fs::read_dir(into)?.count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_cancelled_folder_copy_leaves_nothing_behind() -> Result<()> {
+        let _sta = Apartment::sta()?;
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path().canonicalize()?;
+        let source = root.join("source");
+        fs::create_dir(&source)?;
+        fs::write(source.join("a.txt"), b"a")?;
+        let into = root.join("into");
+        fs::create_dir(&into)?;
+        let control = TransferControl::default();
+        control.cancel();
+        let error = Operations::copy(
+            &ItemId::at(source.clone())?,
+            &ItemId::at(into.clone())?,
+            &control,
+        )
+        .err()
+        .context("A cancelled copy finished")?;
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        assert_eq!(fs::read_dir(&into)?.count(), 0);
+        let target = root.join("extended");
+        let error = copy_extended(&source, &target, true, &control).unwrap_err();
+        assert!(format!("{error:#}").contains("cancelled"));
+        assert_eq!(fs::read_dir(&target)?.count(), 0);
         Ok(())
     }
 }

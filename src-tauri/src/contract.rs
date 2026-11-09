@@ -183,6 +183,16 @@ pub struct SettingsView {
     pub menu: Vec<MenuEntryView>,
     pub folders: Vec<StyledFolder>,
     pub elevation: ElevationView,
+    pub startup: StartupView,
+}
+
+/// What a new launch shows. `path` is the pin or folder for those two kinds.
+#[derive(Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StartupView {
+    #[ts(type = "'last' | 'pin' | 'folder'")]
+    pub kind: String,
+    pub path: Option<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -190,6 +200,8 @@ pub struct SettingsView {
 #[derive(Default)]
 #[ts(export)]
 pub struct SettingsPatch {
+    #[ts(optional)]
+    pub startup: Option<StartupView>,
     #[ts(optional)]
     pub appearance: Option<AppearancePatch>,
     #[ts(optional)]
@@ -600,6 +612,10 @@ pub struct Startup {
     pub label: String,
     pub adopt: Option<TabSnapshot>,
     pub path: String,
+    /// Every tab of the "Last used window" start; empty when only `path` opens.
+    pub restore: Vec<String>,
+    /// Which of `restore` is active.
+    pub restore_active: u32,
     pub split: bool,
     pub report: bool,
     /// Runs the interface's file-operation self-test (`FIREWOL_SELF_TEST`) and reports it.

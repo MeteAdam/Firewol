@@ -84,6 +84,8 @@ async fn startup(
     let label = window.label().to_owned();
     let request = lock(&state.windows).get(&label).cloned();
     let main = request.is_none();
+    let mut restore = Vec::new();
+    let mut restore_active = 0;
     let path = match &request {
         Some(request) => request.path.clone(),
         None => match LAUNCH_FOLDER.get().cloned().or_else(|| {
@@ -94,14 +96,21 @@ async fn startup(
             Some(path) => path,
             None => {
                 let files = files.0.clone();
-                blocking(move || {
-                    let last = files
-                        .settings()
-                        .last_folder
-                        .and_then(|path| firewol_core::explorer::resolve_directory(&path).ok());
-                    Ok(text(&last.map(Ok).unwrap_or_else(home)?))
+                let (tabs, active) = blocking(move || {
+                    let (tabs, active) = files.settings().startup_tabs();
+                    let tabs: Vec<_> = tabs.iter().map(|tab| text(tab)).collect();
+                    Ok((tabs, active))
                 })
-                .await?
+                .await?;
+                let path = match tabs.get(active) {
+                    Some(tab) => tab.clone(),
+                    None => text(&home().map_err(message)?),
+                };
+                if tabs.len() > 1 {
+                    restore = tabs;
+                    restore_active = active as u32;
+                }
+                path
             }
         },
     };
@@ -117,6 +126,8 @@ async fn startup(
         label,
         adopt: request.as_ref().and_then(|request| request.adopt.clone()),
         path,
+        restore,
+        restore_active,
         split: request.map_or_else(
             || std::env::var_os("FIREWOL_SPLIT").is_some_and(|value| !value.is_empty()),
             |r| r.split,
@@ -455,6 +466,18 @@ async fn set_dialog_probe(
         default_apps_view(&data)
     })
     .await
+}
+
+/// Called as a window closes; failing to remember must never stop it closing.
+#[tauri::command]
+async fn remember_tabs(
+    files: State<'_, Files>,
+    tabs: Vec<String>,
+    active: u32,
+) -> Result<(), String> {
+    let files = files.0.clone();
+    blocking(move || files.remember_tabs(tabs.into_iter().map(PathBuf::from).collect(), active))
+        .await
 }
 
 #[tauri::command]
@@ -1360,7 +1383,11 @@ fn open_from_another_launch(app: &AppHandle, arguments: Vec<String>) {
     let path = match launch {
         Launch::Folder(folder) => text(&folder),
         Launch::Default | Launch::HandOff(_) => {
-            home().map_or_else(|_| String::new(), |path| text(&path))
+            let (tabs, active) = app.state::<Files>().0.settings().startup_tabs();
+            tabs.get(active)
+                .map(|tab| text(tab))
+                .or_else(|| home().ok().map(|path| text(&path)))
+                .unwrap_or_default()
         }
     };
     let state = app.state::<App>();
@@ -1513,6 +1540,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             startup,
             default_apps,
+            remember_tabs,
             set_default_folders,
             set_dialog_probe,
             navigate,

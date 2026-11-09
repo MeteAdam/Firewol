@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getVersion } from "@tauri-apps/api/app";
-  import type { AppearancePatch, SettingsPatch, SettingsView } from "./contract";
+  import type { AppearancePatch, Pin, SettingsPatch, SettingsView } from "./contract";
   import { COLOR_GROUPS, COLOR_SLOTS, PRESETS, colors, paletteOf, presetClass, type ColorSlot } from "./appearance";
   import { contrastRatio, cssRgb, hexOf, parseHex, type Rgb } from "./color";
   import AdminSettings from "./AdminSettings.svelte";
@@ -8,9 +8,13 @@
   import DefaultApps from "./DefaultApps.svelte";
   import Icon from "./Icon.svelte";
   import MenuEditor from "./MenuEditor.svelte";
+  import StartupSettings from "./StartupSettings.svelte";
 
-  let { settings, dark, section = $bindable("appearance"), onappearance, onsave }: {
+  let { settings, pins, current, dark, section = $bindable("appearance"), onappearance, onsave }: {
     settings: SettingsView;
+    pins: Pin[];
+    /** The folder open in the active tab. */
+    current: string;
     dark: boolean;
     section?: string;
     onappearance: (appearance: AppearancePatch) => void;
@@ -20,6 +24,7 @@
 
   const SECTIONS = [
     { id: "appearance", name: "Appearance", icon: "palette", keys: "theme preset light dark follow windows colours colors wheel background surface text accent folder label secondary text contrast title bar tabs selection popup error window controls caption buttons side shape fill hover" },
+    { id: "startup", name: "Startup", icon: "open", keys: "startup start open launch first folder tab restore last window pinned choose begin resume" },
     { id: "menu", name: "Context menu", icon: "menu", keys: "context menu right click actions hide show reorder custom action executable reset" },
     { id: "search", name: "Search", icon: "search", keys: "search find folder shortcut regex regular expression filters extension size date ntfs volume drive scope index" },
     { id: "transfers", name: "Transfers", icon: "transfer", keys: "transfers copy move verify pause resume cancel speed graph drag drop" },
@@ -235,6 +240,8 @@
         <MenuEditor menu={settings.menu} shellItems={settings.shell_items} {onsave} />
       {:else if section === "admin"}
         <AdminSettings elevation={settings.elevation} {onsave} />
+      {:else if section === "startup"}
+        <StartupSettings startup={settings.startup} {pins} {current} {onsave} />
       {:else if section === "defaults"}
         <DefaultApps />
       {/if}

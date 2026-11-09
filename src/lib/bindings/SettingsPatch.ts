@@ -3,8 +3,9 @@ import type { AppearancePatch } from "./AppearancePatch";
 import type { ColumnWidthsView } from "./ColumnWidthsView";
 import type { ElevationView } from "./ElevationView";
 import type { MenuEntryView } from "./MenuEntryView";
+import type { StartupView } from "./StartupView";
 
-export type SettingsPatch = { appearance?: AppearancePatch, sidebar?: boolean, grid?: boolean, 
+export type SettingsPatch = { startup?: StartupView, appearance?: AppearancePatch, sidebar?: boolean, grid?: boolean, 
 /**
  * 96, 128 or 160.
  */

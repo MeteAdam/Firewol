@@ -23,6 +23,7 @@
     "allow-list-page",
     "allow-folder-progress",
     "allow-default-apps",
+    "allow-remember-tabs",
     "allow-set-dialog-probe",
     "allow-set-default-folders",
     "allow-folder-groups",

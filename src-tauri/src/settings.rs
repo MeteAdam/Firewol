@@ -4,13 +4,15 @@ use firewol_core::explorer::elevation::{
 };
 use firewol_core::explorer::{
     CaptionShape, ColorSlot, ColumnWidths, FolderStyle, ItemId, MenuAction, MenuEntry, Preset, Rgb,
-    Session, Settings,
+    Session, Settings, StartupChoice, resolve_directory,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::contract::{ElevationView, FolderStyleView, SettingsPatch, SettingsView, StyledFolder};
+use crate::contract::{
+    ElevationView, FolderStyleView, SettingsPatch, SettingsView, StartupView, StyledFolder,
+};
 
 pub const TILES: [u32; 3] = [96, 128, 160];
 pub const ROWS: [u32; 4] = [24, 32, 40, 52];
@@ -18,6 +20,33 @@ pub const SIDEBAR_WIDTH: std::ops::RangeInclusive<u32> = 180..=360;
 const NAME_WIDTH: std::ops::RangeInclusive<u32> = 120..=2400;
 const COLUMN_WIDTH: std::ops::RangeInclusive<u32> = 56..=1200;
 const EXECUTABLE_LENGTH: usize = 4096;
+
+fn startup_view(choice: &StartupChoice) -> StartupView {
+    let (kind, path) = match choice {
+        StartupChoice::Last => ("last", None),
+        StartupChoice::Pin(folder) => ("pin", Some(folder)),
+        StartupChoice::Folder(folder) => ("folder", Some(folder)),
+    };
+    StartupView {
+        kind: kind.to_owned(),
+        path: path.map(|folder| crate::folders::text(folder)),
+    }
+}
+
+/// A chosen folder must exist now; one that disappears later falls back at startup.
+fn startup_choice(view: StartupView) -> Result<StartupChoice> {
+    let folder = || -> Result<PathBuf> {
+        let path = view.path.as_deref().filter(|path| !path.trim().is_empty());
+        let path = path.ok_or_else(|| anyhow::anyhow!("Choose a folder"))?;
+        resolve_directory(Path::new(path))
+    };
+    match view.kind.as_str() {
+        "last" => Ok(StartupChoice::Last),
+        "pin" => Ok(StartupChoice::Pin(folder()?)),
+        "folder" => Ok(StartupChoice::Folder(folder()?)),
+        _ => anyhow::bail!("Unknown startup choice"),
+    }
+}
 
 fn mirror<T: Serialize, U: DeserializeOwned>(value: T) -> Result<U> {
     Ok(serde_json::from_value(serde_json::to_value(value)?)?)
@@ -41,6 +70,7 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
         shell_items: settings.shell_items.unwrap_or(true),
         show_hidden: settings.show_hidden.unwrap_or(true),
         show_extensions: settings.show_extensions.unwrap_or(true),
+        startup: startup_view(&settings.startup),
         columns: mirror(settings.columns.unwrap_or_default())?,
         appearance: mirror(&settings.appearance)?,
         menu: mirror(&settings.menu)?,
@@ -144,6 +174,7 @@ pub fn update(
     patch: SettingsPatch,
     confirm: impl FnOnce(&[String]) -> bool,
 ) -> Result<SettingsView> {
+    let startup = patch.startup.map(startup_choice).transpose()?;
     let appearance = patch.appearance;
     let preset = appearance
         .as_ref()
@@ -286,6 +317,9 @@ pub fn update(
         }
         if let Some(shell_items) = patch.shell_items {
             settings.shell_items = Some(shell_items);
+        }
+        if let Some(startup) = startup {
+            settings.startup = startup;
         }
         if let Some(show_hidden) = patch.show_hidden {
             settings.show_hidden = Some(show_hidden);

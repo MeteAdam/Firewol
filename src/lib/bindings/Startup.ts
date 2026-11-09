@@ -2,7 +2,15 @@
 import type { SessionState } from "./SessionState";
 import type { TabSnapshot } from "./TabSnapshot";
 
-export type Startup = { label: string, adopt: TabSnapshot | null, path: string, split: boolean, report: boolean, 
+export type Startup = { label: string, adopt: TabSnapshot | null, path: string, 
+/**
+ * Every tab of the "Last used window" start; empty when only `path` opens.
+ */
+restore: Array<string>, 
+/**
+ * Which of `restore` is active.
+ */
+restoreActive: number, split: boolean, report: boolean, 
 /**
  * Runs the interface's file-operation self-test (`FIREWOL_SELF_TEST`) and reports it.
  */

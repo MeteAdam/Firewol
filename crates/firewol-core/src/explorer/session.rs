@@ -190,6 +190,16 @@ impl Session {
         self.recovered
     }
 
+    /// Remembers the tabs of the window that just closed, for the "Last used window" start.
+    pub fn remember_tabs(&self, tabs: Vec<PathBuf>, active: u32) -> Result<()> {
+        ensure!(tabs.len() <= 64, "Too many tabs to remember");
+        self.update_settings(|settings| {
+            settings.last_tabs = tabs;
+            settings.last_tab = active;
+        })
+        .map(drop)
+    }
+
     /// Notes the folder to reopen next time. Saved a moment later, so browsing quickly writes
     /// once, and best effort, because a settings file in use must not fail a navigation.
     pub fn remember_folder(self: &Arc<Self>, folder: PathBuf) {

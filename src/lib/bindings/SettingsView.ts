@@ -3,6 +3,7 @@ import type { AppearanceView } from "./AppearanceView";
 import type { ColumnWidthsView } from "./ColumnWidthsView";
 import type { ElevationView } from "./ElevationView";
 import type { MenuEntryView } from "./MenuEntryView";
+import type { StartupView } from "./StartupView";
 import type { StyledFolder } from "./StyledFolder";
 
 export type SettingsView = { version: number, theme_migrated: boolean, sidebar: boolean, grid: boolean, tile: number, 
@@ -25,4 +26,4 @@ show_hidden: boolean,
 /**
  * File names show their extension.
  */
-show_extensions: boolean, columns: ColumnWidthsView, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, };
+show_extensions: boolean, columns: ColumnWidthsView, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, startup: StartupView, };

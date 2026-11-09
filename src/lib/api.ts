@@ -49,6 +49,7 @@ export const api = {
   listPage: (id: number, offset: number, sort: SortView) => invoke<Page>("list_page", { id, offset, sort }),
   folderProgress: (id: number) => invoke<FolderProgress>("folder_progress", { id }),
   defaultApps: () => invoke<DefaultAppsView>("default_apps"),
+  rememberTabs: (tabs: string[], active: number) => invoke<void>("remember_tabs", { tabs, active }),
   setDefaultFolders: (enabled: boolean) => invoke<DefaultAppsView>("set_default_folders", { enabled }),
   setDialogProbe: (enabled: boolean) => invoke<DefaultAppsView>("set_dialog_probe", { enabled }),
   folderGroups: (id: number) => invoke<FolderGroup[]>("folder_groups", { id }),

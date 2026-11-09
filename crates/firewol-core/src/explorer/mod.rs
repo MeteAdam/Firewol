@@ -29,7 +29,7 @@ pub use search::{Filters, SearchIndex, SearchQuery, SearchReader, remove_stale_i
 pub use session::{Clipboard, Completion, History, Session};
 pub use settings::{
     Appearance, CaptionShape, ColorSlot, ColumnWidths, FolderKey, FolderStyle, MenuAction,
-    MenuEntry, Preset, Rgb, SavedView, Settings, default_menu,
+    MenuEntry, Preset, Rgb, SavedView, Settings, StartupChoice, default_menu,
 };
 
 use std::ffi::{OsStr, OsString};

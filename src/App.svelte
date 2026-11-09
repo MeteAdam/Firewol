@@ -78,6 +78,8 @@
   const windowsDark = new MediaQuery("(prefers-color-scheme: dark)");
   const sidebar = $derived(settings?.sidebar ?? true);
   /** The active folder's own view; a folder without one opens in details. */
+  /** Remembered while the Settings tab is in front, so it can offer the folder behind it. */
+  const lastFolderPath = $derived(slots.flatMap((slot) => slot.tabs).flatMap((tab) => (tab.kind === "folder" ? [tab.pane.path] : [])).at(0) ?? "");
   const gridOf = (pane?: Pane) => pane?.folder?.view?.grid ?? false;
   const tileOf = (pane?: Pane) => pane?.folder?.view?.tile ?? settings?.tile ?? 128;
   /** Settles when the latest view choice has reached the core (used by the self-test). */
@@ -918,6 +920,16 @@
     if (slots.length === 1 && slot.tabs.length === 1) return;
     try { await api.adoptPane(snapshot(tab)); await closeTab(slot, tab, true); }
     catch (reason) { notify(String(reason), { error: true }); if (tab.kind === "folder") await tab.pane.resume(); }
+  }
+
+  /** The folder tabs of this window, for the "Last used window" start. */
+  async function rememberTabs() {
+    if (startup?.report) return;
+    const slot = slots[activeIndex] ?? slots[0];
+    const tabs = (slot?.tabs ?? []).flatMap((tab) => (tab.kind === "folder" && tab.pane.path ? [tab] : []));
+    if (tabs.length === 0) return;
+    const active = Math.max(0, tabs.findIndex((tab) => tab.id === slot.activeTab));
+    await api.rememberTabs(tabs.map((tab) => (tab.kind === "folder" ? tab.pane.path : "")), active).catch(() => {});
   }
 
   function openSettings(section?: string) {
@@ -2382,6 +2394,19 @@
   }
 
   /** Only reads: a test run must never change how Windows opens folders. */
+  async function startupSteps(check: Check) {
+    openSettings("startup");
+    await waitFor(() => !!document.querySelector('[aria-label="When Firewol opens"]'), 5000, "the Startup section");
+    const here = active?.path ?? slots[0].tabs.flatMap((tab) => (tab.kind === "folder" ? [tab.pane.path] : []))[0];
+    await saveOrThrow({ startup: { kind: "folder", path: here } });
+    check("a chosen startup folder is saved", settings?.startup.kind === "folder" && !!settings.startup.path);
+    const refused = await saveOrThrow({ startup: { kind: "folder", path: `${here}\\no-such-folder` } }).then(() => false, () => true);
+    check("a startup folder that does not exist is refused", refused && settings?.startup.kind === "folder");
+    await saveOrThrow({ startup: { kind: "last", path: null } });
+    check("the last used window can be chosen again", settings?.startup.kind === "last");
+    settingsSection = "appearance";
+  }
+
   async function defaultAppsSteps(check: Check) {
     openSettings("defaults");
     await waitFor(() => !!document.querySelector('[aria-label="Folders and Win+E"] button'), 5000, "the Default apps section");
@@ -2547,6 +2572,7 @@
       await middleClickSteps(source, slot, check);
       await outsideChangeSteps(source, check);
       await groupSteps(source, check);
+      await startupSteps(check);
       await defaultAppsSteps(check);
       await toastSteps(check);
       await toggleSplit();
@@ -2654,6 +2680,7 @@
         event.preventDefault();
         // A failed save or query must never leave the window impossible to close.
         await flushAppearance().catch(() => {});
+        await rememberTabs();
         if (await api.operationBusy().catch(() => false)) closeWarning = true;
         else { allowClose = true; await appWindow.close(); }
       }),
@@ -2675,7 +2702,20 @@
         slots = [new PaneSlot(tab)];
         if (tab.kind === "folder") await tab.pane.resume();
       } else {
-        slots = (info.split ? [newPane(), newPane()] : [newPane()]).map(pane => new PaneSlot(folderTab(pane)));
+        if (info.restore.length > 1) {
+          // Only the active tab reads its folder now; the others do when they are selected.
+          const tabs = info.restore.map((path) => {
+            const pane = newPane();
+            pane.path = path;
+            pane.label = path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+            return folderTab(pane);
+          });
+          const slot = new PaneSlot(tabs[info.restoreActive]);
+          slot.tabs = tabs;
+          slots = [slot];
+        } else {
+          slots = (info.split ? [newPane(), newPane()] : [newPane()]).map(pane => new PaneSlot(folderTab(pane)));
+        }
         await Promise.all(panes.map((pane) => pane.open(info.path)));
       }
       await painted();
@@ -2864,7 +2904,7 @@
           />
           {/key}
           {:else if slot.active?.kind === "settings" && settings}
-            <Settings {settings} dark={dark ?? false} bind:section={settingsSection} onappearance={previewAppearance} onsave={saveOrThrow} />
+            <Settings {settings} pins={session.pins} current={lastFolderPath} dark={dark ?? false} bind:section={settingsSection} onappearance={previewAppearance} onsave={saveOrThrow} />
           {/if}
           </div>
         {/each}

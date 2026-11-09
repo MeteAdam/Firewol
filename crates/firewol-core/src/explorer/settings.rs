@@ -163,6 +163,16 @@ impl FolderKey {
     }
 }
 
+/// What Firewol shows when it opens.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StartupChoice {
+    /// The tabs of the window closed last.
+    #[default]
+    Last,
+    Pin(PathBuf),
+    Folder(PathBuf),
+}
+
 /// How one folder is shown. A folder without one opens in details.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedView {
@@ -361,6 +371,11 @@ pub struct Settings {
     pub version: u32,
     pub theme_migrated: bool,
     pub last_folder: Option<PathBuf>,
+    /// What a new launch shows.
+    pub startup: StartupChoice,
+    /// The folder tabs of the window closed last, and which of them was active.
+    pub last_tabs: Vec<PathBuf>,
+    pub last_tab: u32,
     pub pins: Vec<PathBuf>,
     /// The Windows folders were added to the pins once; removing one later keeps it removed.
     pub pins_seeded: bool,
@@ -398,6 +413,9 @@ impl Default for Settings {
             version: 3,
             theme_migrated: false,
             last_folder: None,
+            startup: StartupChoice::Last,
+            last_tabs: Vec::new(),
+            last_tab: 0,
             pins: Vec::new(),
             pins_seeded: false,
             sidebar: None,
@@ -427,6 +445,15 @@ struct Stored {
     #[serde(default)]
     theme_migrated: bool,
     last_folder: Option<Vec<u16>>,
+    /// 0 is the last window, 1 a pin and 2 a chosen folder.
+    #[serde(default)]
+    startup_kind: u8,
+    #[serde(default)]
+    startup_path: Option<Vec<u16>>,
+    #[serde(default)]
+    last_tabs: Vec<Vec<u16>>,
+    #[serde(default)]
+    last_tab: u32,
     #[serde(default)]
     pins: Vec<Vec<u16>>,
     #[serde(default)]
@@ -466,6 +493,29 @@ struct Stored {
 }
 
 impl Settings {
+    /// The tabs a new window opens and which one is active. Folders that no longer exist are
+    /// skipped; an empty list means the caller falls back to the user's home folder.
+    pub fn startup_tabs(&self) -> (Vec<PathBuf>, usize) {
+        let usable = |folder: &PathBuf| super::resolve_directory(folder).ok();
+        let chosen = match &self.startup {
+            StartupChoice::Last => None,
+            StartupChoice::Pin(folder) | StartupChoice::Folder(folder) => usable(folder),
+        };
+        if let Some(folder) = chosen {
+            return (vec![folder], 0);
+        }
+        if self.startup == StartupChoice::Last {
+            let active = self.last_tabs.get(self.last_tab as usize);
+            let tabs: Vec<_> = self.last_tabs.iter().filter_map(usable).collect();
+            if !tabs.is_empty() {
+                let wanted = active.and_then(usable);
+                let index = tabs.iter().position(|tab| Some(tab) == wanted.as_ref());
+                return (tabs, index.unwrap_or(0));
+            }
+        }
+        (self.last_folder.iter().filter_map(usable).collect(), 0)
+    }
+
     pub fn load(dir: &Path) -> Result<Self> {
         let file = match File::open(dir.join("explorer.json")) {
             Ok(file) => file,
@@ -500,6 +550,13 @@ impl Settings {
             version: 3,
             theme_migrated: stored.theme_migrated,
             last_folder: stored.last_folder.map(path),
+            startup: match (stored.startup_kind, stored.startup_path.map(path)) {
+                (1, Some(folder)) => StartupChoice::Pin(folder),
+                (2, Some(folder)) => StartupChoice::Folder(folder),
+                _ => StartupChoice::Last,
+            },
+            last_tabs: stored.last_tabs.into_iter().map(path).collect(),
+            last_tab: stored.last_tab,
             pins: stored.pins.into_iter().map(path).collect(),
             pins_seeded: stored.pins_seeded,
             sidebar: stored.sidebar,
@@ -602,6 +659,17 @@ impl Settings {
             version: 3,
             theme_migrated: self.theme_migrated,
             last_folder: self.last_folder.as_ref().map(units),
+            startup_kind: match self.startup {
+                StartupChoice::Last => 0,
+                StartupChoice::Pin(_) => 1,
+                StartupChoice::Folder(_) => 2,
+            },
+            startup_path: match &self.startup {
+                StartupChoice::Last => None,
+                StartupChoice::Pin(folder) | StartupChoice::Folder(folder) => Some(units(folder)),
+            },
+            last_tabs: self.last_tabs.iter().map(units).collect(),
+            last_tab: self.last_tab,
             pins: self.pins.iter().map(units).collect(),
             pins_seeded: self.pins_seeded,
             sidebar: self.sidebar,
@@ -641,6 +709,40 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_startup_choice_decides_the_first_tabs() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path().canonicalize()?;
+        let (first, second) = (root.join("first"), root.join("second"));
+        fs::create_dir(&first)?;
+        fs::create_dir(&second)?;
+        let gone = root.join("gone");
+        let mut settings = Settings {
+            last_tabs: vec![first.clone(), gone.clone(), second.clone()],
+            last_tab: 2,
+            ..Settings::default()
+        };
+        let (tabs, active) = settings.startup_tabs();
+        assert_eq!(
+            tabs,
+            [first.clone(), second.clone()],
+            "a missing tab is skipped"
+        );
+        assert_eq!(tabs[active], second, "the active tab stays active");
+
+        settings.startup = StartupChoice::Folder(first.clone());
+        assert_eq!(settings.startup_tabs(), (vec![first.clone()], 0));
+
+        settings.last_folder = Some(second.clone());
+        settings.startup = StartupChoice::Pin(gone);
+        assert_eq!(
+            settings.startup_tabs(),
+            (vec![second], 0),
+            "a removed pin falls back"
+        );
+        Ok(())
+    }
 
     #[test]
     fn each_folder_keeps_its_own_view_across_a_reload() -> Result<()> {

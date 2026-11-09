@@ -1,9 +1,10 @@
 //! NTFS volume indexes shared by every window. Each drive has at most one index and one
 //! elevated read-only helper; it runs until the user stops it or Firewol exits.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use firewol_core::explorer::{Cancellation, SearchIndex, SearchReader, data_dir};
@@ -13,9 +14,42 @@ use crate::folders::lock;
 
 pub type VolumeNotify = Arc<dyn Fn(VolumeState) + Send + Sync>;
 
+const LAUNCH_INTERVAL: Duration = Duration::from_secs(3);
+
 #[derive(Default)]
 pub struct Volumes {
     drives: Mutex<HashMap<char, Arc<Volume>>>,
+    launches: Mutex<LaunchGate>,
+}
+
+/// A stopped index can still be waiting on its UAC prompt, so stopping and starting again must not
+/// stack another prompt. One launch per drive at a time, and never two in quick succession.
+#[derive(Default)]
+struct LaunchGate {
+    active: HashSet<char>,
+    last: HashMap<char, Instant>,
+}
+
+impl LaunchGate {
+    fn begin(&mut self, drive: char, now: Instant) -> Result<()> {
+        anyhow::ensure!(
+            !self.active.contains(&drive),
+            "The {drive}: index is still stopping. Try again in a moment."
+        );
+        anyhow::ensure!(
+            self.last
+                .get(&drive)
+                .is_none_or(|last| now.duration_since(*last) >= LAUNCH_INTERVAL),
+            "Wait a moment before starting the {drive}: index again."
+        );
+        self.active.insert(drive);
+        self.last.insert(drive, now);
+        Ok(())
+    }
+
+    fn finish(&mut self, drive: char) {
+        self.active.remove(&drive);
+    }
 }
 
 struct Volume {
@@ -62,10 +96,18 @@ impl Volumes {
         if let Some(volume) = drives.get(&drive) {
             return Ok(volume.state());
         }
-        let data = data_dir()?;
+        lock(&self.launches).begin(drive, Instant::now())?;
+        let created = data_dir().and_then(|data| Ok((SearchIndex::create(&data)?, data)));
+        let (index, data) = match created {
+            Ok(created) => created,
+            Err(error) => {
+                lock(&self.launches).finish(drive);
+                return Err(error);
+            }
+        };
         let volume = Arc::new(Volume {
             drive,
-            index: SearchIndex::create(&data)?,
+            index,
             cancel: Cancellation::default(),
             ready: Mutex::default(),
             reader: Mutex::default(),
@@ -83,6 +125,7 @@ impl Volumes {
                 });
             let stopped = volume.cancel.is_cancelled();
             volumes.forget(&volume);
+            lock(&volumes.launches).finish(drive);
             notify(VolumeState {
                 ready: false,
                 running: false,
@@ -133,5 +176,23 @@ impl Volumes {
             *reader = Some(volume.index.reader()?);
         }
         read(reader.as_mut().context("Open the volume index")?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launches_never_stack_for_a_drive() -> Result<()> {
+        let mut gate = LaunchGate::default();
+        let start = Instant::now();
+        gate.begin('C', start)?;
+        assert!(gate.begin('C', start + LAUNCH_INTERVAL * 2).is_err());
+        gate.begin('D', start)?;
+        gate.finish('C');
+        assert!(gate.begin('C', start + LAUNCH_INTERVAL / 2).is_err());
+        gate.begin('C', start + LAUNCH_INTERVAL)?;
+        Ok(())
     }
 }

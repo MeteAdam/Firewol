@@ -260,6 +260,10 @@ async fn start_volume_index(
     });
     blocking(move || {
         let drive = volumes::drive(&drive)?;
+        anyhow::ensure!(
+            firewol_core::explorer::volume::ntfs_drive(Path::new(&format!("{drive}:\\"))).is_some(),
+            "Volume search needs a local NTFS drive"
+        );
         let state = volumes.start(drive, notify.clone())?;
         notify(state.clone());
         Ok(state)

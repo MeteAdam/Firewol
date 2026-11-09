@@ -101,6 +101,7 @@ struct Running {
 
 pub struct Session {
     data: PathBuf,
+    recovered: bool,
     settings: Mutex<Settings>,
     settings_write: Mutex<()>,
     clipboard: Arc<Mutex<Option<Clipboard>>>,
@@ -111,7 +112,7 @@ pub struct Session {
 impl Session {
     /// Loads settings from `data` and starts the file worker, which reports to `notify`.
     pub fn open(data: PathBuf, notify: impl Fn(Completion) + Send + 'static) -> Result<Self> {
-        let settings = Settings::load(&data)?;
+        let (settings, recovered) = Settings::load_or_recover(&data)?;
         let clipboard = Arc::new(Mutex::new(None::<Clipboard>));
         let running = Arc::new(Mutex::new(None::<Running>));
         let (jobs, requests) = mpsc::channel::<Request>();
@@ -159,12 +160,18 @@ impl Session {
             .context("Start the file operation worker")?;
         Ok(Self {
             data,
+            recovered,
             settings: Mutex::new(settings),
             settings_write: Mutex::new(()),
             clipboard,
             running,
             jobs,
         })
+    }
+
+    /// True when unreadable settings were set aside at startup and defaults are in use.
+    pub fn settings_recovered(&self) -> bool {
+        self.recovered
     }
 
     pub fn data_dir(&self) -> &Path {

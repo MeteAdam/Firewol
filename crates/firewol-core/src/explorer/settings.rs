@@ -448,6 +448,23 @@ impl Settings {
         })
     }
 
+    /// For startup. A file that cannot be parsed, as a crash can leave one, is set aside so
+    /// Firewol still opens; `true` reports that. Settings from a newer version stay an error.
+    pub fn load_or_recover(dir: &Path) -> Result<(Self, bool)> {
+        match Self::load(dir) {
+            Err(error)
+                if error
+                    .downcast_ref::<serde_json::Error>()
+                    .is_some_and(|parse| !parse.is_io()) =>
+            {
+                fs::rename(dir.join("explorer.json"), dir.join("explorer.json.corrupt"))
+                    .context("Set the unreadable settings aside")?;
+                Ok((Self::default(), true))
+            }
+            loaded => loaded.map(|settings| (settings, false)),
+        }
+    }
+
     /// Moves a pin so it sits before `before`, or last when `before` is `None`. Unknown paths
     /// and a move onto itself change nothing.
     pub fn move_pin(&mut self, folder: &Path, before: Option<&Path>) {
@@ -536,6 +553,8 @@ impl Settings {
         };
         let file = tempfile::NamedTempFile::new_in(dir)?;
         serde_json::to_writer(file.as_file(), &stored)?;
+        // Without this the rename can reach the disk before the data, and a crash leaves a hole.
+        file.as_file().sync_all()?;
         file.persist(dir.join("explorer.json"))
             .context("Save Firewol settings")?;
         Ok(())

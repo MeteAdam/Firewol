@@ -1207,7 +1207,7 @@ fn main() {
             let handle = app.handle().clone();
             let transfers = Arc::new(Transfers::default());
             app.manage(transfers.clone());
-            let session = Session::open(data_dir()?, move |done| {
+            let opened = Session::open(data_dir()?, move |done| {
                 if let Some(status) = transfers.finish(&done.message, done.succeeded) {
                     let _ = handle.emit(contract::TRANSFER_PROGRESS, status);
                 }
@@ -1219,7 +1219,24 @@ fn main() {
                         refresh: done.refresh,
                     },
                 );
-            })?;
+            });
+            // A failure here would otherwise end this windowless process without a word.
+            let session = match opened {
+                Ok(session) => session,
+                Err(error) => {
+                    elevation::alert("Firewol could not start", &format!("{error:#}"));
+                    std::process::exit(1);
+                }
+            };
+            if session.settings_recovered() && std::env::var_os("FIREWOL_SPIKE_REPORT").is_none() {
+                std::thread::spawn(|| {
+                    elevation::alert(
+                        "Firewol settings were reset",
+                        "Your settings could not be read, so Firewol started with the defaults. \
+                         The old file was kept as explorer.json.corrupt.",
+                    );
+                });
+            }
             // Best effort: a settings file that cannot be written must not stop the app.
             let _ = session.seed_pins();
             let _ = session.seed_views();

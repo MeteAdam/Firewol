@@ -15,7 +15,7 @@ use windows::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MessageBoxW, SW_SHOWNORMAL,
+    IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MessageBoxW, SW_SHOWNORMAL,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -119,6 +119,18 @@ pub fn confirm_policy_change(owner: HWND, changes: &[String]) -> bool {
         )
     };
     answer == IDOK
+}
+
+/// For a problem Firewol must report when it has no window of its own to show it in.
+pub fn alert(title: &str, text: &str) {
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            &HSTRING::from(title),
+            MB_OK | MB_ICONWARNING,
+        );
+    }
 }
 
 /// The real System32 folder, which unlike `%SystemRoot%` no process environment can redirect.

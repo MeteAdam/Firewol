@@ -100,6 +100,27 @@ fn session_cuts_pastes_renames_and_undoes_by_identity() -> Result<()> {
 }
 
 #[test]
+fn unreadable_settings_are_set_aside_but_a_newer_version_is_kept() -> Result<()> {
+    for damaged in [&b""[..], b"{\"version\":2,\"pins\":[", b"\0\0\0\0"] {
+        let fixture = tempfile::tempdir()?;
+        fs::write(fixture.path().join("explorer.json"), damaged)?;
+        let session = Session::open(fixture.path().to_owned(), |_| {})?;
+        assert!(session.settings_recovered());
+        assert!(session.settings().pins.is_empty());
+        assert_eq!(
+            fs::read(fixture.path().join("explorer.json.corrupt"))?,
+            damaged
+        );
+    }
+    let fixture = tempfile::tempdir()?;
+    let newer = br#"{"version":99}"#;
+    fs::write(fixture.path().join("explorer.json"), newer)?;
+    assert!(Session::open(fixture.path().to_owned(), |_| {}).is_err());
+    assert_eq!(fs::read(fixture.path().join("explorer.json"))?, newer);
+    Ok(())
+}
+
+#[test]
 fn session_pins_persist_and_reject_empty_clipboard_actions() -> Result<()> {
     let fixture = tempfile::tempdir()?;
     let root = fixture.path().canonicalize()?;

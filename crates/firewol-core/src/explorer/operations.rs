@@ -414,6 +414,9 @@ impl Operations {
     fn copy(item: &ItemId, into: &ItemId) -> Result<(TransferUndo, &'static str)> {
         let name = name_of(item.path())?;
         let destination = destination(item, into, &name)?;
+        if Stamp::read(&item.verify()?)?.directory {
+            refuse_links(item.path())?;
+        }
         // A partial Shell copy lives in a private staging directory until the final name can be claimed.
         let stage = tempfile::Builder::new()
             .prefix(".firewol-")
@@ -564,12 +567,48 @@ fn destination(item: &ItemId, into: &ItemId, name: &OsStr) -> Result<PathBuf> {
     );
     let stamp = Stamp::read(&item.verify()?)?;
     ensure!(
-        !stamp.directory || !into.path().starts_with(item.path()),
+        !stamp.directory || !inside(into.path(), item),
         "A folder cannot be transferred into itself"
     );
     let target = into.path().join(name);
     require_vacant(&target)?;
     Ok(target)
+}
+
+/// By identity, because one folder can be spelled with other case or with a `\\?\\` prefix.
+fn inside(folder: &Path, item: &ItemId) -> bool {
+    folder.starts_with(item.path())
+        || fs::canonicalize(folder).is_ok_and(|real| {
+            real.ancestors().any(|ancestor| {
+                ItemId::at(ancestor.to_owned()).is_ok_and(|id| id.identity == item.identity)
+            })
+        })
+}
+
+/// The Shell turns a nested junction into an empty folder and still reports success, so a tree
+/// with links is refused on every path length rather than copied differently. A folder that
+/// cannot be read here cannot be read by the copy either.
+fn refuse_links(root: &Path) -> Result<()> {
+    let mut pending = vec![root.to_owned()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            ensure!(
+                !kind.is_symlink(),
+                "The folder contains a link or junction that cannot be copied safely: {}",
+                display_path(&entry.path()).to_string_lossy()
+            );
+            if kind.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn name_of(path: &Path) -> Result<OsString> {
@@ -836,6 +875,63 @@ impl IFileOperationProgressSink_Impl for TransferSink_Impl {
         Ok(())
     }
     fn ResumeTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn junction(link: &Path, target: &Path) -> Result<()> {
+        let made = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()?;
+        ensure!(made.status.success(), "Create the test junction");
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_is_refused_inside_itself_however_the_path_is_spelled() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path().canonicalize()?;
+        let folder = root.join("Folder");
+        fs::create_dir_all(folder.join("sub"))?;
+        let item = ItemId::at(folder.clone())?;
+        let sub = ItemId::at(folder.join("sub"))?;
+        let plain = display_path(&folder).to_string_lossy().into_owned();
+        for spelled in [
+            format!(r"{}\SUB", plain.to_uppercase()),
+            format!(r"\\?\{}\sub", plain.to_lowercase()),
+        ] {
+            let into = ItemId::from_parts(spelled.into(), sub.identity.volume, sub.identity.index);
+            let error = destination(&item, &into, OsStr::new("Folder")).unwrap_err();
+            assert!(format!("{error:#}").contains("into itself"), "{error:#}");
+        }
+        let outside = ItemId::at(root.clone())?;
+        assert!(!inside(outside.path(), &item));
+        Ok(())
+    }
+
+    #[test]
+    fn a_folder_with_a_link_inside_is_not_copied() -> Result<()> {
+        let _sta = Apartment::sta()?;
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path().canonicalize()?;
+        let target = root.join("target");
+        fs::create_dir(&target)?;
+        let source = root.join("source");
+        fs::create_dir_all(source.join("deep"))?;
+        junction(&source.join("deep").join("link"), &target)?;
+        let into = root.join("into");
+        fs::create_dir(&into)?;
+        let error = Operations::copy(&ItemId::at(source)?, &ItemId::at(into.clone())?)
+            .err()
+            .context("A folder with a link was copied")?;
+        assert!(format!("{error:#}").contains("link or junction"));
+        assert_eq!(fs::read_dir(into)?.count(), 0);
         Ok(())
     }
 }

@@ -248,11 +248,14 @@ fn a_transfer_sweeps_stages_left_by_an_interrupted_one() -> Result<()> {
         }
         Ok(folder)
     };
-    let stale = stage(".firewol-Ab12Cd", &["payload"])?;
-    let empty = stage(".firewol-000000", &[])?;
-    let running = stage(".firewol-Zz9999", &["payload"])?;
-    let foreign = stage(".firewol-q1w2e3", &["payload", "notes.txt"])?;
-    let other = stage(".firewol-user", &["payload"])?;
+    let stale = stage(".firewol-Ab12Cd", &["payload", "firewol-stage"])?;
+    let empty = stage(".firewol-000000", &["firewol-stage"])?;
+    let running = stage(".firewol-Zz9999", &["payload", "firewol-stage"])?;
+    let foreign = stage(".firewol-q1w2e3", &["payload", "notes.txt", "firewol-stage"])?;
+    let other = stage(".firewol-user", &["payload", "firewol-stage"])?;
+    // The same shape as a stage, but Firewol never marked these.
+    let lookalike = stage(".firewol-backup", &["payload"])?;
+    let empty_lookalike = stage(".firewol-photos", &[])?;
     // A running transfer holds its stage open without sharing deletion.
     let held = fs::OpenOptions::new()
         .read(true)
@@ -274,6 +277,10 @@ fn a_transfer_sweeps_stages_left_by_an_interrupted_one() -> Result<()> {
     );
     assert!(running.join("payload").exists(), "a stage in use stays");
     assert!(foreign.join("notes.txt").exists() && other.join("payload").exists());
+    assert!(
+        lookalike.join("payload").exists() && empty_lookalike.exists(),
+        "a folder Firewol did not mark is never touched"
+    );
     drop(held);
     Ok(())
 }

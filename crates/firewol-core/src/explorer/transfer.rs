@@ -23,6 +23,10 @@ use crate::file_identity::identity;
 
 pub const MAX_TRANSFER_ITEMS: usize = 32;
 
+/// Written into every staging folder so that cleanup can never mistake a folder of the user's that
+/// only happens to look like one.
+const STAGE_MARKER: &str = "firewol-stage";
+
 pub struct TransferRequest {
     pub items: Vec<ItemId>,
     pub into: ItemId,
@@ -375,9 +379,12 @@ pub(super) fn sweep_stale_stages(into: &Path) {
             continue;
         };
         let children: Vec<_> = children.flatten().collect();
-        if children.iter().any(|child| {
-            child.file_name() != "payload" || !child.file_type().is_ok_and(|kind| kind.is_file())
-        }) {
+        if !children.iter().any(|child| child.file_name() == STAGE_MARKER)
+            || children.iter().any(|child| {
+                (child.file_name() != "payload" && child.file_name() != STAGE_MARKER)
+                    || !child.file_type().is_ok_and(|kind| kind.is_file())
+            })
+        {
             continue;
         }
         let exclusive = |path: &Path, flags: FILE_FLAGS_AND_ATTRIBUTES| {
@@ -420,6 +427,7 @@ pub(super) fn place(
     let stage = tempfile::Builder::new()
         .prefix(".firewol-")
         .tempdir_in(into.path())?;
+    File::create(stage.path().join(STAGE_MARKER)).context("Mark the staging folder")?;
     let staged_path = stage.path().join("payload");
     // Hold both directories in place until the completed copy is published.
     let stage_id = ItemId::at(stage.path().to_owned())?;

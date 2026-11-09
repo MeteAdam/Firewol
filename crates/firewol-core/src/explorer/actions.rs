@@ -100,17 +100,77 @@ pub fn take_ownership(target: &ItemId, policy: &ElevationPolicy, owner: HWND) ->
         !path.contains(['%', '"']),
         "Firewol cannot take ownership of a path that contains %"
     );
-    let system = std::env::var_os("SystemRoot").context("SystemRoot is unset")?;
-    let shell = executable_id(&Path::new(&system).join(r"System32\cmd.exe"))?;
-    let (recurse, grant) = if directory {
-        ("/r /d y", "/t /c /l /q")
-    } else {
-        ("", "/c /l")
-    };
-    let arguments = format!(
-        r#"/K takeown /f "{path}" {recurse} && icacls "{path}" /grant *S-1-5-32-544:F {grant}"#
+    ensure!(
+        target.path().parent().is_some(),
+        "Firewol cannot take ownership of a whole drive"
     );
+    ensure!(
+        !fs::symlink_metadata(target.path())?.file_type().is_symlink(),
+        "Firewol cannot take ownership of a link. Select the folder it points to."
+    );
+    let reach = if directory {
+        inspect_tree(target.path())?
+    } else {
+        Reach::Item
+    };
+    let shell = executable_id(&system_directory()?.join("cmd.exe"))?;
+    let arguments = ownership_command(&path, reach);
     elevation::launch_command(policy, &shell, &arguments, owner)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// A file: nothing below it to change.
+    Item,
+    /// A folder whose whole tree was read and holds no links.
+    Tree,
+    /// A folder with something unreadable inside, so links there could not be ruled out.
+    FolderOnly,
+}
+
+/// `takeown /r` and `icacls /t` both walk through junctions, so a link inside the tree would hand
+/// them whatever it points to. Reads the tree unelevated, without following links, and refuses one.
+fn inspect_tree(root: &Path) -> Result<Reach> {
+    let mut reach = Reach::Tree;
+    let mut pending = vec![root.to_owned()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&folder) else {
+            reach = Reach::FolderOnly;
+            continue;
+        };
+        for entry in entries {
+            let Ok((path, kind)) = entry.and_then(|entry| Ok((entry.path(), entry.file_type()?)))
+            else {
+                reach = Reach::FolderOnly;
+                continue;
+            };
+            ensure!(
+                !kind.is_symlink(),
+                "This folder contains a link, so Firewol will not take ownership of it: {}",
+                display_path(&path).to_string_lossy()
+            );
+            if kind.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(reach)
+}
+
+/// `/D` keeps an elevated `cmd` from running the per-user AutoRun command.
+fn ownership_command(path: &str, reach: Reach) -> String {
+    let (recurse, grant, note) = match reach {
+        Reach::Item => ("", "/c /l", ""),
+        Reach::Tree => ("/r /d y", "/t /c /l /q", ""),
+        Reach::FolderOnly => (
+            "",
+            "/c /l /q",
+            " & echo. & echo Firewol could not read every subfolder, so only this folder changed.",
+        ),
+    };
+    format!(
+        r#"/D /K takeown /f "{path}" {recurse} && icacls "{path}" /grant *S-1-5-32-544:F {grant}{note}"#
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -315,6 +375,70 @@ mod tests {
         let error = take_ownership(&ItemId::at(named)?, &policy, HWND::default()).unwrap_err();
         assert!(format!("{error:#}").contains("contains %"));
         Ok(())
+    }
+
+    fn junction(link: &Path, target: &Path) -> Result<()> {
+        let made = Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()?;
+        ensure!(made.status.success(), "Create the test junction");
+        Ok(())
+    }
+
+    #[test]
+    fn taking_ownership_refuses_links_and_whole_drives() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let policy = ElevationPolicy::new(ElevationMode::Standard, &[])?;
+        let none = HWND::default();
+        let victim = fixture.path().join("victim");
+        fs::create_dir(&victim)?;
+        let outer = fixture.path().join("outer");
+        fs::create_dir_all(outer.join("deep"))?;
+        junction(&outer.join("deep").join("looks-normal"), &victim)?;
+        let error = take_ownership(&ItemId::at(outer)?, &policy, none).unwrap_err();
+        assert!(format!("{error:#}").contains("looks-normal"));
+        let link = fixture.path().join("link");
+        junction(&link, &victim)?;
+        let error = take_ownership(&ItemId::at(link)?, &policy, none).unwrap_err();
+        assert!(format!("{error:#}").contains("cannot take ownership of a link"));
+        let system = system_directory()?;
+        let drive: PathBuf = system.components().take(2).collect();
+        let error = take_ownership(&ItemId::at(drive)?, &policy, none).unwrap_err();
+        assert!(format!("{error:#}").contains("whole drive"));
+        Ok(())
+    }
+
+    #[test]
+    fn an_unreadable_subfolder_limits_ownership_to_the_folder() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        assert_eq!(inspect_tree(fixture.path())?, Reach::Tree);
+        let locked = fixture.path().join("locked");
+        fs::create_dir(&locked)?;
+        let user = std::env::var("USERNAME")?;
+        let denied = Command::new("icacls")
+            .arg(&locked)
+            .args(["/deny", &format!("{user}:(RD)")])
+            .output()?;
+        ensure!(denied.status.success(), "Deny listing the test folder");
+        let reach = inspect_tree(fixture.path());
+        Command::new("icacls")
+            .arg(&locked)
+            .args(["/remove:d", &user])
+            .output()?;
+        assert_eq!(reach?, Reach::FolderOnly);
+        Ok(())
+    }
+
+    #[test]
+    fn the_elevated_command_skips_autorun_and_recurses_only_when_checked() {
+        let tree = ownership_command(r"C:\a b", Reach::Tree);
+        assert!(tree.starts_with(r#"/D /K takeown /f "C:\a b" /r"#) && tree.contains("/t"));
+        let folder = ownership_command(r"C:\a b", Reach::FolderOnly);
+        assert!(folder.starts_with("/D /K") && !folder.contains("/r") && !folder.contains("/t"));
+        let item = ownership_command(r"C:\a.txt", Reach::Item);
+        assert!(item.starts_with("/D /K") && !item.contains("/r"));
     }
 
     #[test]

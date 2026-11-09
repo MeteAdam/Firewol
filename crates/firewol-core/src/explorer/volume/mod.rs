@@ -259,7 +259,7 @@ fn update_reference(db: &Connection, row: i64, item: Option<&VisibleItem>) -> Re
     if let Some(item) = item {
         let unchanged: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1 AND path = ?2 AND size = ?3 AND modified = ?4)",
-            params![row, encode(item.path.as_os_str()), i64::try_from(item.size)?, item.modified],
+            params![row, encode(item.path.as_os_str()), super::stored_size(item.size), item.modified],
             |result| result.get(0),
         )?;
         if unchanged {

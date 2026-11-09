@@ -433,7 +433,7 @@ impl IndexedItem<'_> {
             self.directory,
             name,
             extension,
-            i64::try_from(self.size)?,
+            super::stored_size(self.size),
             self.modified,
             self.file_id.map(|id| id.index as i64),
             self.file_id.map(|id| id.volume),

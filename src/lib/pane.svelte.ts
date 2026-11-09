@@ -403,15 +403,24 @@ export class Pane {
     }
   }
 
+  /** A failed index is not rebuilt on every keystroke: a full walk per edit helps nobody. */
+  #indexFailed: { id: unknown; until: number } | null = null;
+
+  #noteIndexFailure() {
+    if (this.folder) this.#indexFailed = { id: this.folder.id, until: Date.now() + 30_000 };
+  }
+
   async startIndex() {
     const folder = this.folder;
     if (!folder || this.index !== "none") return;
+    if (this.#indexFailed?.id === folder.id && Date.now() < this.#indexFailed.until) return;
     this.index = "building";
     try {
       this.indexed(await api.startIndex(folder.id));
     } catch (reason) {
       this.index = "none";
       this.error = String(reason);
+      this.#noteIndexFailure();
     }
   }
 
@@ -420,6 +429,7 @@ export class Pane {
     if (state.error) {
       this.index = "none";
       this.error = state.error;
+      this.#noteIndexFailure();
     } else if (state.ready) {
       const first = this.index !== "ready";
       this.index = "ready";

@@ -6,7 +6,9 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::{Cancellation, Item, ItemPage, decode, encode, resolve_directory, unix_seconds};
+use super::{
+    Cancellation, Item, ItemPage, decode, encode, resolve_directory, stored_size, unix_seconds,
+};
 use crate::PageRequest;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -144,8 +146,8 @@ impl Directory {
         let mut next = self.count;
         let mut complete = false;
         {
-            let mut insert =
-                tx.prepare("INSERT INTO listing VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?;
+            let mut insert = tx
+                .prepare("INSERT OR IGNORE INTO listing VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?;
             for _ in 0..batch {
                 cancel.check()?;
                 let Some(entry) = source.next().transpose()? else {
@@ -153,18 +155,18 @@ impl Directory {
                     break;
                 };
                 // On Windows the entry's metadata comes from the enumeration itself.
-                let metadata = entry.metadata()?;
+                let (Ok(metadata), Ok(kind)) = (entry.metadata(), entry.file_type()) else {
+                    continue;
+                };
                 if metadata.file_attributes() & hide != 0 {
                     continue;
                 }
-                let directory = entry.file_type()?.is_dir();
-                insert.execute(params![
+                let directory = kind.is_dir();
+                let added = insert.execute(params![
                     next,
                     encode(&entry.file_name()),
                     directory,
-                    (!directory)
-                        .then(|| i64::try_from(metadata.file_size()))
-                        .transpose()?,
+                    (!directory).then(|| stored_size(metadata.file_size())),
                     unix_seconds(metadata.last_write_time()),
                     metadata.file_attributes(),
                     entry.file_name().to_string_lossy(),
@@ -175,6 +177,10 @@ impl Directory {
                         .to_string_lossy()
                         .to_lowercase(),
                 ])?;
+                // A broken server can list one name twice; the unique index drops the repeat.
+                if added == 0 {
+                    continue;
+                }
                 next = next.checked_add(1).context("Folder is too large")?;
             }
         }

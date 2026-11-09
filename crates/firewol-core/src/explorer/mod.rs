@@ -203,6 +203,12 @@ fn attributes(file: &File) -> Result<(bool, bool, u64, i64)> {
     ))
 }
 
+/// A file size for a signed database column. A hostile share can report any 64-bit value, and
+/// one such entry must not abort a whole listing.
+fn stored_size(size: u64) -> i64 {
+    i64::try_from(size).unwrap_or(i64::MAX)
+}
+
 /// Converts a FILETIME (100 ns ticks since 1601) to Unix seconds.
 fn unix_seconds(filetime: u64) -> i64 {
     (filetime / 10_000_000) as i64 - 11_644_473_600

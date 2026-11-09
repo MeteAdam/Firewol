@@ -200,6 +200,15 @@ async fn folder_progress(
 }
 
 #[tauri::command]
+async fn folder_groups(
+    state: State<'_, App>,
+    id: u64,
+) -> Result<Vec<contract::FolderGroup>, String> {
+    let folders = state.folders.clone();
+    blocking(move || folders.groups(id)).await
+}
+
+#[tauri::command]
 async fn locate_selection(
     state: State<'_, App>,
     id: u64,
@@ -545,6 +554,7 @@ async fn set_folder_view(
             SavedView {
                 grid: view.grid,
                 tile: view.tile,
+                group: view.group,
             },
         )
     })
@@ -1303,6 +1313,7 @@ fn main() {
             // Best effort: a settings file that cannot be written must not stop the app.
             let _ = session.seed_pins();
             let _ = session.seed_views();
+            let _ = session.seed_groups();
             let session = Arc::new(session);
             let devices = app.handle().clone();
             let _ = firewol_core::explorer::watch_devices(move || {
@@ -1345,6 +1356,7 @@ fn main() {
             adopt_pane,
             list_page,
             folder_progress,
+            folder_groups,
             locate_selection,
             start_index,
             search,

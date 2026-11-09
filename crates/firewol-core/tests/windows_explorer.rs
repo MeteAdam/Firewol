@@ -30,6 +30,7 @@ fn sorting_by_date_mixes_folders_with_files() -> anyhow::Result<()> {
             Sort {
                 column: SortColumn::Modified,
                 descending,
+                group: false,
             },
             &cancel,
         )?;
@@ -42,6 +43,56 @@ fn sorting_by_date_mixes_folders_with_files() -> anyhow::Result<()> {
     };
     assert_eq!(names(false)?, ["old.txt", "middle", "new.txt"]);
     assert_eq!(names(true)?, ["new.txt", "middle", "old.txt"]);
+    Ok(())
+}
+
+#[test]
+fn grouping_puts_new_items_first_and_counts_each_section() -> anyhow::Result<()> {
+    use firewol_core::explorer::{Cancellation, Directory, Sort, SortColumn, page};
+    use std::time::{Duration, SystemTime};
+    let fixture = tempfile::tempdir()?;
+    for (name, age_days) in [
+        ("a-ancient.txt", 800),
+        ("b-today.txt", 0),
+        ("c-ancient.txt", 900),
+    ] {
+        let path = fixture.path().join(name);
+        std::fs::write(&path, b"x")?;
+        std::fs::File::options()
+            .write(true)
+            .open(&path)?
+            .set_modified(SystemTime::now() - Duration::from_secs(age_days * 86_400))?;
+    }
+    let cancel = Cancellation::default();
+    let mut directory = Directory::open(fixture.path())?;
+    directory.advance(128, &cancel)?;
+    directory.sort(
+        Sort {
+            column: SortColumn::Name,
+            descending: false,
+            group: true,
+        },
+        &cancel,
+    )?;
+    let names: Vec<_> = directory
+        .list_dir(page(0), &cancel)?
+        .items
+        .iter()
+        .map(|item| item.name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["b-today.txt", "a-ancient.txt", "c-ancient.txt"]);
+    let groups = directory.groups()?;
+    assert_eq!(groups.len(), 2);
+    assert_eq!(
+        (groups[0].start, groups[0].count, groups[0].bucket),
+        (0, 1, 0)
+    );
+    assert_eq!(
+        (groups[1].start, groups[1].count, groups[1].bucket),
+        (1, 2, 7)
+    );
+    directory.sort(Sort::default(), &cancel)?;
+    assert!(directory.groups()?.is_empty());
     Ok(())
 }
 
@@ -79,6 +130,7 @@ fn natural_sort_keeps_folders_first_and_pages_stable() -> anyhow::Result<()> {
         Sort {
             column: SortColumn::Size,
             descending: true,
+            group: false,
         },
         &cancel,
     )?;

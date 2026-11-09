@@ -169,6 +169,9 @@ pub struct SavedView {
     pub grid: bool,
     /// Tile edge in pixels: 96, 128 or 160.
     pub tile: u32,
+    /// Sections by date modified.
+    #[serde(default)]
+    pub group: bool,
 }
 
 /// Details column widths in pixels, shared by every folder.
@@ -385,6 +388,8 @@ pub struct Settings {
     pub views: BTreeMap<FolderKey, SavedView>,
     /// Pictures and Videos were set to tiles once; a later choice stays.
     pub views_seeded: bool,
+    /// Downloads was grouped by date once; a later choice stays.
+    pub groups_seeded: bool,
 }
 
 impl Default for Settings {
@@ -410,6 +415,7 @@ impl Default for Settings {
             folders: BTreeMap::new(),
             views: BTreeMap::new(),
             views_seeded: false,
+            groups_seeded: false,
         }
     }
 }
@@ -455,6 +461,8 @@ struct Stored {
     views: Vec<(FolderKey, SavedView)>,
     #[serde(default)]
     views_seeded: bool,
+    #[serde(default)]
+    groups_seeded: bool,
 }
 
 impl Settings {
@@ -509,6 +517,7 @@ impl Settings {
             folders: stored.folders.into_iter().collect(),
             views: stored.views.into_iter().collect(),
             views_seeded: stored.views_seeded,
+            groups_seeded: stored.groups_seeded,
         })
     }
 
@@ -614,6 +623,7 @@ impl Settings {
                 .collect(),
             views: self.views.iter().map(|(key, view)| (*key, *view)).collect(),
             views_seeded: self.views_seeded,
+            groups_seeded: self.groups_seeded,
         };
         let file = tempfile::NamedTempFile::new_in(dir)?;
         let mut writer = BufWriter::new(file.as_file());
@@ -644,6 +654,7 @@ mod tests {
         let tiles = SavedView {
             grid: true,
             tile: 96,
+            group: false,
         };
         let data = fixture.path().join("data");
         Settings::update(&data, |settings| {

@@ -315,6 +315,17 @@ pub struct FolderView {
 pub struct FolderDisplay {
     pub grid: bool,
     pub tile: u32,
+    /// Sections by date modified.
+    pub group: bool,
+}
+
+/// One date section of a grouped listing. Bucket 0 is Today, 7 is A long time ago.
+#[derive(Clone, Copy, Serialize, TS)]
+#[ts(export)]
+pub struct FolderGroup {
+    pub start: u32,
+    pub count: u32,
+    pub bucket: u8,
 }
 
 /// Which way a pane moves through its history.

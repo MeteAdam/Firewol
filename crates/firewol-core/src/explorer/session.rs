@@ -22,6 +22,13 @@ const FOLDER_SAVE_DELAY: Duration = Duration::from_secs(2);
 const MEDIA_VIEW: SavedView = SavedView {
     grid: true,
     tile: 128,
+    group: false,
+};
+/// A folder that has only been grouped opens in details.
+const DOWNLOADS_VIEW: SavedView = SavedView {
+    grid: false,
+    tile: 128,
+    group: true,
 };
 
 /// Back and forward history of one pane.
@@ -295,6 +302,23 @@ impl Session {
                 settings.views.entry(key).or_insert(MEDIA_VIEW);
             }
             settings.views_seeded = true;
+        })
+        .map(drop)
+    }
+
+    /// Groups Downloads by date once, as Explorer shows it; a later choice stays.
+    pub fn seed_groups(&self) -> Result<()> {
+        if self.settings().groups_seeded {
+            return Ok(());
+        }
+        let key = super::drives::downloads_folder()
+            .and_then(|folder| ItemId::at(folder).ok())
+            .map(|folder| FolderKey::from(&folder));
+        self.update_settings(|settings| {
+            if let Some(key) = key {
+                settings.views.entry(key).or_insert(DOWNLOADS_VIEW).group = true;
+            }
+            settings.groups_seeded = true;
         })
         .map(drop)
     }

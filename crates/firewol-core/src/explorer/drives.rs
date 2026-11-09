@@ -156,6 +156,10 @@ pub(super) fn media_folders() -> Vec<PathBuf> {
         .collect()
 }
 
+pub(super) fn downloads_folder() -> Option<PathBuf> {
+    known_folder(&FOLDERID_Downloads)
+}
+
 /// The folders of the Go To menu, in the order and with the names of Nilesoft's `goto.nss`.
 pub fn go_to_folders() -> Vec<(&'static str, PathBuf)> {
     let known = [

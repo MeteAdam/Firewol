@@ -13,8 +13,8 @@ use firewol_core::explorer::{
 };
 
 use crate::contract::{
-    Entry, FolderDisplay, FolderProgress, FolderView, IndexState, ItemRef, Navigation, Page,
-    SearchCount, SearchFilters, SearchRequest, SearchScope, Segment, SortView, Step,
+    Entry, FolderDisplay, FolderGroup, FolderProgress, FolderView, IndexState, ItemRef, Navigation,
+    Page, SearchCount, SearchFilters, SearchRequest, SearchScope, Segment, SortView, Step,
 };
 use crate::volumes::{self, Volumes};
 
@@ -118,7 +118,16 @@ impl Folders {
         Some(FolderDisplay {
             grid: view.grid,
             tile: view.tile,
+            group: view.group,
         })
+    }
+
+    /// Read when a folder is listed, so a saved choice applies before the first page is sorted.
+    fn grouped(&self, path: &Path) -> bool {
+        ItemId::at(path.to_owned())
+            .ok()
+            .and_then(|folder| self.saved_view(&folder))
+            .is_some_and(|view| view.group)
     }
 
     fn directory(&self, path: &Path) -> Result<Directory> {
@@ -273,7 +282,10 @@ impl Folders {
         let listing = Cancellation::default();
         let mut directory = self.directory(path)?;
         directory.advance(PAGE_SIZE, &listing)?;
-        let sort = sort_core(sort);
+        let sort = Sort {
+            group: self.grouped(directory.path()),
+            ..sort_core(sort)
+        };
         directory.sort(sort, &listing)?;
         let sort_ms = directory.sort_ms();
         let first = directory.list_dir(page(0), &cancel)?;
@@ -314,7 +326,10 @@ impl Folders {
         let listing = Cancellation::default();
         let mut directory = self.directory(&folder.path)?;
         directory.advance(PAGE_SIZE, &listing)?;
-        let sort = sort_core(sort);
+        let sort = Sort {
+            group: self.grouped(directory.path()),
+            ..sort_core(sort)
+        };
         directory.sort(sort, &listing)?;
         let sort_ms = directory.sort_ms();
         let first = directory.list_dir(page(0), &listing)?;
@@ -364,7 +379,10 @@ impl Folders {
     pub fn page(&self, id: u64, offset: u32, sort: SortView) -> Result<Page> {
         let folder = self.get(id)?;
         let styles = self.styles();
-        let sort = sort_core(sort);
+        let sort = Sort {
+            group: lock(&folder.sort).group,
+            ..sort_core(sort)
+        };
         *lock(&folder.sort) = sort;
         let (rows, sorted) = {
             let mut directory = lock(&folder.directory);
@@ -376,6 +394,19 @@ impl Folders {
             sorted,
             ..convert(rows.items(&folder.cancel)?, &styles)
         })
+    }
+
+    pub fn groups(&self, id: u64) -> Result<Vec<FolderGroup>> {
+        let folder = self.get(id)?;
+        let groups = lock(&folder.directory).groups()?;
+        Ok(groups
+            .into_iter()
+            .map(|group| FolderGroup {
+                start: group.start,
+                count: group.count,
+                bucket: group.bucket,
+            })
+            .collect())
     }
 
     pub fn progress(&self, id: u64) -> Result<FolderProgress> {
@@ -629,6 +660,7 @@ fn sort_core(sort: SortView) -> Sort {
             Column::Size => SortColumn::Size,
         },
         descending: sort.descending,
+        group: false,
     }
 }
 

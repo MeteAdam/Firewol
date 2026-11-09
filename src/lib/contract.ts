@@ -2,6 +2,7 @@
 export type { ClipboardState } from "./bindings/ClipboardState";
 export type { Entry } from "./bindings/Entry";
 export type { FolderProgress } from "./bindings/FolderProgress";
+export type { FolderGroup } from "./bindings/FolderGroup";
 export type { FolderView } from "./bindings/FolderView";
 export type { IndexState } from "./bindings/IndexState";
 export type { ItemRef } from "./bindings/ItemRef";

@@ -319,7 +319,7 @@
     menu = undefined;
     const folder = active?.folder;
     if (!folder || (grid === gridView && size === tile)) return;
-    const view = { grid, tile: size };
+    const view = { grid, tile: size, group: folder.view?.group ?? false };
     for (const pane of allPanes()) {
       if (pane.folder?.path === folder.path) pane.folder = { ...pane.folder, view };
     }
@@ -327,6 +327,22 @@
     // The next folder switched to tiles starts at the size used last.
     if (grid && size !== settings?.tile) void saveSettings({ tile: size });
   }
+  /** Sections by date, remembered for the open folder; every pane showing it re-reads it. */
+  async function setGrouped(group: boolean) {
+    menu = undefined;
+    const folder = active?.folder;
+    if (!folder?.item || group === (folder.view?.group ?? false)) return;
+    const view = { grid: gridView, tile, group };
+    const showing = allPanes().filter((pane) => pane.folder?.path === folder.path);
+    for (const pane of showing) pane.folder = { ...pane.folder!, view };
+    try {
+      await api.setFolderView(folder.item, view);
+      await Promise.all(showing.map((pane) => pane.refresh()));
+    } catch (reason) {
+      reportFailure(reason);
+    }
+  }
+
   /** Ctrl+wheel must cancel WebView2's page zoom, which needs a non-passive listener. */
   function nonPassiveWheel(node: HTMLElement, handler: (event: WheelEvent) => void) {
     node.addEventListener("wheel", handler, { passive: false });
@@ -1033,6 +1049,7 @@
     openInNewTab: () => { if (focused) open(focused, true); },
     openInNewWindow: () => { if (focused) void api.openWindow(focused.path, false).catch(reportFailure); },
     view: (grid, size) => setView(grid, size),
+    group: (on) => void setGrouped(on),
     sort: (column) => { if (active && active.sort.column !== column) void active.sortBy(column); },
     direction: (descending) => { if (active && active.sort.descending !== descending) void active.sortBy(active.sort.column); },
     terminal: (kind) => { const target = menuTarget(); if (target) void api.openTerminal(kind, target).catch(reportFailure); },
@@ -1092,6 +1109,7 @@
       grid: gridView,
       tile,
       sort: active?.sort ?? { column: "name", descending: false },
+      grouped: active?.folder?.view?.group ?? false,
       showHidden: settings?.show_hidden ?? true,
       showExtensions: settings?.show_extensions ?? true,
       pinned: menu.kind === "item" ? session.pins.some((pin) => pin.path === focused?.path) : pinned,
@@ -2244,7 +2262,7 @@
     menuRoom = () => window.innerHeight - 16;
     await listed("area");
     const area = labels().split("|");
-    check("the empty-area menu follows the Explorer order", inOrder(["View", "Sort by", "Refresh", "Terminal", "File manage", "Go To", "Paste", "Undo", "New", "Properties"], area) && !area.includes("Group by"), labels());
+    check("the empty-area menu follows the Explorer order", inOrder(["View", "Sort by", "Group by", "Refresh", "Terminal", "File manage", "Go To", "Paste", "Undo", "New", "Properties"], area), labels());
     const rowNamed = (name: string) => [...document.querySelectorAll<HTMLButtonElement>(".menu .mi")].find((row) => row.querySelector(".label")?.textContent?.trim() === name);
     rowNamed("Go To")!.click();
     await waitFor(() => !!rowNamed("Folder"), 5000, "the Go To menu");
@@ -2346,6 +2364,20 @@
     await api.recycle([first, second]);
     await done;
     await waitFor(() => !names(pane).includes("watched-first.txt"), 5000, "the recycled files to leave");
+  }
+
+  async function groupSteps(pane: Pane, check: Check) {
+    const headings = () => [...document.querySelectorAll(`[data-pane="${pane.id}"] .group-head`)].map((node) => node.textContent?.trim());
+    await setGrouped(true);
+    await waitFor(() => headings().length > 0, 5000, "the date headings");
+    const counted = pane.groups.reduce((sum, group) => sum + group.count, 0);
+    check("grouping by date shows a heading per section and counts every item", headings().length === pane.groups.length && counted === pane.rows, headings().join());
+    check("the first section is the newest", pane.groups[0].bucket === Math.min(...pane.groups.map((group) => group.bucket)));
+    const row = document.querySelector<HTMLElement>(`[data-pane="${pane.id}"] [data-row="0"]`);
+    check("a heading sits above the first row", !!row && row.previousElementSibling?.classList.contains("group-head") === true);
+    await setGrouped(false);
+    await waitFor(() => headings().length === 0, 5000, "the headings to leave");
+    check("turning grouping off removes the headings", pane.groups.length === 0);
   }
 
   async function toastSteps(check: Check) {
@@ -2499,6 +2531,7 @@
       check("closing a tab preserves the active tab", slot.activeTab === originalTab.id && slot.tabs.length === 1);
       await middleClickSteps(source, slot, check);
       await outsideChangeSteps(source, check);
+      await groupSteps(source, check);
       await toastSteps(check);
       await toggleSplit();
       check("closing split view merges tabs", slots.length === 1 && slots[0].tabs.length === 2);

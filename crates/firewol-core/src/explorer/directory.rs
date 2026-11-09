@@ -6,6 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
+use super::date_groups::{SectionStarts, section_sql, section_starts};
 use super::{
     Cancellation, Item, ItemPage, decode, encode, resolve_directory, stored_size, unix_seconds,
 };
@@ -24,6 +25,17 @@ pub enum SortColumn {
 pub struct Sort {
     pub column: SortColumn,
     pub descending: bool,
+    /// Sections by date come first; the column orders the items inside each one.
+    pub group: bool,
+}
+
+/// One date section of a grouped listing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub start: u32,
+    pub count: u32,
+    /// Newest first: Today is 0, A long time ago is 7.
+    pub bucket: u8,
 }
 
 /// `FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM`.
@@ -38,6 +50,8 @@ pub struct Directory {
     sort: Option<Sort>,
     sort_ms: f64,
     hide_hidden: bool,
+    /// Set while the ordering is grouped, so the groups always match the rows.
+    sections: Option<SectionStarts>,
 }
 
 impl Directory {
@@ -66,6 +80,7 @@ impl Directory {
             sort: None,
             sort_ms: 0.0,
             hide_hidden: false,
+            sections: None,
         })
     }
 
@@ -120,8 +135,13 @@ impl Directory {
             SortColumn::Size => "size",
         };
         let direction = if sort.descending { "DESC" } else { "ASC" };
-        // As in Explorer, a date order is about time: folders take their place among the files.
-        let folders_first = if sort.column == SortColumn::Modified {
+        self.sections = None;
+        let sections = sort.group.then(section_starts).transpose()?;
+        let section = sections
+            .as_ref()
+            .map_or_else(String::new, |starts| format!("{}, ", section_sql(starts)));
+        // As in Explorer, an order by date is about time: folders take their place among the files.
+        let folders_first = if sort.group || sort.column == SortColumn::Modified {
             ""
         } else {
             "directory DESC, "
@@ -132,15 +152,41 @@ impl Directory {
         let result = (|| -> Result<()> {
             let tx = self.db.transaction()?;
             tx.execute("DELETE FROM ordering", [])?;
-            tx.execute(&format!("INSERT INTO ordering(row) SELECT row FROM listing ORDER BY {folders_first}{column} {direction}, sort_name COLLATE windows_natural ASC, row ASC"), [])?;
+            tx.execute(&format!("INSERT INTO ordering(row) SELECT row FROM listing ORDER BY {section}{folders_first}{column} {direction}, sort_name COLLATE windows_natural ASC, row ASC"), [])?;
             tx.commit()?;
             Ok(())
         })();
         self.db.progress_handler(0, None::<fn() -> bool>)?;
         result?;
         self.sort = Some(sort);
+        self.sections = sections;
         self.sort_ms = start.elapsed().as_secs_f64() * 1000.0;
         Ok(())
+    }
+
+    /// The date sections of a grouped listing, in row order; empty when it is not grouped.
+    pub fn groups(&self) -> Result<Vec<Group>> {
+        let Some(starts) = self.sections.as_ref().filter(|_| self.is_sorted()) else {
+            return Ok(Vec::new());
+        };
+        let sql = format!(
+            "SELECT {} AS section, COUNT(*) FROM listing GROUP BY section ORDER BY section",
+            section_sql(starts)
+        );
+        let mut statement = self.db.prepare(&sql)?;
+        let mut rows = statement.query([])?;
+        let mut groups = Vec::new();
+        let mut start = 0;
+        while let Some(row) = rows.next()? {
+            let count: u32 = row.get(1)?;
+            groups.push(Group {
+                start,
+                count,
+                bucket: row.get(0)?,
+            });
+            start += count;
+        }
+        Ok(groups)
     }
 
     pub fn advance(&mut self, batch: u32, cancel: &Cancellation) -> Result<()> {

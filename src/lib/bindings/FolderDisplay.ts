@@ -3,4 +3,8 @@
 /**
  * How one folder is shown: tiles of `tile` pixels, or details.
  */
-export type FolderDisplay = { grid: boolean, tile: number, };
+export type FolderDisplay = { grid: boolean, tile: number, 
+/**
+ * Sections by date modified.
+ */
+group: boolean, };

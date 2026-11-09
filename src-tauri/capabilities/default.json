@@ -22,6 +22,7 @@
     "allow-adopt-pane",
     "allow-list-page",
     "allow-folder-progress",
+    "allow-folder-groups",
     "allow-locate-selection",
     "allow-start-index",
     "allow-search",

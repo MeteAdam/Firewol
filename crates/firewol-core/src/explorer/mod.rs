@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod custom_icon;
+mod date_groups;
 mod directory;
 mod drives;
 pub mod elevation;
@@ -16,7 +17,7 @@ pub mod volume;
 mod watch;
 pub use watch::watch_directory;
 
-pub use directory::{Directory, ListedRows, Sort, SortColumn};
+pub use directory::{Directory, Group, ListedRows, Sort, SortColumn};
 pub use drives::{Drive, drives, go_to_folders, is_remote, watch_devices};
 pub use operations::{
     MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations, TransferControl, TransferProgress,

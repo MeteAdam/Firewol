@@ -1,6 +1,7 @@
 import { api } from "./api";
 import type {
   Entry,
+  FolderGroup,
   FolderProgress,
   FolderView,
   IndexState,
@@ -62,6 +63,8 @@ export class Pane {
   selection = $state.raw<Map<string, Entry>>(new Map());
   sort = $state.raw<SortView>({ column: "name", descending: false });
   sortMs = $state(0);
+  /** The open folder's date sections; empty when it is not grouped. */
+  groups = $state.raw<FolderGroup[]>([]);
   pageVersion = $state(0);
   renaming = $state<number | null>(null);
   /** The rename field starts with the extension selected instead of the name. */
@@ -372,6 +375,7 @@ export class Pane {
       this.selected = -1;
       this.selection = new Map();
     }
+    void this.#loadGroups();
     // Enumeration may finish before the navigation response reaches this pane.
     void api.folderProgress(view.id).then(event => this.progress(event)).catch(() => {});
     if (reload && this.searching) void this.search(this.query);
@@ -402,6 +406,18 @@ export class Pane {
     this.#pending.clear();
     await this.loadPage(0);
     await this.remap();
+    await this.#loadGroups();
+  }
+
+  /** Sections exist once the listing is whole and sorted. */
+  async #loadGroups() {
+    const folder = this.folder;
+    if (!folder?.view?.group || !this.complete) {
+      this.groups = [];
+      return;
+    }
+    const groups = await api.folderGroups(folder.id).catch(() => []);
+    if (this.folder?.id === folder.id) this.groups = groups;
   }
 
   async remap() {
@@ -659,6 +675,7 @@ export class Pane {
     this.pages = {};
     this.#clearResults();
     this.folder = undefined;
+    this.groups = [];
     this.#pending.clear();
     this.index = "none";
   }

@@ -39,6 +39,7 @@ export type MenuActions = {
   openInNewWindow(): void;
   view(grid: boolean, size?: number): void;
   sort(column: SortColumn): void;
+  group(on: boolean): void;
   direction(descending: boolean): void;
   terminal(kind: TerminalKind): void;
   system(uri: string): void;
@@ -81,6 +82,8 @@ export type MenuEnv = {
   grid: boolean;
   tile: number;
   sort: SortView;
+  /** The open folder is grouped by date. */
+  grouped: boolean;
   showHidden: boolean;
   showExtensions: boolean;
   /** The folder is pinned to the sidebar. */
@@ -331,9 +334,13 @@ export function areaMenu(env: MenuEnv): MenuNode[] {
     command("Ascending", undefined, () => act.direction(false), { radio: !env.sort.descending, disabled: env.searching }),
     command("Descending", undefined, () => act.direction(true), { radio: env.sort.descending, disabled: env.searching }),
   ];
+  const grouping: MenuNode[] = [
+    command("None", undefined, () => act.group(false), { radio: !env.grouped, disabled: env.searching }),
+    command("Date modified", undefined, () => act.group(true), { radio: env.grouped, disabled: env.searching }),
+  ];
   const created = inSlot(env, "new").map((item) => shellNode(item, true));
   return groups(
-    [submenu("View", "grid", views), submenu("Sort by", "sortUp", sorts), ...pick(env, ["refresh"]).map((row) => rowNode(env, row))],
+    [submenu("View", "grid", views), submenu("Sort by", "sortUp", sorts), submenu("Group by", "list", grouping), ...pick(env, ["refresh"]).map((row) => rowNode(env, row))],
     [terminalMenu(env), fileManageMenu(env)],
     [goToMenu(env)],
     [...pick(env, ["paste", "undo"]).map((row) => rowNode(env, row)), ...customRows(env).map((row) => rowNode(env, row)), ...appRows(env), ...shellSlot(env, "more")],

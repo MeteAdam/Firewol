@@ -6,6 +6,7 @@
   import { formatDate, formatSize, location, typeName, visibleName, withoutExtension } from "./format";
   import { edgeScroll } from "./autoscroll";
   import Icon from "./Icon.svelte";
+  import { ListLayout } from "./listLayout";
   import { PAGE, type Pane } from "./pane.svelte";
   import { tint } from "./styles";
 
@@ -24,6 +25,8 @@
   // Grid view: tiles sit in lines of `columns`, with this gap and top padding.
   const GAP = 8;
   const PAD = 8;
+  const GROUP_HEADING = 32;
+  const GROUP_LABELS = ["Today", "Yesterday", "Earlier this week", "Last week", "Earlier this month", "Last month", "Earlier this year", "A long time ago"];
 
   let {
     pane,
@@ -76,12 +79,13 @@
   const columns = $derived(tiles ? Math.max(1, Math.floor((width - 12 - 2 * PAD + GAP) / (tile + GAP))) : 1);
   const line = $derived(tiles ? tile + GAP : ROW);
   const head = $derived(tiles ? PAD : HEADER);
-  const lines = $derived(Math.ceil(rows / columns));
-  const top = $derived(Math.floor(Math.max(0, scroll - head) / line));
+  const layout = $derived(new ListLayout(rows, columns, line, pane.searching ? [] : pane.groups, GROUP_HEADING));
+  const lines = $derived(layout.lines);
+  const top = $derived(layout.lineAt(Math.max(0, scroll - head)));
   const firstLine = $derived(Math.max(0, top - (tiles ? 2 : OVERSCAN)));
   const endLine = $derived(Math.min(lines, top + Math.ceil(height / line) + (tiles ? 2 : OVERSCAN)));
-  const first = $derived(firstLine * columns);
-  const end = $derived(Math.min(rows, endLine * columns));
+  const first = $derived(layout.firstRowOf(firstLine));
+  const end = $derived(Math.min(rows, layout.firstRowOf(endLine)));
   const visible = $derived(Array.from({ length: Math.max(0, end - first) }, (_, index) => first + index));
   const visibleLines = $derived(Array.from({ length: Math.max(0, endLine - firstLine) }, (_, index) => firstLine + index));
   const iconSize = $derived(Math.round(tile / 2));
@@ -178,8 +182,10 @@
   });
 
   export function reveal(row: number) {
-    const position = head + Math.floor(row / columns) * line;
-    if (position < grid.scrollTop + head) grid.scrollTop = position - head;
+    const at = layout.lineOfRow(row);
+    const position = head + layout.rowTop(at);
+    const upper = head + layout.blockTop(at);
+    if (upper < grid.scrollTop + head) grid.scrollTop = upper - head;
     else if (position + line > grid.scrollTop + height) grid.scrollTop = position + line - height;
   }
 
@@ -194,8 +200,11 @@
     const moves: Record<string, number> = { ArrowDown: columns, ArrowUp: -columns, PageDown: step, PageUp: -step };
     if (tiles) Object.assign(moves, { ArrowRight: 1, ArrowLeft: -1 });
     const entry = pane.focusedEntry;
+    const vertical = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    // Sections break the tile rows, so up and down go line by line.
+    if (tiles && layout.grouped && vertical !== 0 && !event.altKey) move(layout.moveLine(pane.selected, vertical), event.shiftKey);
     // Up and down from a partial last line stay in their column, or stop at the last item.
-    if (event.key in moves && !event.altKey) move(Math.max(0, Math.min(rows - 1, pane.selected + moves[event.key])), event.shiftKey);
+    else if (event.key in moves && !event.altKey) move(Math.max(0, Math.min(rows - 1, pane.selected + moves[event.key])), event.shiftKey);
     else if (event.key === "Home") move(0, event.shiftKey);
     else if (event.key === "End") move(rows - 1, event.shiftKey);
     else if (event.key === "Enter" && entry) onopen(entry, event.ctrlKey, true);
@@ -204,8 +213,9 @@
     else if (event.key === "Delete" && pane.selection.size > 0) onrecycle();
     else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       const bounds = grid.getBoundingClientRect();
-      const column = pane.selected % columns;
-      onmenu(bounds.left + PAD + column * (tile + GAP) + (tiles ? tile / 2 : 48), bounds.top + head + (Math.floor(pane.selected / columns) + 1) * line - grid.scrollTop, entry !== undefined);
+      const at = layout.lineOfRow(pane.selected);
+      const column = pane.selected - layout.firstRowOf(at);
+      onmenu(bounds.left + PAD + column * (tile + GAP) + (tiles ? tile / 2 : 48), bounds.top + head + layout.rowTop(at) + line - grid.scrollTop, entry !== undefined);
     } else return;
     event.preventDefault();
   }
@@ -292,9 +302,9 @@
     const result: number[] = [];
     if (!tiles) {
       // A box drawn entirely in the blank strip beside the table touches no row.
-      if (bottom < HEADER || top >= HEADER + rows * ROW || left >= LIST_PADDING / 2 + tableWidth) return [];
-      const from = inRange(Math.floor((top - HEADER) / ROW), rows - 1);
-      const to = inRange(Math.floor((bottom - HEADER) / ROW), rows - 1);
+      if (bottom < HEADER || top >= HEADER + layout.height || left >= LIST_PADDING / 2 + tableWidth) return [];
+      const from = inRange(layout.lineAt(top - HEADER), rows - 1);
+      const to = inRange(layout.lineAt(bottom - HEADER), rows - 1);
       for (let row = from; row <= to; row++) result.push(row);
     } else {
       const stride = tile + GAP;
@@ -302,12 +312,13 @@
       if (bottom < PAD || right < TILES_LEFT) return [];
       const firstColumn = Math.max(0, Math.ceil((left - TILES_LEFT - tile) / stride));
       const lastColumn = Math.min(columns - 1, Math.floor((right - TILES_LEFT) / stride));
-      const firstRow = Math.max(0, Math.ceil((top - PAD - tile) / stride));
-      const lastRow = Math.min(lastLine, Math.floor((bottom - PAD) / stride));
+      const firstRow = layout.grouped ? layout.lineAt(top - PAD) : Math.max(0, Math.ceil((top - PAD - tile) / stride));
+      const lastRow = layout.grouped ? layout.lineAt(bottom - PAD) : Math.min(lastLine, Math.floor((bottom - PAD) / stride));
       for (let index = firstRow; index <= lastRow; index++) {
+        const [start, stop] = layout.rowsOf(index);
         for (let column = firstColumn; column <= lastColumn; column++) {
-          const row = index * columns + column;
-          if (row < rows) result.push(row);
+          const row = start + column;
+          if (row < stop) result.push(row);
         }
       }
     }
@@ -459,6 +470,11 @@
   />
 {/snippet}
 
+{#snippet groupHeading(line: number)}
+  {@const bucket = layout.headingBefore(line)}
+  {#if bucket !== undefined}<div class="group-head" role="presentation" style:height={`${GROUP_HEADING}px`}>{GROUP_LABELS[bucket]}</div>{/if}
+{/snippet}
+
 {#snippet grip(column: Column, name: string)}
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div class="grip" role="separator" aria-orientation="vertical" aria-label={`${name} column width`} aria-valuenow={shownWidth(column)} aria-valuemin={column === "name" ? MIN_NAME : MIN_COLUMN} aria-valuemax={1200} tabindex="0" title="Drag to resize, double-click to reset" onpointerdown={(event) => startResize(event, column)} ondblclick={() => void saveColumn(column, DEFAULT_WIDTHS[column])} onkeydown={(event) => resizeKey(event, column)}></div>
@@ -486,12 +502,13 @@
     oncontextmenu={areaMenu}
   >
     {#if tiles}
-    <div class="spacer tiled" role="rowgroup" style:height={`${lines * line + PAD}px`}>
-      <div class="lines" style:transform={`translateY(${PAD + firstLine * line}px)`}>
+    <div class="spacer tiled" role="rowgroup" style:height={`${layout.height + PAD}px`}>
+      <div class="lines" style:transform={`translateY(${PAD + layout.blockTop(firstLine)}px)`}>
         <!-- Lines are keyed like rows, so scrolling only adds and removes edge lines. -->
         {#each visibleLines as index (index)}
+          {@render groupHeading(index)}
           <div class="line" role="row" aria-rowindex={index + 1} style:height={`${line}px`} style:gap={`${GAP}px`}>
-            {#each visible.slice((index - firstLine) * columns, (index - firstLine + 1) * columns) as row (row)}
+            {#each Array.from({ length: layout.rowsOf(index)[1] - layout.rowsOf(index)[0] }, (_, offset) => layout.rowsOf(index)[0] + offset) as row (row)}
               {@const entry = pane.entry(row)}
               <!-- svelte-ignore a11y_interactive_supports_focus -->
               <div
@@ -533,12 +550,13 @@
       <div role="columnheader" class="size" aria-sort={pane.sort.column === "size" ? (pane.sort.descending ? "descending" : "ascending") : "none"}><button class="sort" disabled={pane.searching} onclick={() => pane.sortBy("size")}>Size</button>{@render grip("size", "Size")}</div>
       {#if tagged}<div role="columnheader" class="tags-head">Tags{@render grip("tags", "Tags")}</div>{/if}
     </div>
-    <div class="spacer" role="rowgroup" style:height={`${rows * ROW}px`}>
-      <div class="rows" style:transform={`translateY(${first * ROW}px)`}>
+    <div class="spacer" role="rowgroup" style:height={`${layout.height}px`}>
+      <div class="rows" style:transform={`translateY(${layout.blockTop(firstLine)}px)`}>
         <!-- Keyed by row so scrolling only adds and removes edge rows, which keeps
              accessibility events proportional to what actually enters the view. -->
         {#each visible as row (row)}
           {@const entry = pane.entry(row)}
+          {@render groupHeading(row)}
           <!-- svelte-ignore a11y_interactive_supports_focus -->
           <div
             class="cols row"
@@ -689,6 +707,7 @@
   :global(.drop-target).row, :global(.drop-target).tile { outline: 2px dashed var(--accent); outline-offset: -2px; background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .list:global(.drop-target) { outline: 2px dashed var(--accent); outline-offset: -4px; }
   .marquee { position: absolute; z-index: 2; border: 1px solid var(--accent); border-radius: 2px; background: color-mix(in srgb, var(--accent) 18%, transparent); pointer-events: none; }
+  .group-head { display: flex; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--sep); color: var(--muted); font-size: 12px; font-weight: 600; }
   .placeholder { height: 8px; width: 40%; border-radius: 4px; background: var(--sep); }
   .empty { position: absolute; inset: 56px 24px auto 24px; margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>

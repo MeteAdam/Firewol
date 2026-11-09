@@ -164,6 +164,51 @@ pub(super) fn indexable(path: &Path) -> bool {
         && path.components().count() <= MAX_INDEXED_DEPTH
 }
 
+/// Keeps one index from filling the system drive. Counted by stored path bytes, the column that
+/// a hostile tree can inflate, with the free space read again as the index grows.
+pub(super) struct IndexBudget {
+    folder: PathBuf,
+    limit: u64,
+    bytes: u64,
+    next_check: u64,
+}
+
+impl IndexBudget {
+    const LIMIT: u64 = 1 << 30;
+    const CHECK_EVERY: u64 = 16 << 20;
+    const MIN_FREE: u64 = 256 << 20;
+
+    pub fn new(folder: &Path) -> Self {
+        Self::with_limit(folder, Self::LIMIT)
+    }
+
+    fn with_limit(folder: &Path, limit: u64) -> Self {
+        Self {
+            folder: folder.to_owned(),
+            limit,
+            bytes: 0,
+            next_check: 0,
+        }
+    }
+
+    pub fn charge(&mut self, path: &Path) -> Result<()> {
+        self.bytes += path.as_os_str().len() as u64;
+        ensure!(
+            self.bytes <= self.limit,
+            "This location is too large to index"
+        );
+        if self.bytes >= self.next_check {
+            self.next_check = self.bytes + Self::CHECK_EVERY;
+            let (free, _) = super::free_space(&self.folder)?;
+            ensure!(
+                free >= Self::MIN_FREE,
+                "There is not enough free disk space to index this location"
+            );
+        }
+        Ok(())
+    }
+}
+
 pub(super) const INSERT: &str = "INSERT INTO entries (id, path, directory, name_key, extension, size, modified, file_ref, file_volume)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 
@@ -497,6 +542,7 @@ fn rebuild_folder(
     let tx = db.transaction()?;
     reset(&tx)?;
     let mut count = 0;
+    let mut budget = IndexBudget::new(excluded);
     {
         let mut insert = tx.prepare(INSERT)?;
         let mut directories: Vec<ReadDir> = vec![fs::read_dir(root)?];
@@ -519,6 +565,7 @@ fn rebuild_folder(
             {
                 directories.push(children);
             }
+            budget.charge(&path)?;
             let modified = (meta.last_write_time() / 10_000_000) as i64 - 11_644_473_600;
             IndexedItem {
                 path: &path,
@@ -534,4 +581,40 @@ fn rebuild_folder(
     rebuild(&tx)?;
     tx.commit()?;
     Ok(count)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn the_index_budget_stops_at_its_limit() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let mut budget = IndexBudget::with_limit(fixture.path(), 10);
+        budget.charge(Path::new("12345"))?;
+        budget.charge(Path::new("12345"))?;
+        assert!(budget.charge(Path::new("1")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn extreme_paths_are_left_out_of_the_index() {
+        let deep = PathBuf::from(format!(r"C:\{}", "a\\".repeat(MAX_INDEXED_DEPTH)));
+        assert!(!indexable(&deep));
+        let long = PathBuf::from(format!(r"C:\{}", "a".repeat(MAX_INDEXED_PATH + 1)));
+        assert!(!indexable(&long));
+        assert!(indexable(Path::new(r"C:\Users\Mete\Documents\a.txt")));
+    }
+
+    #[test]
+    fn a_costly_pass_earns_a_longer_rest() {
+        assert_eq!(
+            rest_after(Duration::from_millis(50)),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            rest_after(Duration::from_secs(600)),
+            Duration::from_secs(300)
+        );
+    }
 }

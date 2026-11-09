@@ -33,7 +33,9 @@ use windows::Win32::System::LibraryLoader::{
     LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
 };
 
-use super::search::{INSERT, IndexedItem, cancellable, indexable, rebuild, reset, rest_after};
+use super::search::{
+    INSERT, IndexBudget, IndexedItem, cancellable, indexable, rebuild, reset, rest_after,
+};
 use super::{Cancellation, SearchIndex, attributes, encode, resolve_directory};
 use crate::file_identity::{FileIdentity, identity, open_item};
 use crate::ntfs::{self, Records};
@@ -81,6 +83,7 @@ impl SearchIndex {
         let mut db = self.writer()?;
         let pipe = Pipe::launch(drive, serial, cancel)?;
         let mut visibility = Visibility::default();
+        let mut budget = IndexBudget::new(&excluded);
         let mut block = Vec::new();
         let mut initial = false;
         let mut writing = false;
@@ -94,6 +97,7 @@ impl SearchIndex {
                     db.execute_batch("BEGIN IMMEDIATE")?;
                     reset(&db)?;
                     visibility = Visibility::default();
+                    budget = IndexBudget::new(&excluded);
                     writing = true;
                     initial = true;
                     changed = true;
@@ -121,6 +125,7 @@ impl SearchIndex {
                         if initial {
                             delete.execute([reference as i64])?;
                             if let Some(item) = &item {
+                                budget.charge(&item.path)?;
                                 item.insert(&mut insert, Some(reference as i64))?;
                             }
                         } else {

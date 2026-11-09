@@ -4,6 +4,11 @@ members = ["crates/firewol-core", "src-tauri"]
 default-members = ["crates/firewol-core"]
 resolver = "3"
 
+[profile.release]
+# Integer overflow in the Win32 and NTFS record code stops the program instead of wrapping.
+overflow-checks = true
+strip = "debuginfo"
+
 [workspace.package]
 edition = "2024"
 license = "MIT"

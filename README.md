@@ -98,7 +98,7 @@ Firewol/
 
 2. **Install frontend dependencies:**
    ```powershell
-   npm install
+   npm ci
    ```
 
 3. **Run in development mode (with Hot Module Replacement):**

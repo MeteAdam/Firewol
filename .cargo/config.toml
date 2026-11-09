@@ -1,3 +1,7 @@
+[target.x86_64-pc-windows-msvc]
+# Control Flow Guard and CET shadow stacks, against hijacked indirect calls and returns.
+rustflags = ["-C", "control-flow-guard", "-C", "link-arg=/CETCOMPAT"]
+
 [env]
 # `cargo test -p firewol-tauri` writes the interface's TypeScript contract here.
 TS_RS_EXPORT_DIR = { value = "src/lib/bindings", relative = true }

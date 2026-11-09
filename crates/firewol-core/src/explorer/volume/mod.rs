@@ -37,6 +37,7 @@ use super::{Cancellation, SearchIndex, attributes, encode, resolve_directory};
 use crate::file_identity::{FileIdentity, identity, open_item};
 use crate::ntfs::{self, Records};
 use pipe::{CHECKPOINT, FAILED, Pipe, REFERENCES, RESET, Sender};
+pub use pipe::remember_executable;
 
 pub fn drive_of(path: &Path) -> Option<char> {
     match path.components().next()? {

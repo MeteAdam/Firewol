@@ -1164,6 +1164,7 @@ fn ntfs_helper() -> Option<i32> {
 }
 
 fn main() {
+    firewol_core::explorer::volume::remember_executable();
     if let Some(code) = ntfs_helper() {
         std::process::exit(code);
     }

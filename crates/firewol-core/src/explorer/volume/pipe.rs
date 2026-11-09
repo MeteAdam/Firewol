@@ -1,8 +1,11 @@
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::path::Path;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
@@ -14,8 +17,9 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_MODE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-    ReadFile, SECURITY_ANONYMOUS, SECURITY_SQOS_PRESENT,
+    CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
+    FILE_SHARE_MODE, FILE_SHARE_READ, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
+    SECURITY_ANONYMOUS, SECURITY_SQOS_PRESENT,
 };
 use windows::Win32::System::Com::CoCreateGuid;
 use windows::Win32::System::Pipes::{
@@ -30,8 +34,10 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::core::{PCWSTR, w};
 
+use super::super::attributes;
 use super::super::elevation::system_directory;
 use super::Cancellation;
+use crate::file_identity::{FileIdentity, identity, open_item};
 use crate::recycle::Apartment;
 
 const PREFIX: &str = r"\\.\pipe\Firewol-";
@@ -42,6 +48,35 @@ pub(super) const REFERENCES: u32 = 2;
 pub(super) const CHECKPOINT: u32 = 3;
 pub(super) const FAILED: u32 = 4;
 
+static EXECUTABLE: OnceLock<Option<FileIdentity>> = OnceLock::new();
+
+/// Records which file this process started from, so a file dropped at the same path later is
+/// never the one elevated. Call it first thing in `main`.
+pub fn remember_executable() {
+    EXECUTABLE.get_or_init(running_executable);
+}
+
+fn running_executable() -> Option<FileIdentity> {
+    let file = open_item(&std::env::current_exe().ok()?).ok()?;
+    identity(&file).ok()
+}
+
+/// Opens the program about to be elevated and blocks replacing it while the handle lives.
+fn pin_executable(path: &Path, expected: Option<FileIdentity>) -> Result<File> {
+    let file = OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ.0)
+        .share_mode(FILE_SHARE_READ.0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(path)
+        .context("Open Firewol's own executable")?;
+    let (directory, reparse, _, _) = attributes(&file)?;
+    ensure!(
+        !directory && !reparse && expected == Some(identity(&file)?),
+        "Firewol's executable changed since it started. Restart Firewol and try again."
+    );
+    Ok(file)
+}
+
 pub(super) struct Pipe(OwnedHandle);
 
 impl Pipe {
@@ -50,7 +85,9 @@ impl Pipe {
         let guid = unsafe { CoCreateGuid()? }.to_u128();
         let name = format!("{PREFIX}{guid:032x}");
         let pipe = Self::listen(&name)?;
-        let program = wide(std::env::current_exe()?.as_os_str());
+        let executable = std::env::current_exe()?;
+        let pinned = pin_executable(&executable, *EXECUTABLE.get_or_init(running_executable))?;
+        let program = wide(executable.as_os_str());
         let args = wide(OsStr::new(&format!(
             "--ntfs-helper {drive} {serial} {name} {}",
             std::process::id()
@@ -73,6 +110,7 @@ impl Pipe {
             }
             return Err(error).context("Start the read-only NTFS helper");
         }
+        drop(pinned);
         ensure!(
             !request.hProcess.is_invalid(),
             "NTFS helper process was unavailable"
@@ -224,6 +262,30 @@ fn wide(text: &OsStr) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_running_program_can_be_pinned() -> Result<()> {
+        let running = std::env::current_exe()?;
+        drop(pin_executable(&running, running_executable())?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_replaced_program_is_never_elevated_and_a_pinned_one_cannot_be_moved() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let program = fixture.path().join("firewol.exe");
+        std::fs::write(&program, "first")?;
+        let original = identity(&open_item(&program)?)?;
+        let pinned = pin_executable(&program, Some(original))?;
+        assert!(std::fs::rename(&program, fixture.path().join("moved.exe")).is_err());
+        drop(pinned);
+        std::fs::rename(&program, fixture.path().join("moved.exe"))?;
+        std::fs::write(&program, "planted")?;
+        let error = pin_executable(&program, Some(original)).unwrap_err();
+        assert!(format!("{error:#}").contains("changed since it started"));
+        assert!(pin_executable(&program, None).is_err());
+        Ok(())
+    }
 
     #[test]
     fn the_helper_connects_without_lending_its_token() -> Result<()> {

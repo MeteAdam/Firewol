@@ -14,14 +14,17 @@ use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{PCWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::{
+    IDOK, MB_DEFBUTTON2, MB_ICONWARNING, MB_OKCANCEL, MessageBoxW, SW_SHOWNORMAL,
+};
+use windows::core::{HSTRING, PCWSTR, w};
 
 use super::{ItemId, attributes, display_path};
 use crate::file_identity::identity;
 use crate::recycle::Apartment;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// In order of what each mode allows, so a raised policy compares greater.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ElevationMode {
     #[default]
@@ -59,7 +62,9 @@ impl ElevationPolicy {
         ensure!(paths.len() <= 32, "Use up to 32 allowlisted executables");
         let mut executables = Vec::new();
         for path in paths {
-            let entry = TrustedExecutable::from(&executable_id(path)?);
+            let item = executable_id(path)?;
+            ensure!(!is_network_path(item.path()), NETWORK_ELEVATION);
+            let entry = TrustedExecutable::from(&item);
             if !executables.contains(&entry) {
                 executables.push(entry);
             }
@@ -82,6 +87,38 @@ impl ElevationPolicy {
             ElevationMode::AllExecutables => true,
         }
     }
+}
+
+const NETWORK_ELEVATION: &str = "Only a program on this PC can run as administrator";
+
+/// True for a UNC path in either form; a mapped drive shows as one once canonicalized.
+pub fn is_network_path(path: &Path) -> bool {
+    display_path(path).to_string_lossy().starts_with(r"\\")
+}
+
+/// Asks the person at the PC directly, outside the WebView, so that script in the interface can
+/// neither answer for them nor hide the question. Lists what the change would allow.
+pub fn confirm_policy_change(owner: HWND, changes: &[String]) -> bool {
+    const SHOWN: usize = 8;
+    let mut text = String::from("A settings change would allow this on your PC:\n\n");
+    for change in changes.iter().take(SHOWN) {
+        text.push_str("\u{2022} ");
+        text.push_str(change);
+        text.push('\n');
+    }
+    if changes.len() > SHOWN {
+        text.push_str(&format!("and {} more\n", changes.len() - SHOWN));
+    }
+    text.push_str("\nChoose OK only if you just made this change yourself.");
+    let answer = unsafe {
+        MessageBoxW(
+            Some(owner),
+            &HSTRING::from(text),
+            w!("Firewol security check"),
+            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    };
+    answer == IDOK
 }
 
 /// The real System32 folder, which unlike `%SystemRoot%` no process environment can redirect.
@@ -173,6 +210,7 @@ fn launch_with(
         "Elevation for this executable is disabled in Admin settings"
     );
     validate_executable(program.path())?;
+    ensure!(!is_network_path(program.path()), NETWORK_ELEVATION);
     let pinned = OpenOptions::new()
         .access_mode(FILE_GENERIC_READ.0)
         .share_mode(FILE_SHARE_READ.0)
@@ -210,5 +248,24 @@ fn launch_with(
             bail!("Windows elevation was cancelled")
         }
         result => result.context("Request Windows administrator consent"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_paths_are_told_apart_from_local_ones() {
+        assert!(is_network_path(Path::new(r"\\server\share\a.exe")));
+        assert!(is_network_path(Path::new(r"\\?\UNC\server\share\a.exe")));
+        assert!(!is_network_path(Path::new(r"C:\Tools\a.exe")));
+        assert!(!is_network_path(Path::new(r"\\?\C:\Tools\a.exe")));
+    }
+
+    #[test]
+    fn modes_are_ordered_by_what_they_allow() {
+        assert!(ElevationMode::Standard < ElevationMode::Allowlist);
+        assert!(ElevationMode::Allowlist < ElevationMode::AllExecutables);
     }
 }

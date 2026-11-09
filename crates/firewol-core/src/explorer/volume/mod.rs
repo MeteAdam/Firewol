@@ -21,9 +21,6 @@ use windows::Win32::Storage::FileSystem::{
     GetFinalPathNameByHandleW, OpenFileById,
 };
 use windows::Win32::System::IO::DeviceIoControl;
-use windows::Win32::System::LibraryLoader::{
-    LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
-};
 use windows::Win32::System::Ioctl::{
     FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0,
     USN_REASON_BASIC_INFO_CHANGE, USN_REASON_DATA_EXTEND, USN_REASON_DATA_TRUNCATION,
@@ -31,13 +28,16 @@ use windows::Win32::System::Ioctl::{
     USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME, USN_REASON_REPARSE_POINT_CHANGE,
     USN_REASON_SECURITY_CHANGE,
 };
+use windows::Win32::System::LibraryLoader::{
+    LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+};
 
 use super::search::{INSERT, IndexedItem, cancellable, rebuild, reset};
 use super::{Cancellation, SearchIndex, attributes, encode, resolve_directory};
 use crate::file_identity::{FileIdentity, identity, open_item};
 use crate::ntfs::{self, Records};
-use pipe::{CHECKPOINT, FAILED, Pipe, REFERENCES, RESET, Sender};
 pub use pipe::remember_executable;
+use pipe::{CHECKPOINT, FAILED, Pipe, REFERENCES, RESET, Sender};
 
 pub fn drive_of(path: &Path) -> Option<char> {
     match path.components().next()? {

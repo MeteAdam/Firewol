@@ -1,5 +1,7 @@
 use anyhow::{Result, ensure};
-use firewol_core::explorer::elevation::{ElevationMode, ElevationPolicy, validate_executable};
+use firewol_core::explorer::elevation::{
+    ElevationMode, ElevationPolicy, is_network_path, validate_executable,
+};
 use firewol_core::explorer::{
     Appearance, ColumnWidths, FolderStyle, ItemId, MenuAction, MenuEntry, Rgb, Session, Settings,
 };
@@ -13,6 +15,7 @@ pub const ROWS: [u32; 4] = [24, 32, 40, 52];
 pub const SIDEBAR_WIDTH: std::ops::RangeInclusive<u32> = 180..=360;
 const NAME_WIDTH: std::ops::RangeInclusive<u32> = 120..=2400;
 const COLUMN_WIDTH: std::ops::RangeInclusive<u32> = 56..=1200;
+const EXECUTABLE_LENGTH: usize = 4096;
 
 fn mirror<T: Serialize, U: DeserializeOwned>(value: T) -> Result<U> {
     Ok(serde_json::from_value(serde_json::to_value(value)?)?)
@@ -88,7 +91,57 @@ pub fn set_folder_style(
     view(&session.set_folder_style(folder, style)?)
 }
 
-pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
+/// What a patch would newly allow to run, or to run elevated. Saving the same values again, and
+/// anything that only narrows the policy, needs no approval.
+fn escalations(
+    current: &Settings,
+    menu: Option<&[MenuEntry]>,
+    elevation: Option<&ElevationPolicy>,
+) -> Vec<String> {
+    let mut changes = Vec::new();
+    for entry in menu.unwrap_or_default() {
+        let MenuAction::Custom {
+            executable,
+            administrator,
+        } = &entry.action
+        else {
+            continue;
+        };
+        let known = current.menu.iter().any(|old| {
+            matches!(&old.action, MenuAction::Custom { executable: path, administrator: elevated }
+                if path == executable && (*elevated || !*administrator))
+        });
+        if !known {
+            let verb = if *administrator {
+                "Run as administrator"
+            } else {
+                "Run from the menu"
+            };
+            changes.push(format!("{verb}: {executable}"));
+        }
+    }
+    if let Some(policy) = elevation {
+        if policy.mode > current.elevation.mode {
+            changes.push(match policy.mode {
+                ElevationMode::AllExecutables => "Any executable can run as administrator".into(),
+                _ => "Allowlisted executables can run as administrator".into(),
+            });
+        }
+        for path in policy.paths() {
+            if !current.elevation.paths().any(|known| known == path) {
+                changes.push(format!("Allow as administrator: {}", path.display()));
+            }
+        }
+    }
+    changes
+}
+
+/// `confirm` is asked before anything that widens what can run is saved.
+pub fn update(
+    session: &Session,
+    patch: SettingsPatch,
+    confirm: impl FnOnce(&[String]) -> bool,
+) -> Result<SettingsView> {
     let appearance = patch.appearance.map(mirror::<_, Appearance>).transpose()?;
     let menu = patch.menu.map(mirror::<_, Vec<MenuEntry>>).transpose()?;
     let columns = patch.columns.map(mirror::<_, ColumnWidths>).transpose()?;
@@ -128,8 +181,20 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
                 entry.label.len() <= 200 && entry.icon.len() <= 64,
                 "Menu text is too long"
             );
-            if let MenuAction::Custom { executable, .. } = &entry.action {
+            if let MenuAction::Custom {
+                executable,
+                administrator,
+            } = &entry.action
+            {
+                ensure!(
+                    executable.len() <= EXECUTABLE_LENGTH,
+                    "The executable path is too long"
+                );
                 validate_executable(Path::new(executable))?;
+                ensure!(
+                    !administrator || !is_network_path(Path::new(executable)),
+                    "Only a program on this PC can run as administrator"
+                );
             }
         }
     }
@@ -137,10 +202,6 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
         .elevation
         .map(|view| -> Result<_> {
             let mode: ElevationMode = mirror(view.mode)?;
-            ensure!(
-                mode != ElevationMode::AllExecutables || patch.allow_all_confirmed == Some(true),
-                "Confirm Any executable in this window before enabling it"
-            );
             ElevationPolicy::new(
                 mode,
                 &view
@@ -151,6 +212,11 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
             )
         })
         .transpose()?;
+    let changes = escalations(&session.settings(), menu.as_deref(), elevation.as_ref());
+    ensure!(
+        changes.is_empty() || confirm(&changes),
+        "The change was not confirmed"
+    );
     let updated = session.update_settings(move |settings| {
         if let Some(appearance) = appearance {
             if patch.migrate_appearance != Some(true) || !settings.theme_migrated {
@@ -198,6 +264,7 @@ pub fn update(session: &Session, patch: SettingsPatch) -> Result<SettingsView> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use firewol_core::explorer::{FolderKey, FolderStyle, ItemId};
 
     #[test]
@@ -221,6 +288,7 @@ mod tests {
                 migrate_appearance: Some(true),
                 ..Default::default()
             },
+            |_| true,
         )?;
         assert!(migrated.theme_migrated && migrated.appearance.dark);
         appearance.dark = false;
@@ -232,6 +300,7 @@ mod tests {
                 sidebar: Some(false),
                 ..Default::default()
             },
+            |_| true,
         )?;
         assert!(again.appearance.dark && !again.sidebar && again.sidebar_width == 232);
         let wide = update(
@@ -240,6 +309,7 @@ mod tests {
                 sidebar_width: Some(300),
                 ..Default::default()
             },
+            |_| true,
         )?;
         assert_eq!(wide.sidebar_width, 300);
         let tall = update(
@@ -248,6 +318,7 @@ mod tests {
                 row: Some(52),
                 ..Default::default()
             },
+            |_| true,
         )?;
         assert_eq!(tall.row, 52);
         assert_eq!(Settings::load(fixture.path())?.row, Some(52));
@@ -258,6 +329,7 @@ mod tests {
                     row: Some(33),
                     ..Default::default()
                 },
+                |_| true,
             )
             .is_err()
         );
@@ -268,6 +340,7 @@ mod tests {
                     sidebar_width: Some(500),
                     ..Default::default()
                 },
+                |_| true,
             )
             .is_err()
         );
@@ -283,8 +356,72 @@ mod tests {
                 }),
                 ..Default::default()
             },
+            |_| false,
         );
         assert!(denied.is_err());
         Ok(())
+    }
+
+    fn allowlist(executables: Vec<String>) -> SettingsPatch {
+        SettingsPatch {
+            elevation: Some(ElevationView {
+                mode: "allowlist".into(),
+                executables,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn widening_the_policy_needs_the_person_at_the_pc() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let session = Session::open(fixture.path().to_owned(), |_| {})?;
+        let root = std::env::var("SystemRoot")?;
+        let tool = format!(r"{root}\System32\whoami.exe");
+        let refused = update(&session, allowlist(vec![tool.clone()]), |changes| {
+            assert!(changes.iter().any(|change| change.contains("whoami")));
+            false
+        })
+        .err()
+        .context("The refused change was saved")?;
+        assert!(refused.to_string().contains("not confirmed"));
+        let saved = Settings::load(fixture.path())?;
+        assert_eq!(saved.elevation.mode, ElevationMode::Standard);
+        assert_eq!(saved.elevation.paths().count(), 0);
+
+        let allowed = update(&session, allowlist(vec![tool.clone()]), |_| true)?;
+        assert_eq!(allowed.elevation.executables.len(), 1);
+
+        // Saving the same policy, or narrowing it, never asks.
+        update(&session, allowlist(vec![tool]), |_| panic!("no new access"))?;
+        update(&session, allowlist(vec![]), |_| panic!("narrower"))?;
+        let standard = SettingsPatch {
+            elevation: Some(ElevationView {
+                mode: "standard".into(),
+                executables: vec![],
+            }),
+            ..Default::default()
+        };
+        update(&session, standard, |_| panic!("narrower"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn only_new_or_raised_custom_actions_count_as_escalations() {
+        let custom = |executable: &str, administrator| {
+            MenuEntry::new(MenuAction::Custom {
+                executable: executable.into(),
+                administrator,
+            })
+        };
+        let current = Settings {
+            menu: vec![custom(r"C:\a.exe", false), custom(r"C:\b.exe", true)],
+            ..Default::default()
+        };
+        let check = |menu: Vec<MenuEntry>| escalations(&current, Some(&menu), None).len();
+        assert_eq!(check(current.menu.clone()), 0);
+        assert_eq!(check(vec![custom(r"C:\b.exe", false)]), 0);
+        assert_eq!(check(vec![custom(r"C:\a.exe", true)]), 1);
+        assert_eq!(check(vec![custom(r"C:\new.exe", false)]), 1);
     }
 }

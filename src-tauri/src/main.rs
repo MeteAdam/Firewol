@@ -25,7 +25,7 @@ use firewol_core::explorer::icons::{self, Icons};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
 use firewol_core::explorer::{
     ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, SavedView, Session, actions, custom_icon,
-    data_dir, display_path, home,
+    data_dir, display_path, elevation, home,
 };
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::{
@@ -507,13 +507,20 @@ async fn get_settings(files: State<'_, Files>) -> Result<contract::SettingsView,
 
 #[tauri::command]
 async fn update_settings(
+    window: Window,
     app: AppHandle,
+    state: State<'_, App>,
     files: State<'_, Files>,
     patch: contract::SettingsPatch,
 ) -> Result<contract::SettingsView, String> {
     let files = files.0.clone();
+    let owner = owner(&window)?;
+    // The self-test and the measuring scripts run unattended, in a process they started themselves.
+    let unattended = state.report.is_some();
     blocking(move || {
-        let view = settings::update(&files, patch)?;
+        let view = settings::update(&files, patch, |changes| {
+            unattended || elevation::confirm_policy_change(HWND(owner as _), changes)
+        })?;
         app.emit(contract::SETTINGS_CHANGED, &view)?;
         Ok(view)
     })

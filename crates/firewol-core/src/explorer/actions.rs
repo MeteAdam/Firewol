@@ -105,7 +105,9 @@ pub fn take_ownership(target: &ItemId, policy: &ElevationPolicy, owner: HWND) ->
         "Firewol cannot take ownership of a whole drive"
     );
     ensure!(
-        !fs::symlink_metadata(target.path())?.file_type().is_symlink(),
+        !fs::symlink_metadata(target.path())?
+            .file_type()
+            .is_symlink(),
         "Firewol cannot take ownership of a link. Select the folder it points to."
     );
     let reach = if directory {

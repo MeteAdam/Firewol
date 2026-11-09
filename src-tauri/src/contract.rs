@@ -201,8 +201,6 @@ pub struct SettingsPatch {
     #[ts(optional)]
     pub elevation: Option<ElevationView>,
     #[ts(optional)]
-    pub allow_all_confirmed: Option<bool>,
-    #[ts(optional)]
     pub migrate_appearance: Option<bool>,
 }
 

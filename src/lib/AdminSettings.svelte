@@ -54,7 +54,7 @@
     <strong>Allow any executable to run as administrator?</strong>
     <span>Every .exe file gets “Run as administrator”. A mistaken click on the consent prompt gives that program full control of this PC.</span>
     <div class="buttons">
-      <button class="action primary" onclick={async () => { if (await save({ elevation: { mode: "all_executables", executables: elevation.executables }, allow_all_confirmed: true })) confirmAny = false; }}>Allow any executable</button>
+      <button class="action primary" onclick={async () => { if (await save({ elevation: { mode: "all_executables", executables: elevation.executables } })) confirmAny = false; }}>Allow any executable</button>
       <button class="action" onclick={() => (confirmAny = false)}>Cancel</button>
     </div>
   </div>

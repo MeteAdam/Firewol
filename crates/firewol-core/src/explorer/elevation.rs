@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +10,7 @@ use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_READ,
 };
+use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
@@ -81,6 +82,17 @@ impl ElevationPolicy {
             ElevationMode::AllExecutables => true,
         }
     }
+}
+
+/// The real System32 folder, which unlike `%SystemRoot%` no process environment can redirect.
+pub(super) fn system_directory() -> Result<PathBuf> {
+    let mut buffer = [0u16; 261];
+    let length = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
+    ensure!(
+        (1..buffer.len()).contains(&length),
+        "Find the Windows system folder"
+    );
+    Ok(PathBuf::from(OsString::from_wide(&buffer[..length])))
 }
 
 pub fn validate_executable(path: &Path) -> Result<()> {

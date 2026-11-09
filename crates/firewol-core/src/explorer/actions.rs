@@ -18,7 +18,9 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows_core::HSTRING;
 
-use super::elevation::{self, ElevationPolicy, executable_id, validate_executable};
+use super::elevation::{
+    self, ElevationPolicy, executable_id, system_directory, validate_executable,
+};
 use super::operations::validate_name;
 use super::{ItemId, attributes, display_path, unix_seconds};
 use crate::file_identity::information;
@@ -49,7 +51,16 @@ fn working_folder(target: &ItemId) -> Result<PathBuf> {
 /// Opens a console in the target's folder. The folder goes through the working directory, so no
 /// file name ever reaches a command line.
 pub fn open_terminal(kind: Terminal, target: &ItemId) -> Result<()> {
-    let mut command = match kind {
+    terminal_command(kind)?
+        .current_dir(working_folder(target)?)
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .context("Open the terminal")?;
+    Ok(())
+}
+
+fn terminal_command(kind: Terminal) -> Result<Command> {
+    Ok(match kind {
         Terminal::CommandPrompt => Command::new("cmd.exe"),
         Terminal::PowerShell => {
             let mut shell = Command::new("powershell.exe");
@@ -62,17 +73,13 @@ pub fn open_terminal(kind: Terminal, target: &ItemId) -> Result<()> {
             shell
         }
         Terminal::SystemInformation => {
-            let mut shell = Command::new("cmd.exe");
-            shell.args(["/K", "systeminfo"]);
+            // `cmd` tries the working folder first, so a bare name could run a planted file.
+            let system = system_directory()?;
+            let mut shell = Command::new(system.join("cmd.exe"));
+            shell.arg("/K").arg(system.join("systeminfo.exe"));
             shell
         }
-    };
-    command
-        .current_dir(working_folder(target)?)
-        .creation_flags(CREATE_NEW_CONSOLE)
-        .spawn()
-        .context("Open the terminal")?;
-    Ok(())
+    })
 }
 
 /// `wt.exe` is an app execution alias, which only `symlink_metadata` can see.
@@ -249,6 +256,21 @@ pub fn run_as_administrator(program: &ItemId, policy: &ElevationPolicy, owner: H
 mod tests {
     use super::*;
     use crate::explorer::elevation::ElevationMode;
+
+    #[test]
+    fn system_information_never_runs_by_bare_name() -> Result<()> {
+        let command = terminal_command(Terminal::SystemInformation)?;
+        assert!(Path::new(command.get_program()).is_absolute());
+        let program = command.get_args().nth(1).context("The program argument")?;
+        assert!(Path::new(program).is_absolute());
+        assert!(
+            program
+                .to_string_lossy()
+                .to_lowercase()
+                .ends_with(r"\system32\systeminfo.exe")
+        );
+        Ok(())
+    }
 
     #[test]
     fn attributes_change_one_at_a_time() -> Result<()> {

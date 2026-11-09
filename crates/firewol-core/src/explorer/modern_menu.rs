@@ -162,6 +162,10 @@ fn applies(types: &[String], target: &Target) -> bool {
 }
 
 fn take_text(text: PWSTR) -> Option<String> {
+    // A handler can report success and still return no string.
+    if text.is_null() {
+        return None;
+    }
     let value = unsafe { text.to_string() }.ok();
     unsafe { CoTaskMemFree(Some(text.0 as _)) };
     value
@@ -303,6 +307,11 @@ impl Modern {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_null_string_from_a_handler_is_no_text() {
+        assert_eq!(take_text(PWSTR::null()), None);
+    }
 
     const MANIFEST: &str = r#"<Extensions>
         <desktop4:FileExplorerContextMenus>

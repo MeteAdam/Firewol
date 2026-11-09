@@ -2,6 +2,8 @@
 //! `cargo test -p firewol-tauri` regenerates `src/lib/bindings/` from these types;
 //! `src/lib/contract.ts` re-exports them with the event names.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -58,17 +60,30 @@ pub struct AppearanceView {
     pub preset: String,
     pub dark: bool,
     pub follow_windows: bool,
-    pub background: Option<[u8; 3]>,
-    pub surface: Option<[u8; 3]>,
-    pub text: Option<[u8; 3]>,
-    pub accent: Option<[u8; 3]>,
-    pub folder: Option<[u8; 3]>,
-    pub folder_label: Option<[u8; 3]>,
     pub caption_left: bool,
     #[ts(type = "'rounded' | 'square' | 'circle' | 'minimal'")]
     pub caption_shape: String,
-    pub caption_fill: Option<[u8; 3]>,
-    pub caption_hover: Option<[u8; 3]>,
+    pub palettes: BTreeMap<String, BTreeMap<String, [u8; 3]>>,
+}
+
+type PaletteEdits = BTreeMap<String, Option<[u8; 3]>>;
+
+#[derive(Default, Deserialize, TS)]
+#[serde(default, deny_unknown_fields)]
+#[ts(export)]
+pub struct AppearancePatch {
+    #[ts(optional)]
+    pub preset: Option<String>,
+    #[ts(optional)]
+    pub dark: Option<bool>,
+    #[ts(optional)]
+    pub follow_windows: Option<bool>,
+    #[ts(optional)]
+    pub caption_left: Option<bool>,
+    #[ts(optional)]
+    pub caption_shape: Option<String>,
+    #[ts(optional)]
+    pub palettes: Option<BTreeMap<String, PaletteEdits>>,
 }
 
 #[derive(Clone, Serialize, Deserialize, TS)]
@@ -174,7 +189,7 @@ pub struct SettingsView {
 #[ts(export)]
 pub struct SettingsPatch {
     #[ts(optional)]
-    pub appearance: Option<AppearanceView>,
+    pub appearance: Option<AppearancePatch>,
     #[ts(optional)]
     pub sidebar: Option<bool>,
     #[ts(optional)]

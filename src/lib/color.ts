@@ -58,3 +58,17 @@ export function cssRgb(value: string): Rgb | null {
   const rgb = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*(1|1\.0+))?\)$/i.exec(text);
   return rgb ? [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])] : null;
 }
+
+/** Relative luminance contrast for two opaque sRGB colours. */
+export function contrastRatio(first: Rgb, second: Rgb): number {
+  const luminance = (rgb: Rgb) => {
+    const [r, g, b] = rgb.map((byte) => {
+      const channel = byte / 255;
+      return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const a = luminance(first);
+  const b = luminance(second);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}

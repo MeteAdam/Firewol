@@ -90,7 +90,7 @@
   .mode.on .dot { border: 5px solid var(--accent); }
   .text { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
   .text .muted { font-size: 12px; }
-  .confirm { display: flex; flex-direction: column; gap: 8px; max-width: 640px; margin-top: 12px; padding: 12px 14px; border: 1px solid #c42b1c; border-radius: var(--radius-s); background: var(--surface-2); font-size: 13px; }
+  .confirm { display: flex; flex-direction: column; gap: 8px; max-width: 640px; margin-top: 12px; padding: 12px 14px; border: 1px solid var(--danger); border-radius: var(--radius-s); background: var(--surface-2); font-size: 13px; }
   .buttons { display: flex; gap: 8px; }
   .list { display: flex; flex-direction: column; gap: 2px; max-width: 640px; margin: 0 0 8px; padding: 0; list-style: none; }
   .list li { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 6px 0 10px; border-radius: var(--radius-s); }
@@ -99,5 +99,5 @@
   .path { flex: 1; min-width: 0; overflow: hidden; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
   .add { display: flex; gap: 8px; max-width: 640px; }
   .field-text { flex: 1; height: 34px; padding: 0 10px; border: var(--border-w) solid var(--border); border-radius: var(--radius-s); background: var(--field); font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
-  .error { margin-top: 8px; color: #c42b1c; }
+  .error { margin-top: 8px; color: var(--danger); }
 </style>

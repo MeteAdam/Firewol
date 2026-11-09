@@ -3,9 +3,11 @@ use firewol_core::explorer::elevation::{
     ElevationMode, ElevationPolicy, is_network_path, validate_executable,
 };
 use firewol_core::explorer::{
-    Appearance, ColumnWidths, FolderStyle, ItemId, MenuAction, MenuEntry, Rgb, Session, Settings,
+    CaptionShape, ColorSlot, ColumnWidths, FolderStyle, ItemId, MenuAction, MenuEntry, Preset, Rgb,
+    Session, Settings,
 };
 use serde::{Serialize, de::DeserializeOwned};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::contract::{ElevationView, FolderStyleView, SettingsPatch, SettingsView, StyledFolder};
@@ -40,7 +42,7 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
         show_hidden: settings.show_hidden.unwrap_or(true),
         show_extensions: settings.show_extensions.unwrap_or(true),
         columns: mirror(settings.columns.unwrap_or_default())?,
-        appearance: mirror(settings.appearance)?,
+        appearance: mirror(&settings.appearance)?,
         menu: mirror(&settings.menu)?,
         folders: settings
             .folders
@@ -142,7 +144,22 @@ pub fn update(
     patch: SettingsPatch,
     confirm: impl FnOnce(&[String]) -> bool,
 ) -> Result<SettingsView> {
-    let appearance = patch.appearance.map(mirror::<_, Appearance>).transpose()?;
+    let appearance = patch.appearance;
+    let preset = appearance
+        .as_ref()
+        .and_then(|patch| patch.preset.as_ref())
+        .map(mirror::<_, Preset>)
+        .transpose()?;
+    let shape = appearance
+        .as_ref()
+        .and_then(|patch| patch.caption_shape.as_ref())
+        .map(mirror::<_, CaptionShape>)
+        .transpose()?;
+    let palettes = appearance
+        .as_ref()
+        .and_then(|patch| patch.palettes.as_ref())
+        .map(mirror::<_, BTreeMap<Preset, BTreeMap<ColorSlot, Option<Rgb>>>>)
+        .transpose()?;
     let menu = patch.menu.map(mirror::<_, Vec<MenuEntry>>).transpose()?;
     let columns = patch.columns.map(mirror::<_, ColumnWidths>).transpose()?;
     if let Some(columns) = columns {
@@ -220,7 +237,35 @@ pub fn update(
     let updated = session.update_settings(move |settings| {
         if let Some(appearance) = appearance {
             if patch.migrate_appearance != Some(true) || !settings.theme_migrated {
-                settings.appearance = appearance;
+                let current = &mut settings.appearance;
+                if let Some(preset) = preset {
+                    current.preset = preset;
+                }
+                if let Some(dark) = appearance.dark {
+                    current.dark = dark;
+                }
+                if let Some(follow) = appearance.follow_windows {
+                    current.follow_windows = follow;
+                }
+                if let Some(left) = appearance.caption_left {
+                    current.caption_left = left;
+                }
+                if let Some(shape) = shape {
+                    current.caption_shape = shape;
+                }
+                for (preset, changes) in palettes.into_iter().flatten() {
+                    let palette = current.palettes.entry(preset).or_default();
+                    for (slot, color) in changes {
+                        if let Some(color) = color {
+                            palette.insert(slot, color);
+                        } else {
+                            palette.remove(&slot);
+                        }
+                    }
+                    if palette.is_empty() {
+                        current.palettes.remove(&preset);
+                    }
+                }
             }
             settings.theme_migrated = true;
         }
@@ -268,6 +313,59 @@ mod tests {
     use firewol_core::explorer::{FolderKey, FolderStyle, ItemId};
 
     #[test]
+    fn palette_patches_migrate_merge_and_reset_independently() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        std::fs::write(
+            fixture.path().join("explorer.json"),
+            r#"{
+            "version": 2, "theme_migrated": true,
+            "appearance": {"preset":"glassmorphism","accent":[18,52,86],"caption_fill":[1,2,3]}
+        }"#,
+        )?;
+        let session = Session::open(fixture.path().to_owned(), |_| {})?;
+        let patch = |value| update(&session, serde_json::from_value(value)?, |_| true);
+        let migrated = view(&session.settings())?;
+        assert_eq!(migrated.version, 3);
+        assert_eq!(migrated.appearance.palettes.len(), 1);
+        assert_eq!(
+            migrated.appearance.palettes["glassmorphism"]["accent"],
+            [18, 52, 86]
+        );
+        assert_eq!(
+            migrated.appearance.palettes["glassmorphism"]["caption_fill"],
+            [1, 2, 3]
+        );
+        patch(
+            serde_json::json!({"appearance": {"preset": "light_morphism", "palettes": {
+                "light_morphism": {"accent": [4, 5, 6]}, "glassmorphism": {"muted": [7, 8, 9]}
+            }}}),
+        )?;
+        let second = Session::open(fixture.path().to_owned(), |_| {})?;
+        update(
+            &second,
+            serde_json::from_value(serde_json::json!({"appearance": {
+                "palettes": {"light_morphism": {"folder_label": [10, 11, 12]}}
+            }}))?,
+            |_| true,
+        )?;
+        let saved = patch(serde_json::json!({"appearance": {"palettes": {
+            "glassmorphism": {"accent": null, "caption_fill": null, "muted": null, "surface_2": null}
+        }}}))?;
+        assert_eq!(saved.appearance.preset, "light_morphism");
+        assert!(!saved.appearance.palettes.contains_key("glassmorphism"));
+        let reloaded = view(&Settings::load(fixture.path())?)?;
+        assert_eq!(
+            reloaded.appearance.palettes["light_morphism"]["accent"],
+            [4, 5, 6]
+        );
+        assert_eq!(
+            reloaded.appearance.palettes["light_morphism"]["folder_label"],
+            [10, 11, 12]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn settings_keep_large_identities_and_migrate_only_once() -> Result<()> {
         let fixture = tempfile::tempdir()?;
         let session = Session::open(fixture.path().to_owned(), |_| {})?;
@@ -279,23 +377,26 @@ mod tests {
         })?;
         let before = view(&session.settings())?;
         assert_eq!(before.folders[0].index, "18446744073709551614");
-        let mut appearance = before.appearance;
-        appearance.dark = true;
         let migrated = update(
             &session,
             SettingsPatch {
-                appearance: Some(appearance.clone()),
+                appearance: Some(crate::contract::AppearancePatch {
+                    dark: Some(true),
+                    ..Default::default()
+                }),
                 migrate_appearance: Some(true),
                 ..Default::default()
             },
             |_| true,
         )?;
         assert!(migrated.theme_migrated && migrated.appearance.dark);
-        appearance.dark = false;
         let again = update(
             &session,
             SettingsPatch {
-                appearance: Some(appearance),
+                appearance: Some(crate::contract::AppearancePatch {
+                    dark: Some(false),
+                    ..Default::default()
+                }),
                 migrate_appearance: Some(true),
                 sidebar: Some(false),
                 ..Default::default()

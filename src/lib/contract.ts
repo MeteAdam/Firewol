@@ -14,6 +14,7 @@ export type { Pin } from "./bindings/Pin";
 export type { Startup } from "./bindings/Startup";
 export type { Step } from "./bindings/Step";
 export type { TransferStatus } from "./bindings/TransferStatus";
+export type { AppearancePatch } from "./bindings/AppearancePatch";
 export type { AppearanceView } from "./bindings/AppearanceView";
 export type { SettingsView } from "./bindings/SettingsView";
 export type { SettingsPatch } from "./bindings/SettingsPatch";

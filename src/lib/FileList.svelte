@@ -502,7 +502,7 @@
               >
                 {#if entry}
                   <span class="art">{#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} icon={entry.icon} size={iconSize} />{:else}<FileIcon icon={entry.icon} size={iconSize} />{/if}</span>
-                  {#if row === pane.renaming}{@render renameInput(entry)}{:else}<span class="nm">{shownName(entry)}</span>{/if}
+                  {#if row === pane.renaming}{@render renameInput(entry)}{:else}<span class="nm" class:folder-label={entry.directory}>{shownName(entry)}</span>{/if}
                 {:else}
                   <span class="placeholder"></span>
                 {/if}
@@ -548,7 +548,7 @@
                 {#if row === pane.renaming}
                   {@render renameInput(entry)}
                 {:else}
-                  <span class="nm" title={fullName(entry)}>{shownName(entry)}</span>
+                  <span class="nm" class:folder-label={entry.directory} title={fullName(entry)}>{shownName(entry)}</span>
                 {/if}
               </div>
               {#if pane.searching}<div role="gridcell" class="dim">{location(entry)}</div>{/if}
@@ -643,8 +643,10 @@
   .name { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .nm, .dim { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .nm { unicode-bidi: isolate; }
+  .folder-label { color: var(--folder-label); }
+  .sel .folder-label { color: inherit; }
   .dim { color: var(--muted); }
-  .row.sel .dim { color: inherit; opacity: .85; }
+  .row.sel .dim { color: inherit; }
   .size { text-align: right; }
   .rename {
     flex: 1;

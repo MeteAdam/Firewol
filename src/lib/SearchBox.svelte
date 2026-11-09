@@ -239,9 +239,9 @@
   .pair input.field { flex: 1 1 0; width: 0; }
   .pair select.field { flex: none; padding: 0 4px; }
   .invalid { margin: 0; font-size: 12px; color: var(--text); }
-  .invalid::before { content: "⚠ "; color: #c42b1c; }
+  .invalid::before { content: "⚠ "; color: var(--danger); }
   .foot { display: flex; align-items: center; gap: 8px; font-size: 12px; }
   .foot .muted { flex-grow: 1; }
   .foot .action { padding: 5px 12px; font-size: 13px; }
-  input[aria-invalid="true"] { text-decoration: underline wavy #c42b1c; }
+  input[aria-invalid="true"] { text-decoration: underline wavy var(--danger); }
 </style>

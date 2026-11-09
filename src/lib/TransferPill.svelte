@@ -113,7 +113,7 @@
   dt { color: var(--muted); }
   dd { margin: 0; }
   .result { margin: 0; overflow-wrap: anywhere; }
-  .result.failed::before { content: "⚠ "; color: #c42b1c; }
+  .result.failed::before { content: "⚠ "; color: var(--danger); }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
   .actions .action { padding: 5px 12px; font-size: 13px; }
 </style>

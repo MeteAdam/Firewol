@@ -147,7 +147,7 @@
   .icon { display: flex; flex: none; }
   .crumbs { display: flex; align-items: center; flex: 0 1 auto; min-width: 0; overflow: hidden; }
   .crumb { flex: none; padding: 3px 6px; border: 0; border-radius: 6px; background: transparent; font-size: 13px; white-space: nowrap; }
-  .crumb.cur { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+  .crumb.cur { color: var(--folder-label); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
   .crumb.more { padding: 3px 8px; }
   .chev { display: flex; align-items: center; justify-content: center; flex: none; width: 18px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); }
   .crumb:hover, .chev:hover, .chev[aria-expanded="true"] { background: var(--hover); }

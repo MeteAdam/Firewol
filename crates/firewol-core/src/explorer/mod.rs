@@ -24,8 +24,8 @@ pub use places::{free_space, natural_order, subfolders};
 pub use search::{Filters, SearchIndex, SearchQuery, SearchReader, remove_stale_indexes};
 pub use session::{Clipboard, Completion, History, Session};
 pub use settings::{
-    Appearance, CaptionShape, ColumnWidths, FolderKey, FolderStyle, MenuAction, MenuEntry, Preset,
-    Rgb, SavedView, Settings, default_menu,
+    Appearance, CaptionShape, ColorSlot, ColumnWidths, FolderKey, FolderStyle, MenuAction,
+    MenuEntry, Preset, Rgb, SavedView, Settings, default_menu,
 };
 
 use std::ffi::{OsStr, OsString};

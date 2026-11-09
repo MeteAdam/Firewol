@@ -17,6 +17,7 @@
     DRIVES_CHANGED,
     type SettingsView,
     type SettingsPatch,
+    type AppearancePatch,
     type AppearanceView,
     type Entry,
     type FolderStyleView,
@@ -42,7 +43,7 @@
   import { iconChanged } from "./lib/icons.svelte";
   import Icon from "./lib/Icon.svelte";
   import { NO_FILTERS, Pane, SELECT_ALL_LIMIT, itemKey } from "./lib/pane.svelte";
-  import { PRESETS, colors, presetClass } from "./lib/appearance";
+  import { COLOR_SLOTS, PRESETS, colors, mergeAppearance, paletteOf, presetClass } from "./lib/appearance";
   import { isCustom, menuRows, parentPath, type MenuContext, type MenuRow } from "./lib/menu";
   import { NEW_FILES, TILE_SIZES, areaMenu, itemMenu, placeMenu as sidebarMenu, type MenuActions, type MenuCommand, type MenuEnv, type MenuNode } from "./lib/menuLayout";
   import Breadcrumb from "./lib/Breadcrumb.svelte";
@@ -205,40 +206,68 @@
     catch (reason) { notify(String(reason), { error: true }); }
   }
 
-  // Appearance edits (colour wheel drags) show at once and reach the core at most every 150 ms.
-  let pendingAppearance: AppearanceView | undefined;
+  // Batch wheel drags and serialize writes, while previewing each field immediately.
+  let pendingAppearance: AppearancePatch = {};
+  let savingAppearance: AppearancePatch = {};
   let appearanceTimer: ReturnType<typeof setTimeout> | undefined;
-  const withPending = (view: SettingsView) => (pendingAppearance ? { ...view, appearance: pendingAppearance } : view);
+  let appearanceSave: Promise<void> | undefined;
+  function withPending(view: SettingsView) {
+    let { appearance } = view;
+    for (const patch of [savingAppearance, pendingAppearance]) {
+      if (Object.keys(patch).length) appearance = mergeAppearance(appearance, patch);
+    }
+    return appearance === view.appearance ? view : { ...view, appearance };
+  }
 
-  function previewAppearance(appearance: AppearanceView) {
+  let settingsRefresh = 0;
+  async function refreshSettings() {
+    const request = ++settingsRefresh;
+    try {
+      const latest = await api.getSettings();
+      if (request === settingsRefresh) settings = withPending(latest);
+    } catch (reason) {
+      if (request === settingsRefresh) notify(String(reason), { error: true });
+    }
+  }
+
+  function previewAppearance(patch: AppearancePatch) {
     if (!settings) return;
-    pendingAppearance = appearance;
-    settings = { ...settings, appearance };
+    const palettes = { ...pendingAppearance.palettes };
+    for (const [preset, colors] of Object.entries(patch.palettes ?? {})) {
+      palettes[preset] = { ...palettes[preset], ...colors };
+    }
+    pendingAppearance = { ...pendingAppearance, ...patch, palettes };
+    settings = withPending(settings);
     clearTimeout(appearanceTimer);
     appearanceTimer = setTimeout(() => void flushAppearance(), 150);
   }
 
   async function flushAppearance() {
     clearTimeout(appearanceTimer);
-    const appearance = pendingAppearance;
-    if (!appearance) return;
-    try {
-      const saved = await api.updateSettings({ appearance });
-      if (pendingAppearance === appearance) pendingAppearance = undefined;
-      settings = withPending(saved);
-    } catch (reason) {
-      pendingAppearance = undefined;
-      notify(String(reason), { error: true });
-      settings = await api.getSettings();
-    }
+    while (appearanceSave) await appearanceSave;
+    if (!Object.keys(pendingAppearance).length) return;
+    const appearance = savingAppearance = pendingAppearance;
+    pendingAppearance = {};
+    appearanceSave = (async () => {
+      try {
+        await api.updateSettings({ appearance });
+      } catch (reason) {
+        notify(String(reason), { error: true });
+      } finally {
+        savingAppearance = {};
+        await refreshSettings();
+      }
+    })();
+    try { await appearanceSave; }
+    finally { appearanceSave = undefined; }
   }
 
   function choosePreset(value: AppearanceView["preset"]) {
-    if (settings) void saveSettings({ appearance: { ...settings.appearance, preset: value } });
+    previewAppearance({ preset: value });
   }
 
   function toggleDark() {
-    if (settings) void saveSettings({ appearance: { ...settings.appearance, dark: !dark, follow_windows: false } });
+    previewAppearance({ dark: !dark, follow_windows: false });
   }
 
   function toggleSidebar() { void saveSettings({ sidebar: !sidebar }); }
@@ -318,7 +347,7 @@
     settings = await api.getSettings();
     if (!settings.theme_migrated) {
       const old = PRESETS.find(([, css]) => css === stored("preset", ""));
-      settings = await api.updateSettings({ appearance: old ? { ...settings.appearance, preset: old[0], dark: stored("dark", "false") === "true" } : settings.appearance, migrate_appearance: true });
+      settings = await api.updateSettings({ appearance: old ? { preset: old[0], dark: stored("dark", "false") === "true" } : {}, migrate_appearance: true });
     }
     try { localStorage.removeItem("firewol.preset"); localStorage.removeItem("firewol.dark"); } catch { /* A locked WebView profile can still use core settings. */ }
   }
@@ -1313,12 +1342,32 @@
     const wheel = root.querySelector<HTMLCanvasElement>("canvas")!.getBoundingClientRect();
     root.querySelector("canvas")!.dispatchEvent(new PointerEvent("pointerdown", { clientX: wheel.right - 4, clientY: wheel.top + wheel.height / 2, pointerId: 1, bubbles: true }));
     root.querySelector("canvas")!.dispatchEvent(new PointerEvent("pointerup", { pointerId: 1, bubbles: true }));
-    const picked = settings!.appearance.accent;
+    const picked = paletteOf(settings!.appearance).accent;
     check("the colour wheel picks a hue at the kept brightness", !!picked && picked[0] === 0x56 && picked[0] > picked[1] + 40 && picked[0] > picked[2] + 40, picked?.join());
+    const light = "Light-morphism";
+    button(light)?.click();
+    await painted();
+    check("switching themes previews an independent palette", paletteOf(settings!.appearance).accent?.join() === original.palettes.light_morphism?.accent?.join());
+    button("Glassmorphism")?.click();
+    await painted();
+    check("switching back restores the edited colour", paletteOf(settings!.appearance).accent?.join() === picked?.join());
+    for (const [id, theme, name] of PRESETS) {
+      button(name)?.click();
+      await painted();
+      const style = getComputedStyle(shell);
+      check(`theme ${id} renders its base colours`, shell.classList.contains(`p-${theme}`) && !!style.getPropertyValue("--text").trim());
+      if (theme === "light" || theme === "neu") {
+        button("Dark")?.click();
+        await painted();
+        check(`theme ${id} renders in dark mode`, shell.classList.contains("dark"));
+      }
+    }
+    button("Glassmorphism")?.click();
+    await painted();
     button("Reset to preset")?.click();
     await flushAppearance();
     const reset = await api.getSettings();
-    check("Reset to preset clears colour overrides", reset.appearance.accent === null && reset.appearance.preset === "glassmorphism");
+    check("Reset to preset clears colour overrides", paletteOf(reset.appearance).accent === undefined && reset.appearance.preset === "glassmorphism");
     button("Circle")?.click();
     button("Left")?.click();
     await painted();
@@ -1330,7 +1379,7 @@
     const links = [...root.querySelectorAll(".s-link")].map((link) => link.textContent?.trim()).join();
     check("Find a setting filters sections", links === "Administrator", links);
     type(find, "", "input");
-    previewAppearance(original);
+    previewAppearance({ ...original, palettes: { glassmorphism: Object.fromEntries(COLOR_SLOTS.map(([slot]) => [slot, original.palettes.glassmorphism?.[slot] ?? null])) } });
     await flushAppearance();
     check("appearance restores through the core", (await api.getSettings()).appearance.preset === original.preset);
 
@@ -2342,12 +2391,12 @@
       await togglePin(destPath);
       check("unpin", !session.pins.some((pin) => pin.path === destPath));
       const original = await api.getSettings();
-      await saveSettings({ sidebar: false, appearance: { ...original.appearance, accent: [18, 52, 86] } });
+      await saveSettings({ sidebar: false, appearance: { palettes: { [original.appearance.preset]: { accent: [18, 52, 86] } } } });
       await painted();
       check("settings apply through CSS tokens", getComputedStyle(document.querySelector(".fw")!).getPropertyValue("--accent").trim() === "#123456" && !sidebar);
       const persisted = await api.getSettings();
-      check("settings persist through the core", !persisted.sidebar && persisted.appearance.accent?.join() === "18,52,86" && persisted.version === 2);
-      await saveSettings({ sidebar: original.sidebar, appearance: original.appearance });
+      check("settings persist through the core", !persisted.sidebar && paletteOf(persisted.appearance).accent?.join() === "18,52,86" && persisted.version === 3);
+      await saveSettings({ sidebar: original.sidebar, appearance: { palettes: { [original.appearance.preset]: { accent: paletteOf(original.appearance).accent ?? null } } } });
       await source.refresh();
       pick(source, "file2.txt");
       check("folders precede naturally sorted file names", names(source).join() === "z-folder,file2.txt,file10.txt,note.txt");
@@ -2462,7 +2511,7 @@
       listen<TransferStatus>(TRANSFER_PROGRESS, (event) => (transfer = event.payload)),
       listen<OperationDone>(OPERATION_DONE, (event) => finished(event.payload)),
       listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
-      listen<SettingsView>(SETTINGS_CHANGED, (event) => (settings = withPending(event.payload))),
+      listen(SETTINGS_CHANGED, () => void refreshSettings()),
       listen<string>(ICON_CHANGED, (event) => windowsIconChanged(event.payload)),
       listen(DRIVES_CHANGED, () => refreshDrives(300)),
       appWindow.onFocusChanged((event) => { if (event.payload) refreshDrives(); }),
@@ -2825,17 +2874,17 @@
 
 <style>
   .shell { display: flex; flex-direction: column; height: 100%; }
-  .titlebar { display: flex; align-items: center; gap: 4px; flex: none; height: 44px; padding-left: 10px; }
-  .app-title { padding: 0 12px; color: var(--muted); }
+  .titlebar { background: var(--titlebar); display: flex; align-items: center; gap: 4px; flex: none; height: 44px; padding-left: 10px; }
+  .app-title { padding: 0 12px; color: var(--tab-inactive-text); }
   .drag { flex-grow: 1; align-self: stretch; }
   .caption { display: flex; align-self: flex-start; }
   .caption.left { order: -1; margin-right: 8px; }
   .caption.rounded .cap { border-radius: 6px; }
   .caption.circle .cap { border-radius: 50%; width: 28px; height: 28px; margin: 6px; }
   .caption.minimal .cap { width: 32px; }
-  .cap { display: flex; align-items: center; justify-content: center; width: 46px; height: 40px; padding: 0; border: 0; background: var(--caption-fill, transparent); }
+  .cap { display: flex; align-items: center; justify-content: center; width: 46px; height: 40px; padding: 0; border: 0; background: var(--caption-fill); color: var(--caption-text); }
   .cap:hover { background: var(--hover); }
-  .cap.close:hover { background: var(--caption-hover, #c42b1c); color: #ffffff; }
+  .cap.close:hover { background: var(--caption-hover); color: var(--caption-hover-text); }
   .toolbar { display: flex; align-items: center; gap: 4px; flex: none; min-height: 52px; padding: 6px 12px 8px 10px; }
   .address { flex: 1 1 360px; min-width: 0; margin-left: 6px; overflow: hidden; }
   .accent { color: var(--accent); }
@@ -2863,6 +2912,8 @@
   .pin.line-after::after { bottom: -2px; }
   .pin span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pin:hover { background: var(--hover); }
+  .pin > span:last-child { color: var(--folder-label); }
+  .pin.on > span:last-child { color: inherit; }
   .pin.on { background: var(--sel); color: var(--sel-text); box-shadow: var(--sel-shadow); font-weight: 600; }
   .panes { display: flex; flex: 1; min-width: 0; gap: 12px; }
   .pane-slot { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
@@ -2893,7 +2944,7 @@
   .drag-ghost.refused { color: var(--muted); }
   :global(.tab.drop-target), :global(.pin.drop-target) { outline: 2px dashed var(--accent); outline-offset: -2px; }
   .toast { position: fixed; left: 50%; bottom: 52px; z-index: 30; display: flex; align-items: center; gap: 12px; max-width: min(640px, calc(100% - 32px)); padding: 8px 8px 8px 16px; transform: translateX(-50%); border: var(--border-w) solid var(--border); border-radius: var(--radius); background: var(--surface-2); box-shadow: var(--shadow-pop); backdrop-filter: var(--blur); font-size: 13px; }
-  .toast.error { border-color: #c42b1c; }
+  .toast.error { border-color: var(--danger); }
   .toast span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .toast-action { display: flex; align-items: center; gap: 8px; flex: none; height: 28px; padding: 0 10px; border: 0; border-radius: var(--radius-s); background: var(--sel); color: var(--sel-text); font-size: 13px; font-weight: 600; }
   .toast-action:hover { background: var(--hover); }

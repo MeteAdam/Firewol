@@ -172,7 +172,7 @@
   .swatch.theme { background: conic-gradient(var(--folder) 0 50%, var(--surface) 0 100%); }
   .swatch[aria-checked="true"] { border-color: var(--surface); box-shadow: 0 0 0 2px var(--accent); }
   .hex { width: 104px; height: 28px; margin-left: 4px; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
-  .hex:invalid { border-color: #c42b1c; }
+  .hex:invalid { border-color: var(--danger); }
   .glyph { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; border: var(--border-w) solid transparent; border-radius: var(--radius-s); background: transparent; font-family: "Segoe UI Symbol", "Segoe UI Emoji", sans-serif; font-size: 16px; line-height: 1; }
   .glyph:hover { background: var(--hover); }
   .glyph[aria-checked="true"] { background: var(--sel); border-color: var(--accent); }
@@ -184,7 +184,7 @@
   .chip button { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; font-size: 13px; line-height: 1; }
   .chip button:hover { background: var(--hover); }
   .hint { font-size: 12px; }
-  .error { margin: 0; padding: 8px 12px; border: 1px solid #c42b1c; border-radius: var(--radius-s); font-size: 13px; }
+  .error { margin: 0; padding: 8px 12px; border: 1px solid var(--danger); border-radius: var(--radius-s); font-size: 13px; }
   .actions { align-items: center; margin-top: 4px !important; }
   .grow { flex: 1; }
   .clear { background: transparent; }

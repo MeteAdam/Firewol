@@ -13,7 +13,7 @@ use super::elevation::ElevationPolicy;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Preset {
     Neubrutalism,
@@ -63,22 +63,83 @@ impl CaptionShape {
     pub const NAMES: [&str; 4] = ["Rounded", "Square", "Circle", "Minimal"];
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorSlot {
+    Text,
+    Muted,
+    FolderLabel,
+    Danger,
+    Background,
+    Surface,
+    #[serde(rename = "surface_2")]
+    Surface2,
+    Field,
+    Border,
+    Titlebar,
+    TabActive,
+    TabActiveText,
+    TabInactive,
+    TabInactiveText,
+    CaptionFill,
+    CaptionText,
+    CaptionHover,
+    Accent,
+    OnAccent,
+    Folder,
+    Selection,
+    SelectionText,
+    Hover,
+}
+
+pub type Palette = BTreeMap<ColorSlot, Rgb>;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
     pub preset: Preset,
     pub dark: bool,
     pub follow_windows: bool,
-    pub background: Option<Rgb>,
-    pub surface: Option<Rgb>,
-    pub text: Option<Rgb>,
-    pub accent: Option<Rgb>,
-    pub folder: Option<Rgb>,
-    pub folder_label: Option<Rgb>,
     pub caption_left: bool,
     pub caption_shape: CaptionShape,
-    pub caption_fill: Option<Rgb>,
-    pub caption_hover: Option<Rgb>,
+    pub palettes: BTreeMap<Preset, Palette>,
+    #[serde(flatten, skip_serializing)]
+    legacy: LegacyColors,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct LegacyColors {
+    background: Option<Rgb>,
+    surface: Option<Rgb>,
+    text: Option<Rgb>,
+    accent: Option<Rgb>,
+    folder: Option<Rgb>,
+    folder_label: Option<Rgb>,
+    caption_fill: Option<Rgb>,
+    caption_hover: Option<Rgb>,
+}
+
+impl Appearance {
+    fn migrate_colors(&mut self) {
+        let legacy = std::mem::take(&mut self.legacy);
+        let colors: Palette = [
+            (ColorSlot::Background, legacy.background),
+            (ColorSlot::Surface, legacy.surface),
+            (ColorSlot::Text, legacy.text),
+            (ColorSlot::Accent, legacy.accent),
+            (ColorSlot::Folder, legacy.folder),
+            (ColorSlot::FolderLabel, legacy.folder_label),
+            (ColorSlot::CaptionFill, legacy.caption_fill),
+            (ColorSlot::CaptionHover, legacy.caption_hover),
+        ]
+        .into_iter()
+        .filter_map(|(slot, color)| color.map(|color| (slot, color)))
+        .collect();
+        if !colors.is_empty() {
+            self.palettes.entry(self.preset).or_insert(colors);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -329,7 +390,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             theme_migrated: false,
             last_folder: None,
             pins: Vec::new(),
@@ -405,7 +466,7 @@ impl Settings {
         };
         let mut stored: Stored = serde_json::from_reader(file).context("Read Firewol settings")?;
         ensure!(
-            stored.version <= 2,
+            stored.version <= 3,
             "These settings were saved by a newer Firewol version"
         );
         if !stored
@@ -423,9 +484,12 @@ impl Settings {
                 .insert(index, MenuEntry::new(MenuAction::RunAsAdministrator));
         }
         adopt_default_order(&mut stored.menu);
+        if stored.version < 3 {
+            stored.appearance.migrate_colors();
+        }
         let path = |units: Vec<u16>| PathBuf::from(std::ffi::OsString::from_wide(&units));
         Ok(Self {
-            version: 2,
+            version: 3,
             theme_migrated: stored.theme_migrated,
             last_folder: stored.last_folder.map(path),
             pins: stored.pins.into_iter().map(path).collect(),
@@ -526,7 +590,7 @@ impl Settings {
     fn save(&self, dir: &Path) -> Result<()> {
         let units = |path: &PathBuf| path.as_os_str().encode_wide().collect();
         let stored = Stored {
-            version: 2,
+            version: 3,
             theme_migrated: self.theme_migrated,
             last_folder: self.last_folder.as_ref().map(units),
             pins: self.pins.iter().map(units).collect(),
@@ -540,7 +604,7 @@ impl Settings {
             show_hidden: self.show_hidden,
             show_extensions: self.show_extensions,
             columns: self.columns,
-            appearance: self.appearance,
+            appearance: self.appearance.clone(),
             elevation: self.elevation.clone(),
             menu: self.menu.clone(),
             folders: self

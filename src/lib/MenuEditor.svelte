@@ -129,7 +129,7 @@
   .hint { flex: 1; color: var(--muted); font-size: 12px; }
   .badge { flex: none; padding: 1px 6px; border-radius: 4px; background: var(--sel); color: var(--sel-text); font-size: 11px; }
   .ib-space { width: 26px; flex: none; }
-  .error { color: #c42b1c; }
+  .error { color: var(--danger); }
   .add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 760px; }
   .text { height: 34px; padding: 0 10px; border: var(--border-w) solid var(--border); border-radius: var(--radius-s); background: var(--field); font-size: 13px; }
   .text.grow { flex: 1; min-width: 240px; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }

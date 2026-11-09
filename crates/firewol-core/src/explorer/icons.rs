@@ -3,6 +3,7 @@ use std::collections::{HashSet, VecDeque};
 use std::mem::size_of;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -35,82 +36,164 @@ enum Message {
     Get(Job),
     /// Drops every cached size of a key whose icon changed.
     Forget(String),
+    #[cfg(test)]
+    Stall(Duration),
 }
 
+const STUCK: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(4)
+};
+const MAX_ABANDONED: usize = 4;
 const NETWORK_KEY: &str = r"path:\\";
 const ISSUED_LIMIT: usize = 4096;
 static ISSUED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 const MAX_ICO_BYTES: u64 = 8 << 20;
 const MAX_ICO_SIDE: u32 = 256;
 
-/// Only one STA touches Shell extensions. A stuck extension cannot block the UI;
-/// callers time out and the bounded queue rejects overload without spawning workers.
-pub struct Icons(SyncSender<Message>);
+/// One STA at a time touches Shell extensions. A stuck extension cannot block the UI: callers
+/// time out, the bounded queue rejects overload, and the next request replaces a worker that has
+/// been stuck too long. The stuck thread is abandoned, and ends when its call finally returns.
+pub struct Icons {
+    send: SyncSender<Message>,
+    worker: Arc<Worker>,
+}
+
+struct Worker {
+    receive: Mutex<Receiver<Message>>,
+    busy_since: Mutex<Option<Instant>>,
+    generation: AtomicUsize,
+    abandoned: AtomicUsize,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Worker {
+    fn spawn(self: &Arc<Self>) -> std::io::Result<()> {
+        let worker = self.clone();
+        let generation = self.generation.load(Relaxed);
+        std::thread::Builder::new()
+            .name("shell-icons".into())
+            .spawn(move || worker.run(generation))
+            .map(drop)
+    }
+
+    /// False once this thread was replaced while it was busy.
+    fn finish_busy(&self, generation: usize) -> bool {
+        if self.generation.load(Relaxed) != generation {
+            self.abandoned.fetch_sub(1, Relaxed);
+            return false;
+        }
+        *locked(&self.busy_since) = None;
+        true
+    }
+
+    fn run(&self, generation: usize) {
+        if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
+            return;
+        }
+        let mut cache: VecDeque<(String, u32, Arc<Vec<u8>>)> = VecDeque::new();
+        let mut bytes = 0;
+        loop {
+            let Ok(message) = locked(&self.receive).recv() else {
+                break;
+            };
+            let job = match message {
+                Message::Get(job) => job,
+                Message::Forget(key) => {
+                    cache.retain(|(cached, _, data)| {
+                        let keep = *cached != key;
+                        if !keep {
+                            bytes -= data.len();
+                        }
+                        keep
+                    });
+                    continue;
+                }
+                #[cfg(test)]
+                Message::Stall(time) => {
+                    *locked(&self.busy_since) = Some(Instant::now());
+                    std::thread::sleep(time);
+                    if !self.finish_busy(generation) {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            if Instant::now() >= job.deadline {
+                continue;
+            }
+            let hit = cache
+                .iter()
+                .position(|(key, size, _)| key == &job.key && *size == job.size);
+            if let Some(position) = hit {
+                let entry = cache.remove(position).expect("cache position");
+                let data = entry.2.clone();
+                cache.push_back(entry);
+                let _ = job.reply.send(Some(data));
+                continue;
+            }
+            *locked(&self.busy_since) = Some(Instant::now());
+            let extracted = allowed(&job.key)
+                .then(|| extract(&job.key, job.size).ok())
+                .flatten()
+                .map(Arc::new);
+            if !self.finish_busy(generation) {
+                let _ = job.reply.send(extracted);
+                break;
+            }
+            if let Some(data) = &extracted {
+                bytes += data.len();
+                cache.push_back((job.key, job.size, data.clone()));
+                while bytes > CACHE_BYTES || cache.len() > CACHE_ENTRIES {
+                    if let Some((_, _, removed)) = cache.pop_front() {
+                        bytes -= removed.len();
+                    }
+                }
+            }
+            let _ = job.reply.send(extracted);
+        }
+        unsafe { CoUninitialize() };
+    }
+}
 
 impl Icons {
     pub fn start() -> Result<Self> {
         let (send, receive) = mpsc::sync_channel::<Message>(64);
-        std::thread::Builder::new()
-            .name("shell-icons".into())
-            .spawn(move || {
-                if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
-                    return;
-                }
-                let mut cache: VecDeque<(String, u32, Arc<Vec<u8>>)> = VecDeque::new();
-                let mut bytes = 0;
-                while let Ok(message) = receive.recv() {
-                    let job = match message {
-                        Message::Get(job) => job,
-                        Message::Forget(key) => {
-                            cache.retain(|(cached, _, data)| {
-                                let keep = *cached != key;
-                                if !keep {
-                                    bytes -= data.len();
-                                }
-                                keep
-                            });
-                            continue;
-                        }
-                    };
-                    if Instant::now() >= job.deadline {
-                        continue;
-                    }
-                    let hit = cache
-                        .iter()
-                        .position(|(key, size, _)| key == &job.key && *size == job.size);
-                    let value = if let Some(position) = hit {
-                        let entry = cache.remove(position).expect("cache position");
-                        let data = entry.2.clone();
-                        cache.push_back(entry);
-                        Some(data)
-                    } else if !allowed(&job.key) {
-                        None
-                    } else {
-                        extract(&job.key, job.size).ok().map(|data| {
-                            let data = Arc::new(data);
-                            bytes += data.len();
-                            cache.push_back((job.key, job.size, data.clone()));
-                            while bytes > CACHE_BYTES || cache.len() > CACHE_ENTRIES {
-                                if let Some((_, _, removed)) = cache.pop_front() {
-                                    bytes -= removed.len();
-                                }
-                            }
-                            data
-                        })
-                    };
-                    let _ = job.reply.send(value);
-                }
-                unsafe { CoUninitialize() };
-            })?;
-        Ok(Self(send))
+        let worker = Arc::new(Worker {
+            receive: Mutex::new(receive),
+            busy_since: Mutex::default(),
+            generation: AtomicUsize::default(),
+            abandoned: AtomicUsize::default(),
+        });
+        worker.spawn()?;
+        Ok(Self { send, worker })
+    }
+
+    fn replace_a_stuck_worker(&self) {
+        let worker = &self.worker;
+        let mut busy_since = locked(&worker.busy_since);
+        if busy_since.is_some_and(|since| since.elapsed() > STUCK)
+            && worker.abandoned.load(Relaxed) < MAX_ABANDONED
+        {
+            *busy_since = None;
+            worker.abandoned.fetch_add(1, Relaxed);
+            worker.generation.fetch_add(1, Relaxed);
+            drop(busy_since);
+            let _ = worker.spawn();
+        }
     }
 
     pub fn request(&self, key: String, size: u32) -> Option<Receiver<Reply>> {
         if !valid_key(&key) || !(16..=256).contains(&size) {
             return None;
         }
+        self.replace_a_stuck_worker();
         let (send, receive) = mpsc::sync_channel(1);
-        self.0
+        self.send
             .try_send(Message::Get(Job {
                 key,
                 size,
@@ -123,7 +206,7 @@ impl Icons {
 
     /// Makes the next request read the changed icon again.
     pub fn forget(&self, key: String) {
-        let _ = self.0.send(Message::Forget(key));
+        let _ = self.send.try_send(Message::Forget(key));
     }
 }
 
@@ -500,6 +583,19 @@ mod tests {
         frame.extend(height.to_le_bytes());
         frame.extend([0u8; 12]);
         frame
+    }
+
+    #[test]
+    fn a_stuck_worker_is_replaced_by_the_next_request() -> Result<()> {
+        use anyhow::Context;
+        let icons = Icons::start()?;
+        icons.send.send(Message::Stall(Duration::from_secs(1)))?;
+        std::thread::sleep(STUCK * 2);
+        let reply = icons
+            .request("ext:txt".into(), 16)
+            .context("The request was refused")?;
+        assert!(reply.recv_timeout(Duration::from_millis(900))?.is_some());
+        Ok(())
     }
 
     #[test]

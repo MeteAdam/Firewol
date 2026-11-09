@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BITMAP, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, GetDIBits, GetObjectW, HBITMAP,
@@ -55,6 +55,8 @@ const MAX_DEPTH: u32 = 4;
 const MAX_LABEL: usize = 512;
 const MAX_ICON_EDGE: i32 = 128;
 const OPEN_WAIT: Duration = Duration::from_secs(5);
+const START_WAIT: Duration = Duration::from_secs(30);
+const MAX_PENDING: u64 = 64;
 const SEE_MASK_UNICODE: u32 = 0x4000;
 /// `SEE_MASK_FLAG_LOG_USAGE`: a launch the user asked for, which Windows counts as recent use.
 const LOG_USAGE: u32 = 0x0400_0000;
@@ -146,6 +148,7 @@ type IconStore = Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>;
 
 struct Worker {
     tasks: Sender<Task>,
+    pending: Arc<AtomicU64>,
     window: isize,
 }
 
@@ -218,16 +221,22 @@ impl ShellMenus {
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
-    fn call<T: Send + 'static>(
+    fn submit<T: Send + 'static>(
         &self,
-        wait: Option<Duration>,
         task: impl FnOnce(HWND) -> T + Send + 'static,
-    ) -> Result<T> {
+    ) -> Result<Receiver<T>> {
         let worker = self.worker()?;
+        ensure!(
+            worker.pending.load(Ordering::Relaxed) < MAX_PENDING,
+            "Windows is still busy with earlier commands"
+        );
+        worker.pending.fetch_add(1, Ordering::Relaxed);
+        let pending = worker.pending.clone();
         let (reply, result) = mpsc::sync_channel(1);
         worker
             .tasks
             .send(Box::new(move |window| {
+                pending.fetch_sub(1, Ordering::Relaxed);
                 let _ = reply.send(task(window));
             }))
             .ok()
@@ -240,12 +249,31 @@ impl ShellMenus {
                 LPARAM(0),
             )?;
         }
+        Ok(result)
+    }
+
+    fn call<T: Send + 'static>(
+        &self,
+        wait: Option<Duration>,
+        task: impl FnOnce(HWND) -> T + Send + 'static,
+    ) -> Result<T> {
+        let result = self.submit(task)?;
         match wait {
             Some(wait) => result
                 .recv_timeout(wait)
                 .ok()
                 .context("A Shell extension did not answer"),
             None => result.recv().ok().context("The Shell menu worker stopped"),
+        }
+    }
+
+    /// For a command that may open its own dialog or stall on a dead server: after a while the
+    /// caller moves on as if it had started, so it does not hold a thread for as long as that takes.
+    fn start(&self, task: impl FnOnce(HWND) -> Result<()> + Send + 'static) -> Result<()> {
+        match self.submit(task)?.recv_timeout(START_WAIT) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => Ok(()),
+            Err(RecvTimeoutError::Disconnected) => bail!("The Shell menu worker stopped"),
         }
     }
 
@@ -259,7 +287,7 @@ impl ShellMenus {
 
     pub fn invoke(&self, label: &str, id: u32, point: (i32, i32)) -> Result<()> {
         let label = label.to_owned();
-        self.call(None, move |_| invoke(&label, id, point))?
+        self.start(move |_| invoke(&label, id, point))
     }
 
     /// Runs a command from the New menu and returns the item it created in `folder`, if any.
@@ -279,7 +307,7 @@ impl ShellMenus {
     /// Opens a Settings page or Shell folder; anything else is refused.
     pub fn open_uri(&self, owner: isize, uri: String) -> Result<()> {
         ensure!(allowed_uri(&uri), "Firewol does not open this address");
-        self.call(None, move |_| {
+        self.start(move |_| {
             let flags = if uri.starts_with("shell:") {
                 SEE_MASK_INVOKEIDLIST
             } else {
@@ -287,7 +315,7 @@ impl ShellMenus {
             };
             shell_execute(owner, &HSTRING::from(uri), PCWSTR::null(), flags)
                 .context("Windows could not open this page")
-        })?
+        })
     }
 
     /// Shows the same menu natively at the cursor and runs what the user picks.
@@ -298,11 +326,11 @@ impl ShellMenus {
 
     /// Runs the default Windows command of `paths`, as a double-click does in Explorer.
     pub fn open_default(&self, owner: isize, paths: Vec<PathBuf>) -> Result<()> {
-        self.call(None, move |window| {
+        self.start(move |window| {
             by_folder(paths)
                 .into_iter()
                 .try_for_each(|group| open_group(window, owner, group))
-        })?
+        })
     }
 
     pub fn close(&self, label: &str) {
@@ -341,7 +369,11 @@ fn start(icons: IconStore) -> Result<Worker> {
         .recv()
         .context("The Shell menu worker stopped")?
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok(Worker { tasks, window })
+    Ok(Worker {
+        tasks,
+        pending: Arc::default(),
+        window,
+    })
 }
 
 /// A native popup must be the foreground owner to close when the user clicks elsewhere, which a

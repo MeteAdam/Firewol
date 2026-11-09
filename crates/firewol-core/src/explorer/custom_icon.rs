@@ -3,6 +3,8 @@
 
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use windows::Win32::Foundation::HWND;
@@ -88,6 +90,8 @@ fn open_link(path: &Path, mode_write: bool) -> Result<(IShellLinkW, IPersistFile
     Ok((link, file))
 }
 
+const SHORTCUT_WAIT: Duration = Duration::from_secs(2);
+
 /// The folder a shortcut points to, so Firewol can show it instead of starting Explorer.
 pub fn shortcut_folder(path: &Path) -> Option<PathBuf> {
     let shortcut = path
@@ -102,7 +106,20 @@ pub fn shortcut_folder(path: &Path) -> Option<PathBuf> {
         unsafe { link.GetPath(&mut buffer, std::ptr::null_mut(), 0)? };
         Ok(PathBuf::from(from_wide(&buffer)))
     });
-    target.ok().filter(|target| target.is_dir())
+    target.ok().filter(|target| folder_within_reach(target))
+}
+
+/// A shortcut to a dead server must not hold the double-click for as long as SMB takes to give up.
+fn folder_within_reach(target: &Path) -> bool {
+    if !super::is_remote(target) {
+        return target.is_dir();
+    }
+    let target = target.to_owned();
+    let (answer, reply) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = answer.send(target.is_dir());
+    });
+    reply.recv_timeout(SHORTCUT_WAIT).unwrap_or(false)
 }
 
 fn current(kind: Kind, path: &Path) -> Result<(String, i32)> {
@@ -225,6 +242,12 @@ pub fn location(item: &ItemId) -> Result<(String, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_shortcut_to_a_dead_server_does_not_hold_the_click() {
+        let started = std::time::Instant::now();
+        assert!(!folder_within_reach(Path::new(r"\\192.0.2.1\share")));
+        assert!(started.elapsed() < SHORTCUT_WAIT * 2);
+    }
     use std::fs;
     use windows::Win32::UI::Shell::IShellLinkW;
 

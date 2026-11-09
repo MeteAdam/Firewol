@@ -27,6 +27,11 @@ STATE.md
 *PLAN*.md
 *STATE*.md
 *HANDOFF*.md
+*AUDIT*.md
+*FINDINGS*.md
+*VULN*.md
+*THREAT*MODEL*
+/audit/
 /docs/
 !README.md
 
@@ -53,6 +58,9 @@ STATE.md
 *secret*
 *credential*
 *token*
+!/src/**/*token*
+!/crates/**/*token*
+!/src-tauri/src/**/*token*
 *.password
 id_rsa*
 id_ed25519*

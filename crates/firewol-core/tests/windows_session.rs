@@ -137,6 +137,9 @@ fn session_pins_persist_and_reject_empty_clipboard_actions() -> Result<()> {
     assert_eq!(session.settings().pins, vec![folder.clone()]);
     assert!(!session.toggle_pin(&folder)?);
     assert!(session.settings().pins.is_empty());
+    assert!(session.toggle_pin(&root.join("missing")).is_err());
+    assert!(session.toggle_pin(&root.join("data/explorer.json")).is_err());
+    assert!(session.settings().pins.is_empty());
     Ok(())
 }
 

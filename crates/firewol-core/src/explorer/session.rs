@@ -14,6 +14,7 @@ use super::{
 };
 
 const HISTORY_LIMIT: usize = 64;
+const MAX_PINS: usize = 256;
 const MEDIA_VIEW: SavedView = SavedView {
     grid: true,
     tile: 128,
@@ -257,6 +258,14 @@ impl Session {
 
     /// Pins the folder, or unpins it when it is already pinned. Returns whether it is pinned.
     pub fn toggle_pin(&self, folder: &Path) -> Result<bool> {
+        let settings = self.settings();
+        if !settings.pins.iter().any(|pin| pin == folder) {
+            ensure!(settings.pins.len() < MAX_PINS, "Use up to {MAX_PINS} pins");
+            ensure!(
+                std::fs::metadata(folder).is_ok_and(|metadata| metadata.is_dir()),
+                "Only an existing folder can be pinned"
+            );
+        }
         let mut pinned = false;
         self.update_settings(|settings| {
             if let Some(index) = settings.pins.iter().position(|pin| pin == folder) {

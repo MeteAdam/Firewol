@@ -10,8 +10,8 @@ mod volumes;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::Context as _;
@@ -25,7 +25,7 @@ use firewol_core::explorer::icons::{self, Icons};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
 use firewol_core::explorer::{
     ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, SavedView, Session, actions, custom_icon,
-    data_dir, display_path, elevation, home,
+    data_dir, display_path, elevation, home, is_remote,
 };
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::{
@@ -478,6 +478,7 @@ async fn toggle_pin(
     let files = files.0.clone();
     blocking(move || {
         files.toggle_pin(Path::new(&path))?;
+        refresh_remote_pins(app.clone(), files.clone());
         Ok(broadcast(&app, &files))
     })
     .await
@@ -920,21 +921,63 @@ async fn shell_menu_close(window: Window, state: State<'_, App>) -> Result<(), S
     .await
 }
 
+type PinDetails = (Option<ItemRef>, Option<String>);
+
+/// What is known about network pins. Reaching one can take many seconds per pin, so startup uses
+/// this and `refresh_remote_pins` fills it in the background.
+static REMOTE_PINS: LazyLock<Mutex<HashMap<PathBuf, PinDetails>>> = LazyLock::new(Mutex::default);
+
+fn pin_details(pin: &Path) -> PinDetails {
+    (
+        ItemId::at(pin.to_owned()).ok().as_ref().map(item_ref),
+        icons::folder_icon(pin),
+    )
+}
+
+fn pin_view(pin: &Path) -> Pin {
+    let (item, icon) = if is_remote(pin) {
+        lock(&REMOTE_PINS).get(pin).cloned().unwrap_or_default()
+    } else {
+        pin_details(pin)
+    };
+    let segment = segment(pin);
+    Pin {
+        name: segment.name,
+        path: segment.path,
+        item,
+        icon,
+    }
+}
+
+/// Resolves network pins on their own thread and updates every window when done.
+fn refresh_remote_pins(app: AppHandle, session: Arc<Session>) {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    let remote: Vec<_> = session
+        .settings()
+        .pins
+        .into_iter()
+        .filter(|pin| is_remote(pin))
+        .collect();
+    if remote.is_empty() || RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::spawn(move || {
+        for pin in remote {
+            let details = pin_details(&pin);
+            lock(&REMOTE_PINS).insert(pin, details);
+        }
+        RUNNING.store(false, Ordering::Release);
+        broadcast(&app, &session);
+    });
+}
+
 fn session_state(session: &Session) -> SessionState {
     SessionState {
         pins: session
             .settings()
             .pins
             .iter()
-            .map(|pin| {
-                let segment = segment(pin);
-                Pin {
-                    name: segment.name,
-                    path: segment.path,
-                    item: ItemId::at(pin.clone()).ok().as_ref().map(item_ref),
-                    icon: icons::folder_icon(pin),
-                }
-            })
+            .map(|pin| pin_view(pin))
             .collect(),
         clipboard: session.clipboard().map(|clipboard| ClipboardState {
             count: clipboard.items.len() as u32,
@@ -1257,6 +1300,7 @@ fn main() {
             app.state::<App>()
                 .folders
                 .use_views(move |folder| views.settings().views.get(&folder).copied());
+            refresh_remote_pins(app.handle().clone(), session.clone());
             app.manage(Files(session));
             build_window(app.handle(), "main")?;
             Ok(())

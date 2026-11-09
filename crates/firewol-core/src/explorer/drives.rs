@@ -1,7 +1,7 @@
 //! The drives and Windows user folders the sidebar shows, and device-change notifications.
 
 use std::mem::size_of;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -77,6 +77,18 @@ fn shell_name(root: &HSTRING) -> Option<String> {
     };
     let name = from_wide(&info.szDisplayName);
     (found != 0 && !name.is_empty()).then_some(name)
+}
+
+/// Whether `path` is on a network share or a mapped network drive. Never touches the network, so
+/// it is safe on a path that may be unreachable.
+pub fn is_remote(path: &Path) -> bool {
+    if super::elevation::is_network_path(path) {
+        return true;
+    }
+    super::volume::drive_of(path).is_some_and(|drive| {
+        let root = HSTRING::from(format!("{drive}:\\"));
+        unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) == DRIVE_REMOTE }
+    })
 }
 
 /// Every drive that can be opened now, in letter order. A disconnected network drive stays

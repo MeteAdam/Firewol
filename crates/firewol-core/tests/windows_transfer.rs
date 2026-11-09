@@ -251,7 +251,10 @@ fn a_transfer_sweeps_stages_left_by_an_interrupted_one() -> Result<()> {
     let stale = stage(".firewol-Ab12Cd", &["payload", "firewol-stage"])?;
     let empty = stage(".firewol-000000", &["firewol-stage"])?;
     let running = stage(".firewol-Zz9999", &["payload", "firewol-stage"])?;
-    let foreign = stage(".firewol-q1w2e3", &["payload", "notes.txt", "firewol-stage"])?;
+    let foreign = stage(
+        ".firewol-q1w2e3",
+        &["payload", "notes.txt", "firewol-stage"],
+    )?;
     let other = stage(".firewol-user", &["payload", "firewol-stage"])?;
     // The same shape as a stage, but Firewol never marked these.
     let lookalike = stage(".firewol-backup", &["payload"])?;

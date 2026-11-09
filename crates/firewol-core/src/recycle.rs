@@ -44,29 +44,44 @@ impl Drop for PopupMenu {
 }
 
 pub(crate) fn shell_item(path: &Path) -> Result<IShellItem> {
+    // Beyond MAX_PATH the Shell reports a truncated 8.3 path, so verify each long level by its
+    // parsing name under a parent that was itself verified. A loop, because a path can be
+    // thousands of levels deep and the worker's stack is not.
+    let mut levels = Vec::new();
+    let mut base = path;
+    while display_path(base).encode_wide().count() >= 260 {
+        levels.push(base);
+        base = base.parent().context("Missing Shell parent")?;
+    }
+    let mut item = short_shell_item(base)?;
+    for level in levels.into_iter().rev() {
+        item = child_shell_item(&item, level)?;
+    }
+    Ok(item)
+}
+
+fn child_shell_item(parent: &IShellItem, path: &Path) -> Result<IShellItem> {
+    let name = path.file_name().context("Missing Shell item name")?;
+    let name_wide: Vec<_> = name.encode_wide().chain([0]).collect();
+    let item: IShellItem = unsafe {
+        SHCreateItemFromRelativeName(parent, PCWSTR(name_wide.as_ptr()), None::<&IBindCtx>)
+    }
+    .with_context(|| format!("Open Shell item {}", path.display()))?;
+    let parsed = unsafe { item.GetDisplayName(SIGDN_PARENTRELATIVEPARSING) }
+        .context("Read the Shell item's name")?;
+    let parsed_name = unsafe { OsString::from_wide(parsed.as_wide()) };
+    unsafe { CoTaskMemFree(Some(parsed.0.cast())) };
+    ensure!(
+        parsed_name == name,
+        "Windows resolved the path to a different Shell item: {}",
+        parsed_name.to_string_lossy()
+    );
+    Ok(item)
+}
+
+fn short_shell_item(path: &Path) -> Result<IShellItem> {
     let expected = display_path(path);
     let wide: Vec<_> = expected.encode_wide().chain([0]).collect();
-    if wide.len() > 260 {
-        // Beyond MAX_PATH the Shell reports a truncated 8.3 path, so verify each long level by its
-        // parsing name under a parent that was itself verified.
-        let parent = shell_item(path.parent().context("Missing Shell parent")?)?;
-        let name = path.file_name().context("Missing Shell item name")?;
-        let name_wide: Vec<_> = name.encode_wide().chain([0]).collect();
-        let item: IShellItem = unsafe {
-            SHCreateItemFromRelativeName(&parent, PCWSTR(name_wide.as_ptr()), None::<&IBindCtx>)
-        }
-        .with_context(|| format!("Open Shell item {}", path.display()))?;
-        let parsed = unsafe { item.GetDisplayName(SIGDN_PARENTRELATIVEPARSING) }
-            .context("Read the Shell item's name")?;
-        let parsed_name = unsafe { OsString::from_wide(parsed.as_wide()) };
-        unsafe { CoTaskMemFree(Some(parsed.0.cast())) };
-        ensure!(
-            parsed_name == name,
-            "Windows resolved the path to a different Shell item: {}",
-            parsed_name.to_string_lossy()
-        );
-        return Ok(item);
-    }
     let item: IShellItem =
         unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>) }
             .with_context(|| format!("Open Shell item {}", path.display()))?;

@@ -379,7 +379,9 @@ pub(super) fn sweep_stale_stages(into: &Path) {
             continue;
         };
         let children: Vec<_> = children.flatten().collect();
-        if !children.iter().any(|child| child.file_name() == STAGE_MARKER)
+        if !children
+            .iter()
+            .any(|child| child.file_name() == STAGE_MARKER)
             || children.iter().any(|child| {
                 (child.file_name() != "payload" && child.file_name() != STAGE_MARKER)
                     || !child.file_type().is_ok_and(|kind| kind.is_file())

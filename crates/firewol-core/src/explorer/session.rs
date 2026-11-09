@@ -2,9 +2,11 @@
 //! navigation history, the in-app clipboard, one file operation at a time and settings.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 
@@ -15,6 +17,8 @@ use super::{
 
 const HISTORY_LIMIT: usize = 64;
 const MAX_PINS: usize = 256;
+const MAX_FOLDER_ENTRIES: usize = 4096;
+const FOLDER_SAVE_DELAY: Duration = Duration::from_secs(2);
 const MEDIA_VIEW: SavedView = SavedView {
     grid: true,
     tile: 128,
@@ -103,6 +107,8 @@ struct Running {
 pub struct Session {
     data: PathBuf,
     recovered: bool,
+    pending_folder: Mutex<Option<PathBuf>>,
+    saving_folder: AtomicBool,
     settings: Mutex<Settings>,
     settings_write: Mutex<()>,
     clipboard: Arc<Mutex<Option<Clipboard>>>,
@@ -162,6 +168,8 @@ impl Session {
         Ok(Self {
             data,
             recovered,
+            pending_folder: Mutex::default(),
+            saving_folder: AtomicBool::default(),
             settings: Mutex::new(settings),
             settings_write: Mutex::new(()),
             clipboard,
@@ -173,6 +181,36 @@ impl Session {
     /// True when unreadable settings were set aside at startup and defaults are in use.
     pub fn settings_recovered(&self) -> bool {
         self.recovered
+    }
+
+    /// Notes the folder to reopen next time. Saved a moment later, so browsing quickly writes
+    /// once, and best effort, because a settings file in use must not fail a navigation.
+    pub fn remember_folder(self: &Arc<Self>, folder: PathBuf) {
+        *lock(&self.pending_folder) = Some(folder);
+        if !self.saving_folder.swap(true, Ordering::AcqRel) {
+            let session = Arc::clone(self);
+            thread::spawn(move || {
+                thread::sleep(FOLDER_SAVE_DELAY);
+                session.saving_folder.store(false, Ordering::Release);
+                session.flush_folder();
+            });
+        }
+    }
+
+    /// Writes a remembered folder now; called when the last window closes.
+    pub fn flush_folder(&self) {
+        let Some(folder) = lock(&self.pending_folder).take() else {
+            return;
+        };
+        if self.settings().last_folder.as_ref() != Some(&folder) {
+            let _ = self.update_settings(|settings| settings.last_folder = Some(folder));
+        }
+    }
+
+    /// Settings as they are on disk now. For decisions that another running Firewol process may
+    /// have just tightened, such as who can run elevated.
+    pub fn fresh_settings(&self) -> Result<Settings> {
+        Settings::load(&self.data)
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -199,6 +237,13 @@ impl Session {
         let file = folder.verify()?;
         ensure!(file.metadata()?.is_dir(), "Select a folder to customize it");
         let key = FolderKey::from(folder);
+        let current = self.settings();
+        ensure!(
+            current.folders.len() < MAX_FOLDER_ENTRIES
+                || current.folders.contains_key(&key)
+                || style == FolderStyle::default(),
+            "Use up to {MAX_FOLDER_ENTRIES} customized folders"
+        );
         self.update_settings(|settings| {
             if style == FolderStyle::default() {
                 settings.folders.remove(&key);
@@ -226,6 +271,10 @@ impl Session {
         );
         let key = FolderKey::from(folder);
         self.update_settings(|settings| {
+            // A remembered view is a convenience, so the oldest key simply makes room.
+            if settings.views.len() >= MAX_FOLDER_ENTRIES && !settings.views.contains_key(&key) {
+                settings.views.pop_first();
+            }
             settings.views.insert(key, view);
         })
         .map(drop)

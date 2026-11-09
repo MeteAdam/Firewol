@@ -121,6 +121,29 @@ fn unreadable_settings_are_set_aside_but_a_newer_version_is_kept() -> Result<()>
 }
 
 #[test]
+fn the_last_folder_is_saved_best_effort() -> Result<()> {
+    let fixture = tempfile::tempdir()?;
+    let session = std::sync::Arc::new(Session::open(fixture.path().to_owned(), |_| {})?);
+    session.remember_folder(fixture.path().join("first"));
+    session.remember_folder(fixture.path().join("second"));
+    session.flush_folder();
+    assert_eq!(
+        session.fresh_settings()?.last_folder,
+        Some(fixture.path().join("second"))
+    );
+    // A settings file that cannot be replaced must not surface as a failed navigation.
+    let file = fixture.path().join("explorer.json");
+    let mut permissions = fs::metadata(&file)?.permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&file, permissions.clone())?;
+    session.remember_folder(fixture.path().join("third"));
+    session.flush_folder();
+    permissions.set_readonly(false);
+    fs::set_permissions(&file, permissions)?;
+    Ok(())
+}
+
+#[test]
 fn session_pins_persist_and_reject_empty_clipboard_actions() -> Result<()> {
     let fixture = tempfile::tempdir()?;
     let root = fixture.path().canonicalize()?;

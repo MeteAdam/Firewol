@@ -159,10 +159,7 @@ async fn navigate(
     let files = files.0.clone();
     blocking(move || {
         let navigation = folders.navigate(&owner, &pane, path.as_deref(), step, sort, notify)?;
-        let path = PathBuf::from(&navigation.folder.path);
-        if files.settings().last_folder.as_ref() != Some(&path) {
-            files.update_settings(|settings| settings.last_folder = Some(path))?;
-        }
+        files.remember_folder(PathBuf::from(&navigation.folder.path));
         Ok(navigation)
     })
     .await
@@ -595,7 +592,7 @@ async fn run_menu_action(
     let owner = owner(&window)?;
     let target = item_id(&target).map_err(message)?;
     blocking(move || {
-        let settings = files.settings();
+        let settings = files.fresh_settings()?;
         let entry = settings
             .menu
             .get(index)
@@ -633,7 +630,8 @@ async fn run_as_administrator(
     let owner = owner(&window)?;
     let target = item_id(&target).map_err(message)?;
     blocking(move || {
-        actions::run_as_administrator(&target, &files.settings().elevation, HWND(owner as _))
+        let policy = files.fresh_settings()?.elevation;
+        actions::run_as_administrator(&target, &policy, HWND(owner as _))
     })
     .await
 }
@@ -784,8 +782,11 @@ async fn take_ownership(
     let files = files.0.clone();
     let owner = owner(&window)?;
     let item = item_id(&item).map_err(message)?;
-    blocking(move || actions::take_ownership(&item, &files.settings().elevation, HWND(owner as _)))
-        .await
+    blocking(move || {
+        let policy = files.fresh_settings()?.elevation;
+        actions::take_ownership(&item, &policy, HWND(owner as _))
+    })
+    .await
 }
 
 fn item_ids(items: &[ItemRef]) -> Result<Vec<ItemId>, String> {
@@ -1310,7 +1311,9 @@ fn main() {
                 closing.close_owned(window.label());
                 let state = window.state::<App>();
                 lock(&state.windows).remove(window.label());
-                state.window_count.fetch_sub(1, Ordering::Relaxed);
+                if state.window_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+                    window.state::<Files>().0.flush_folder();
+                }
             }
             WindowEvent::Focused(focused) => memory_target(window, *focused),
             _ => {}

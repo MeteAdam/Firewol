@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::ErrorKind;
+use std::io::{BufWriter, ErrorKind, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
@@ -552,7 +552,10 @@ impl Settings {
             views_seeded: self.views_seeded,
         };
         let file = tempfile::NamedTempFile::new_in(dir)?;
-        serde_json::to_writer(file.as_file(), &stored)?;
+        let mut writer = BufWriter::new(file.as_file());
+        serde_json::to_writer(&mut writer, &stored)?;
+        writer.flush()?;
+        drop(writer);
         // Without this the rename can reach the disk before the data, and a crash leaves a hole.
         file.as_file().sync_all()?;
         file.persist(dir.join("explorer.json"))

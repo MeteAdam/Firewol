@@ -1240,11 +1240,18 @@ fn main() {
     let closing = folders.clone();
     let shell_icons = Arc::new(Icons::start().expect("Start Shell icon worker"));
     let served_icons = shell_icons.clone();
+    let thumbnails = Icons::for_thumbnails().expect("Start thumbnail worker");
     let shell_menus = Arc::new(ShellMenus::default());
     let served_menus = shell_menus.clone();
     tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol("icon", move |_context, request, responder| {
-            icon_protocol::respond(&served_icons, &served_menus, request, responder);
+            icon_protocol::respond(
+                &served_icons,
+                &thumbnails,
+                &served_menus,
+                request,
+                responder,
+            );
         })
         .manage(App {
             folders,

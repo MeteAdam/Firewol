@@ -267,6 +267,8 @@ pub struct Entry {
     pub directory: bool,
     /// Shell cache key; only folders with their own Windows icon have one.
     pub icon: Option<String>,
+    /// Thumbnail key of a picture, video or song; `null` for anything else.
+    pub thumb: Option<String>,
     /// File length in bytes; `null` for folders.
     #[ts(type = "number | null")]
     pub size: Option<u64>,

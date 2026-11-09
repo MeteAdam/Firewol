@@ -8,6 +8,10 @@ export type Entry = { name: string, path: string, directory: boolean,
  */
 icon: string | null, 
 /**
+ * Thumbnail key of a picture, video or song; `null` for anything else.
+ */
+thumb: string | null, 
+/**
  * File length in bytes; `null` for folders.
  */
 size: number | null, 

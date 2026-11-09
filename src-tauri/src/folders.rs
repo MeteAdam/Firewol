@@ -698,6 +698,10 @@ fn entry(item: &Item, styles: &Styles) -> Entry {
         } else {
             Some(icons::key(&item.path))
         },
+        thumb: item
+            .modified
+            .filter(|_| !item.directory)
+            .and_then(|modified| icons::thumbnail_key(&item.path, modified)),
         size: item.size,
         modified: item.modified,
         hidden: item

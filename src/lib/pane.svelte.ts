@@ -330,6 +330,8 @@ export class Pane {
       this.#scheduleRefresh(REFRESH_RETRY_MS);
       return;
     }
+    // The view may have been switched while the listing was read; the newer choice stands.
+    if (quiet && this.folder) view = { ...view, view: this.folder.view };
     const reload = step === "reload" && view.path === (this.folder?.path ?? this.path);
     // The core reloads an open folder in place; its live index survives under the same id.
     const sameFolder = reload && view.id === this.folder?.id;

@@ -85,6 +85,8 @@
   const visible = $derived(Array.from({ length: Math.max(0, end - first) }, (_, index) => first + index));
   const visibleLines = $derived(Array.from({ length: Math.max(0, endLine - firstLine) }, (_, index) => firstLine + index));
   const iconSize = $derived(Math.round(tile / 2));
+  // A tile's 8 px padding on each side, and below the picture its gap and two lines of name.
+  const thumbBox = $derived({ width: tile - 16, height: tile - 56 });
   const rowIcon = $derived(ROW <= 32 ? 16 : ROW === 40 ? 24 : 32);
   const rowFont = $derived(ROW === 24 ? 12 : ROW === 32 ? 13 : ROW === 40 ? 14 : 15);
   const tagged = $derived(pane.tagged);
@@ -511,7 +513,7 @@
                 oncontextmenu={(event) => rowMenu(event, row)}
               >
                 {#if entry}
-                  <span class="art">{#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} icon={entry.icon} size={iconSize} />{:else}<FileIcon icon={entry.icon} size={iconSize} />{/if}</span>
+                  <span class="art">{#if entry.directory}<FolderIcon color={tint(entry.style)} glyph={entry.style?.icon} icon={entry.icon} size={iconSize} />{:else}<FileIcon icon={entry.icon} size={iconSize} thumb={entry.thumb} box={thumbBox} />{/if}</span>
                   {#if row === pane.renaming}{@render renameInput(entry)}{:else}<span class="nm" class:folder-label={entry.directory}>{shownName(entry)}</span>{/if}
                 {:else}
                   <span class="placeholder"></span>

@@ -22,6 +22,9 @@ use windows::Win32::UI::WindowsAndMessaging::{DI_NORMAL, DestroyIcon, DrawIconEx
 use windows_core::{HSTRING, PCWSTR};
 
 pub const TIMEOUT: Duration = Duration::from_secs(2);
+/// A video Windows has not seen yet takes seconds to read.
+const THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_THUMBNAIL_SIDE: u32 = 1024;
 const CACHE_BYTES: usize = 8 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 256;
 type Reply = Option<Arc<Vec<u8>>>;
@@ -60,6 +63,7 @@ const MAX_ICO_SIDE: u32 = 256;
 pub struct Icons {
     send: SyncSender<Message>,
     worker: Arc<Worker>,
+    timeout: Duration,
 }
 
 struct Worker {
@@ -166,6 +170,20 @@ impl Worker {
 
 impl Icons {
     pub fn start() -> Result<Self> {
+        Self::with_timeout(TIMEOUT)
+    }
+
+    /// A worker of its own for thumbnails, so a slow video never delays the icons.
+    pub fn for_thumbnails() -> Result<Self> {
+        Self::with_timeout(THUMBNAIL_TIMEOUT)
+    }
+
+    /// How long a caller should wait for a reply from this worker.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    fn with_timeout(timeout: Duration) -> Result<Self> {
         let (send, receive) = mpsc::sync_channel::<Message>(64);
         let worker = Arc::new(Worker {
             receive: Mutex::new(receive),
@@ -174,7 +192,11 @@ impl Icons {
             abandoned: AtomicUsize::default(),
         });
         worker.spawn()?;
-        Ok(Self { send, worker })
+        Ok(Self {
+            send,
+            worker,
+            timeout,
+        })
     }
 
     fn replace_a_stuck_worker(&self) {
@@ -223,7 +245,7 @@ impl Icons {
                 key,
                 resource,
                 size,
-                deadline: Instant::now() + TIMEOUT,
+                deadline: Instant::now() + self.timeout,
                 reply: send,
             }))
             .ok()?;
@@ -243,13 +265,91 @@ pub fn path_key(path: &Path) -> String {
         PathBuf::from(super::display_path(path)).display()
     );
     if key.starts_with(NETWORK_KEY) {
-        let mut issued = lock_issued();
-        if issued.len() >= ISSUED_LIMIT {
-            issued.clear();
-        }
-        issued.insert(key.clone());
+        remember_issued(&key);
     }
     key
+}
+
+fn remember_issued(key: &str) {
+    let mut issued = lock_issued();
+    if issued.len() >= ISSUED_LIMIT {
+        issued.clear();
+    }
+    issued.insert(key.to_owned());
+}
+
+/// Pictures, videos and music, whose thumbnail or album art Windows can draw.
+fn has_thumbnail(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    matches!(
+        extension.as_str(),
+        "jpg"
+            | "jpeg"
+            | "jpe"
+            | "jfif"
+            | "png"
+            | "gif"
+            | "bmp"
+            | "webp"
+            | "heic"
+            | "heif"
+            | "avif"
+            | "tif"
+            | "tiff"
+            | "dng"
+            | "cr2"
+            | "cr3"
+            | "nef"
+            | "arw"
+            | "mp4"
+            | "m4v"
+            | "mov"
+            | "avi"
+            | "mkv"
+            | "wmv"
+            | "webm"
+            | "mpg"
+            | "mpeg"
+            | "ts"
+            | "mts"
+            | "m2ts"
+            | "3gp"
+            | "mp3"
+            | "flac"
+            | "m4a"
+            | "aac"
+            | "ogg"
+            | "opus"
+            | "wma"
+            | "wav"
+    )
+}
+
+fn is_network(path: &Path) -> bool {
+    path.to_string_lossy().starts_with(r"\\")
+}
+
+/// The thumbnail key of a media file. It carries the modified time, so a changed file is read
+/// again instead of showing its old picture from a cache.
+pub fn thumbnail_key(path: &Path, modified: i64) -> Option<String> {
+    if !has_thumbnail(path) {
+        return None;
+    }
+    let display = PathBuf::from(super::display_path(path));
+    let key = format!("thumb:{modified}:{}", display.display());
+    if is_network(&display) {
+        remember_issued(&key);
+    }
+    Some(key)
+}
+
+fn thumbnail_path(key: &str) -> Option<&Path> {
+    let (_, path) = key.strip_prefix("thumb:")?.split_once(':')?;
+    Some(Path::new(path))
 }
 
 fn lock_issued() -> MutexGuard<'static, HashSet<String>> {
@@ -304,6 +404,8 @@ fn valid_key(key: &str) -> bool {
     }
     if let Some(extension) = key.strip_prefix("ext:") {
         extension.len() <= 64 && !extension.contains(['/', '\\', ':'])
+    } else if let Some(path) = thumbnail_path(key) {
+        path.is_absolute() && (!is_network(path) || lock_issued().contains(key))
     } else if let Some(path) = key.strip_prefix("path:") {
         // A request can name any path, so a share or device must be one a listing produced.
         Path::new(path).is_absolute()
@@ -315,6 +417,9 @@ fn valid_key(key: &str) -> bool {
 
 /// The worker's check of a `path:` key: only icons a listing could have asked for.
 fn allowed(key: &str) -> bool {
+    if let Some(path) = thumbnail_path(key) {
+        return has_thumbnail(path) && std::fs::metadata(path).is_ok_and(|item| item.is_file());
+    }
     let Some(path) = key.strip_prefix("path:").map(Path::new) else {
         return true;
     };
@@ -401,7 +506,77 @@ pub(super) fn bitmap_info(size: u32) -> BITMAPINFO {
     }
 }
 
+/// What Windows' thumbnail system has for the file, fitted inside `size`; an error when it has
+/// nothing (a song without art, a video without a codec), and the row keeps its type icon.
+fn thumbnail(path: &Path, size: u32) -> Result<Vec<u8>> {
+    let dc = Dc(unsafe { CreateCompatibleDC(None) });
+    ensure!(!dc.0.is_invalid(), "Create icon DC");
+    let name = HSTRING::from(path.as_os_str());
+    let factory: IShellItemImageFactory = unsafe { SHCreateItemFromParsingName(&name, None)? };
+    // Reading a whole video over the network to draw one tile is not worth it.
+    let cached = if is_network(path) {
+        SIIGBF_INCACHEONLY.0
+    } else {
+        0
+    };
+    let bitmap = Bitmap(unsafe {
+        factory.GetImage(
+            SIZE {
+                cx: size as i32,
+                cy: size as i32,
+            },
+            SIIGBF(SIIGBF_THUMBNAILONLY.0 | cached),
+        )?
+    });
+    let mut header = BITMAP::default();
+    let copied = unsafe {
+        GetObjectW(
+            bitmap.0.into(),
+            size_of::<BITMAP>() as i32,
+            Some((&raw mut header).cast()),
+        )
+    };
+    ensure!(copied != 0, "Read thumbnail size");
+    let (width, height) = (
+        header.bmWidth.unsigned_abs(),
+        header.bmHeight.unsigned_abs(),
+    );
+    ensure!(
+        (1..=MAX_THUMBNAIL_SIDE).contains(&width) && (1..=MAX_THUMBNAIL_SIDE).contains(&height),
+        "Unexpected thumbnail size"
+    );
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let mut info = bitmap_info(width);
+    info.bmiHeader.biHeight = -(height as i32);
+    let rows = unsafe {
+        GetDIBits(
+            dc.0,
+            bitmap.0,
+            0,
+            height,
+            Some(pixels.as_mut_ptr().cast()),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    ensure!(rows == height as i32, "Read thumbnail bitmap");
+    make_opaque_if_alphaless(&mut pixels);
+    encode_png(&mut pixels, width, height)
+}
+
+/// Many Shell bitmaps leave the alpha byte at zero; shown as is they would be invisible.
+fn make_opaque_if_alphaless(pixels: &mut [u8]) {
+    if pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
+    }
+}
+
 fn extract(key: &str, size: u32) -> Result<Vec<u8>> {
+    if let Some(path) = thumbnail_path(key) {
+        return thumbnail(path, size);
+    }
     let dc = Dc(unsafe { CreateCompatibleDC(None) });
     ensure!(!dc.0.is_invalid(), "Create icon DC");
     let mut pixels = if let Some(path) = key.strip_prefix("path:") {
@@ -430,11 +605,7 @@ fn extract(key: &str, size: u32) -> Result<Vec<u8>> {
             )
         };
         ensure!(rows == size as i32, "Read Shell bitmap");
-        if pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
-            for pixel in pixels.as_chunks_mut::<4>().0 {
-                pixel[3] = 255;
-            }
-        }
+        make_opaque_if_alphaless(&mut pixels);
         pixels
     } else {
         let extension = key.strip_prefix("ext:").unwrap_or_default();
@@ -632,6 +803,36 @@ mod tests {
         frame.extend(height.to_le_bytes());
         frame.extend([0u8; 12]);
         frame
+    }
+
+    #[test]
+    fn a_picture_gets_a_thumbnail_that_keeps_its_shape() -> Result<()> {
+        use anyhow::Context;
+        let fixture = tempfile::tempdir()?;
+        let path = fixture.path().canonicalize()?.join("photo.png");
+        let mut pixels = vec![200u8; 320 * 200 * 4];
+        std::fs::write(&path, encode_png(&mut pixels, 320, 200)?)?;
+        let key = thumbnail_key(&path, 1).context("a PNG has a thumbnail key")?;
+        assert!(valid_key(&key) && allowed(&key));
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.ok()?;
+        let png = extract(&key, 64);
+        unsafe { CoUninitialize() };
+        let decoder = png::Decoder::new(std::io::Cursor::new(png?));
+        let reader = decoder.read_info()?;
+        let (width, height) = (reader.info().width, reader.info().height);
+        assert_eq!(width, 64);
+        assert!((38..=42).contains(&height), "height {height}");
+        Ok(())
+    }
+
+    #[test]
+    fn only_media_files_can_ask_for_a_thumbnail() {
+        assert!(thumbnail_key(Path::new(r"C:\a\song.MP3"), 1).is_some());
+        assert!(thumbnail_key(Path::new(r"C:\a\note.txt"), 1).is_none());
+        assert!(valid_key(r"thumb:5:C:\a\note.txt"));
+        assert!(!allowed(r"thumb:5:C:\a\note.txt"));
+        assert!(!valid_key(r"thumb:5:\\server\share\a.jpg"));
+        assert!(!valid_key("thumb:5:relative.jpg"));
     }
 
     #[test]

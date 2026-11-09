@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { listen } from "@tauri-apps/api/event";
+  import { emit, listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick, untrack } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
@@ -1981,6 +1981,9 @@
 
   /** The design-review corrections: mouse buttons, zoom, drag selection, sidebar and Windows menus. */
   async function designSteps(pane: Pane, root: string, check: Check) {
+    const forged = await emit("firewol-self-test").then(() => true, () => false);
+    check("the interface cannot send events of its own", !forged);
+    check("built-in prototypes are frozen", Object.isFrozen(Object.prototype));
     check("a text-direction control in a name is shown, not obeyed", visibleName(`a${String.fromCharCode(0x202e)}fdp.exe`) === "a[U+202E]fdp.exe");
     check("a hidden extension never hides a program's", withoutExtension("invoice.pdf.exe") === "invoice.pdf.exe" && withoutExtension("note.txt") === "note");
     check("names are isolated from the text around them", getComputedStyle(document.querySelector(".grid .nm")!).unicodeBidi === "isolate");

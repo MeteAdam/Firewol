@@ -28,6 +28,7 @@ use firewol_core::explorer::{
     data_dir, display_path, elevation, home, is_remote,
 };
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
+use tauri::webview::NewWindowResponse;
 use tauri::{
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window,
     WindowEvent,
@@ -1077,7 +1078,10 @@ async fn adopt_pane(
 
 fn build_window(app: &AppHandle, label: &str) -> tauri::Result<WebviewWindow> {
     let mut arguments = BROWSER_ARGS.to_owned();
-    if let Ok(extra) = std::env::var("FIREWOL_WEBVIEW_ARGS") {
+    // These could open a debugging port, so a release build never reads them.
+    if cfg!(debug_assertions)
+        && let Ok(extra) = std::env::var("FIREWOL_WEBVIEW_ARGS")
+    {
         arguments.push(' ');
         arguments.push_str(&extra);
     }
@@ -1087,7 +1091,14 @@ fn build_window(app: &AppHandle, label: &str) -> tauri::Result<WebviewWindow> {
         .min_inner_size(640.0, 420.0)
         .decorations(false)
         .additional_browser_args(&arguments)
+        .on_navigation(|url| own_page(url.scheme(), url.host_str()))
+        .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()
+}
+
+/// The interface never leaves its bundled page; only Firewol itself opens other windows.
+fn own_page(scheme: &str, host: Option<&str>) -> bool {
+    scheme == "tauri" || (scheme == "http" && host == Some("tauri.localhost"))
 }
 
 /// Asks WebView2 to release caches while a window is in the background.
@@ -1378,4 +1389,18 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("Firewol failed to start");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_interface_stays_on_its_own_page() {
+        assert!(own_page("http", Some("tauri.localhost")));
+        assert!(own_page("tauri", Some("localhost")));
+        assert!(!own_page("https", Some("evil.example")));
+        assert!(!own_page("http", Some("icon.localhost")));
+        assert!(!own_page("file", None));
+    }
 }

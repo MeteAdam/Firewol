@@ -24,6 +24,7 @@ import type {
   OpenResult,
   FolderDisplay,
   FolderGroup,
+  DefaultAppsView,
   MenuPlaces,
   ItemAttributesView,
 } from "./contract";
@@ -47,6 +48,8 @@ export const api = {
   adoptPane: (tab: TabSnapshot) => invoke<string>("adopt_pane", { tab }),
   listPage: (id: number, offset: number, sort: SortView) => invoke<Page>("list_page", { id, offset, sort }),
   folderProgress: (id: number) => invoke<FolderProgress>("folder_progress", { id }),
+  defaultApps: () => invoke<DefaultAppsView>("default_apps"),
+  setDefaultFolders: (enabled: boolean) => invoke<DefaultAppsView>("set_default_folders", { enabled }),
   folderGroups: (id: number) => invoke<FolderGroup[]>("folder_groups", { id }),
   locateSelection: (id: number, items: ItemRef[]) => invoke<(number | null)[]>("locate_selection", { id, items }),
   startIndex: (id: number) => invoke<IndexState>("start_index", { id }),

@@ -16,16 +16,17 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use contract::{
-    ClipboardState, DriveSpace, DriveView, FolderStyleView, GoToFolder, IndexState,
-    ItemAttributesView, ItemRef, MenuPlaces, Navigation, OpenResult, OperationDone, Page, Pin,
-    SearchCount, SearchRequest, Segment, SessionState, SettingsView, ShellMenuItem, Startup, Step,
-    Subfolders, TransferStatus, VolumeState,
+    ClipboardState, DefaultAppsView, DriveSpace, DriveView, FolderStyleView, GoToFolder,
+    IndexState, ItemAttributesView, ItemRef, MenuPlaces, Navigation, OpenResult, OperationDone,
+    Page, Pin, SearchCount, SearchRequest, Segment, SessionState, SettingsView, ShellMenuItem,
+    Startup, Step, Subfolders, TransferStatus, VolumeState,
 };
+use default_handler::{FolderHandler, Launch};
 use firewol_core::explorer::icons::{self, Icons};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
 use firewol_core::explorer::{
     ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, SavedView, Session, actions, custom_icon,
-    data_dir, display_path, elevation, home, is_remote,
+    data_dir, default_handler, display_path, elevation, home, is_remote,
 };
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::webview::NewWindowResponse;
@@ -56,7 +57,12 @@ struct App {
     next_window: AtomicU32,
     window_count: AtomicU32,
     report: Option<PathBuf>,
+    /// Another launch's folder opens as a tab in the window used last.
+    last_focused: Mutex<String>,
 }
+
+/// The folder this launch was started on, when one was named on the command line.
+static LAUNCH_FOLDER: OnceLock<String> = OnceLock::new();
 
 /// The clipboard, file operations and settings shared by every window.
 struct Files(Arc<Session>);
@@ -80,8 +86,12 @@ async fn startup(
     let main = request.is_none();
     let path = match &request {
         Some(request) => request.path.clone(),
-        None => match std::env::var_os("FIREWOL_OPEN").filter(|value| !value.is_empty()) {
-            Some(path) => path.to_string_lossy().into_owned(),
+        None => match LAUNCH_FOLDER.get().cloned().or_else(|| {
+            std::env::var_os("FIREWOL_OPEN")
+                .filter(|value| !value.is_empty())
+                .map(|path| path.to_string_lossy().into_owned())
+        }) {
+            Some(path) => path,
             None => {
                 let files = files.0.clone();
                 blocking(move || {
@@ -398,6 +408,55 @@ fn recycle(files: State<'_, Files>, items: Vec<ItemRef>) -> Result<(), String> {
         .collect::<anyhow::Result<_>>()
         .map_err(message)?;
     files.0.run(Operation::Recycle { items }).map_err(message)
+}
+
+fn default_apps_view(data: &Path) -> anyhow::Result<DefaultAppsView> {
+    let installed = default_handler::installed_executable()?;
+    let handler = FolderHandler::for_user(data);
+    let folders = handler.is_enabled(&installed);
+    Ok(DefaultAppsView {
+        folders,
+        other_handler: handler.current_command().filter(|_| !folders),
+        installed_path: installed.display().to_string(),
+        outdated: folders
+            && default_handler::installed_copy_outdated(&std::env::current_exe()?, &installed),
+    })
+}
+
+#[tauri::command]
+async fn default_apps() -> Result<DefaultAppsView, String> {
+    blocking(|| default_apps_view(&data_dir()?)).await
+}
+
+/// Changes how Windows opens folders, after asking outside the WebView. Report mode is refused:
+/// the unattended self-test isolates files, but the registry is the real one.
+#[tauri::command]
+async fn set_default_folders(
+    window: Window,
+    state: State<'_, App>,
+    enabled: bool,
+) -> Result<DefaultAppsView, String> {
+    if state.report.is_some() {
+        return Err("Default apps cannot change during a test run".into());
+    }
+    let owner = owner(&window)?;
+    blocking(move || {
+        let data = data_dir()?;
+        let handler = FolderHandler::for_user(&data);
+        if enabled {
+            let installed = default_handler::installed_executable()?;
+            let first_time = !handler.is_enabled(&installed);
+            if first_time && !default_handler::confirm_enable(HWND(owner as _)) {
+                return default_apps_view(&data);
+            }
+            default_handler::install_copy(&std::env::current_exe()?, &installed)?;
+            handler.enable(&installed)?;
+        } else {
+            handler.disable()?;
+        }
+        default_apps_view(&data)
+    })
+    .await
 }
 
 /// The folders inside `path`, for a breadcrumb chevron; at most 256 in natural order.
@@ -1240,10 +1299,63 @@ fn ntfs_helper() -> Option<i32> {
     })
 }
 
+/// `--restore-explorer` undoes the default-app registration even if the interface cannot start.
+fn restore_explorer() -> Option<i32> {
+    std::env::args_os()
+        .nth(1)
+        .filter(|arg| arg == "--restore-explorer")?;
+    let result = data_dir().and_then(|data| default_handler::restore_from_command_line(&data));
+    Some(match result {
+        Ok(()) => {
+            elevation::alert("Firewol", "Folders and Win+E open in File Explorer again.");
+            0
+        }
+        Err(error) => {
+            elevation::alert("Firewol could not restore Explorer", &format!("{error:#}"));
+            1
+        }
+    })
+}
+
+/// Another launch of Firewol: its folder becomes a tab in the window used last.
+fn open_from_another_launch(app: &AppHandle, arguments: Vec<String>) {
+    let launch = default_handler::classify(arguments.into_iter().skip(1).map(Into::into));
+    let path = match launch {
+        Launch::Folder(folder) => text(&folder),
+        Launch::Default | Launch::HandOff(_) => {
+            home().map_or_else(|_| String::new(), |path| text(&path))
+        }
+    };
+    let state = app.state::<App>();
+    let last = lock(&state.last_focused).clone();
+    let Some(window) = app
+        .get_webview_window(&last)
+        .or_else(|| app.webview_windows().into_values().next())
+    else {
+        return;
+    };
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    let _ = app.emit_to(window.label(), contract::OPEN_PATH, path);
+}
+
 fn main() {
     firewol_core::explorer::volume::remember_executable();
-    if let Some(code) = ntfs_helper() {
+    if let Some(code) = ntfs_helper().or_else(restore_explorer) {
         std::process::exit(code);
+    }
+    match default_handler::classify(std::env::args_os().skip(1)) {
+        Launch::HandOff(target) => {
+            let handed = data_dir().and_then(|data| default_handler::hand_off(&target, &data));
+            if let Err(error) = handed {
+                elevation::alert("Firewol could not open this", &format!("{error:#}"));
+            }
+            return;
+        }
+        Launch::Folder(folder) => {
+            let _ = LAUNCH_FOLDER.set(text(&folder));
+        }
+        Launch::Default => {}
     }
     STARTED.get_or_init(Instant::now);
     let folders = Arc::new(Folders::default());
@@ -1253,7 +1365,14 @@ fn main() {
     let thumbnails = Icons::for_thumbnails().expect("Start thumbnail worker");
     let shell_menus = Arc::new(ShellMenus::default());
     let served_menus = shell_menus.clone();
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // Measuring runs isolate their data and must not hand over to a Firewol already open.
+    if std::env::var_os("FIREWOL_SPIKE_REPORT").is_none_or(|value| value.is_empty()) {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, arguments, _| {
+            open_from_another_launch(app, arguments);
+        }));
+    }
+    builder
         .register_asynchronous_uri_scheme_protocol("icon", move |_context, request, responder| {
             icon_protocol::respond(
                 &served_icons,
@@ -1270,6 +1389,7 @@ fn main() {
             windows: Mutex::default(),
             next_window: AtomicU32::new(0),
             window_count: AtomicU32::new(1),
+            last_focused: Mutex::new("main".to_owned()),
             report: std::env::var_os("FIREWOL_SPIKE_REPORT")
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from),
@@ -1345,11 +1465,18 @@ fn main() {
                     window.state::<Files>().0.flush_folder();
                 }
             }
-            WindowEvent::Focused(focused) => memory_target(window, *focused),
+            WindowEvent::Focused(focused) => {
+                if *focused {
+                    *lock(&window.state::<App>().last_focused) = window.label().to_owned();
+                }
+                memory_target(window, *focused);
+            }
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             startup,
+            default_apps,
+            set_default_folders,
             navigate,
             close_pane,
             suspend_pane,

@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod custom_icon;
 mod date_groups;
+pub mod default_handler;
 mod directory;
 mod drives;
 pub mod elevation;

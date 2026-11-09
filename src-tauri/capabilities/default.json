@@ -22,6 +22,8 @@
     "allow-adopt-pane",
     "allow-list-page",
     "allow-folder-progress",
+    "allow-default-apps",
+    "allow-set-default-folders",
     "allow-folder-groups",
     "allow-locate-selection",
     "allow-start-index",

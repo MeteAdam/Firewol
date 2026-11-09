@@ -100,6 +100,8 @@ export class Pane {
   #stale = false;
   /** A quiet refresh is reading the new listing. */
   #quiet = false;
+  /** Navigations the user started that have not answered yet. */
+  #navigating = 0;
   #nextRefresh = 0;
 
   constructor(id: string) {
@@ -277,7 +279,8 @@ export class Pane {
     this.#refreshTimer = undefined;
     if (!this.#stale || !this.folder) return;
     // A reload would close the rename field and send search results back to the top.
-    if (this.renaming !== null || this.searching) {
+    // A navigation under way must not be replaced by a reload of the folder it is leaving.
+    if (this.renaming !== null || this.searching || this.#navigating > 0) {
       this.#scheduleRefresh(REFRESH_RETRY_MS);
       return;
     }
@@ -309,6 +312,7 @@ export class Pane {
     let quietPages: Record<number, Entry[]> | undefined;
     let view: FolderView;
     this.#quiet = quiet;
+    if (!quiet) this.#navigating++;
     try {
       result = await api.navigate(this.id, path, step, this.sort);
       view = result.folder;
@@ -324,6 +328,7 @@ export class Pane {
       }
       return;
     } finally {
+      if (!quiet) this.#navigating--;
       if (navigation === this.#navigation) this.#quiet = false;
     }
     if (navigation !== this.#navigation) return;

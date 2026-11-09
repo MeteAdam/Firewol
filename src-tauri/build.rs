@@ -12,6 +12,8 @@ fn main() {
             "adopt_pane",
             "list_page",
             "folder_progress",
+            "default_apps",
+            "set_default_folders",
             "folder_groups",
             "locate_selection",
             "start_index",

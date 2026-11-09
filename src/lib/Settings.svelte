@@ -5,6 +5,7 @@
   import { contrastRatio, cssRgb, hexOf, parseHex, type Rgb } from "./color";
   import AdminSettings from "./AdminSettings.svelte";
   import ColorWheel from "./ColorWheel.svelte";
+  import DefaultApps from "./DefaultApps.svelte";
   import Icon from "./Icon.svelte";
   import MenuEditor from "./MenuEditor.svelte";
 
@@ -23,6 +24,7 @@
     { id: "search", name: "Search", icon: "search", keys: "search find folder shortcut regex regular expression filters extension size date ntfs volume drive scope index" },
     { id: "transfers", name: "Transfers", icon: "transfer", keys: "transfers copy move verify pause resume cancel speed graph drag drop" },
     { id: "admin", name: "Administrator", icon: "shield", keys: "administrator admin elevation uac run as allowlist executable any" },
+    { id: "defaults", name: "Default apps", icon: "window", keys: "default apps file manager explorer replace win e folders open registry restore" },
     { id: "about", name: "About", icon: "info", keys: "about version data settings file license" },
   ] as const;
   const SHAPES = ["rounded", "square", "circle", "minimal"] as const;
@@ -233,6 +235,8 @@
         <MenuEditor menu={settings.menu} shellItems={settings.shell_items} {onsave} />
       {:else if section === "admin"}
         <AdminSettings elevation={settings.elevation} {onsave} />
+      {:else if section === "defaults"}
+        <DefaultApps />
       {/if}
     </div>
   </div>

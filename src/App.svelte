@@ -18,6 +18,7 @@
     ICON_CHANGED,
     DRIVES_CHANGED,
     FOLDER_CHANGED,
+    OPEN_PATH,
     type SettingsView,
     type SettingsPatch,
     type AppearancePatch,
@@ -2380,6 +2381,19 @@
     check("turning grouping off removes the headings", pane.groups.length === 0);
   }
 
+  /** Only reads: a test run must never change how Windows opens folders. */
+  async function defaultAppsSteps(check: Check) {
+    openSettings("defaults");
+    await waitFor(() => !!document.querySelector('[aria-label="Folders and Win+E"] button'), 5000, "the Default apps section");
+    check("Default apps shows the folder switch", true);
+    const refused = await api.setDefaultFolders(true).then(() => false, (reason) => String(reason).includes("test run"));
+    check("a test run cannot change the default apps", refused);
+    settingsSection = "appearance";
+    const slot = slots[0];
+    const settingsTab = slot.tabs.find((tab) => tab.kind === "settings");
+    if (settingsTab) await closeTab(slot, settingsTab);
+  }
+
   async function toastSteps(check: Check) {
     // An earlier step's toast must be gone, or this one only swaps its text and does not slide in.
     toast = undefined;
@@ -2532,6 +2546,7 @@
       await middleClickSteps(source, slot, check);
       await outsideChangeSteps(source, check);
       await groupSteps(source, check);
+      await defaultAppsSteps(check);
       await toastSteps(check);
       await toggleSplit();
       check("closing split view merges tabs", slots.length === 1 && slots[0].tabs.length === 2);
@@ -2631,6 +2646,7 @@
       listen<string>(ICON_CHANGED, (event) => windowsIconChanged(event.payload)),
       listen(DRIVES_CHANGED, () => refreshDrives(300)),
       appWindow.onFocusChanged((event) => { if (event.payload) refreshDrives(); }),
+      appWindow.listen<string>(OPEN_PATH, (event) => void newTab(event.payload)),
       appWindow.onCloseRequested(async (event) => {
         // Not prevented: the API then destroys the window, which needs `core:window:allow-destroy`.
         if (allowClose) return;

@@ -17,6 +17,7 @@ pub const SETTINGS_CHANGED: &str = "settings-changed";
 pub const ICON_CHANGED: &str = "icon-changed";
 pub const DRIVES_CHANGED: &str = "drives-changed";
 pub const FOLDER_CHANGED: &str = "folder-changed";
+pub const OPEN_PATH: &str = "open-path";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "camelCase")]
@@ -317,6 +318,18 @@ pub struct FolderDisplay {
     pub tile: u32,
     /// Sections by date modified.
     pub group: bool,
+}
+
+/// Whether Windows sends folders and Win+E to Firewol for this user.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DefaultAppsView {
+    pub folders: bool,
+    /// The command Windows runs for folders now, when another program set it.
+    pub other_handler: Option<String>,
+    pub installed_path: String,
+    /// The installed copy is not this build of Firewol.
+    pub outdated: bool,
 }
 
 /// One date section of a grouped listing. Bucket 0 is Today, 7 is A long time ago.

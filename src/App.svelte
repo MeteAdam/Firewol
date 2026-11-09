@@ -1981,7 +1981,7 @@
 
   /** The design-review corrections: mouse buttons, zoom, drag selection, sidebar and Windows menus. */
   async function designSteps(pane: Pane, root: string, check: Check) {
-    check("a text-direction control in a name is shown, not obeyed", visibleName("a\u202Efdp.exe") === "a[U+202E]fdp.exe");
+    check("a text-direction control in a name is shown, not obeyed", visibleName(`a${String.fromCharCode(0x202e)}fdp.exe`) === "a[U+202E]fdp.exe");
     check("a hidden extension never hides a program's", withoutExtension("invoice.pdf.exe") === "invoice.pdf.exe" && withoutExtension("note.txt") === "note");
     check("names are isolated from the text around them", getComputedStyle(document.querySelector(".grid .nm")!).unicodeBidi === "isolate");
     const from = pane.folder!.path;

@@ -9,8 +9,12 @@
   void api.defaultApps().then((view) => (status = view), (reason) => (error = String(reason)));
 
   const setFolders = (enabled: boolean) => change(api.setDefaultFolders(enabled));
-  const setProbe = (enabled: boolean) => change(api.setDialogProbe(enabled));
-  const reload = () => change(api.defaultApps());
+  const setDialogs = (enabled: boolean) => change(api.setFileDialogs(enabled));
+
+  async function updateCopies() {
+    if (status?.folders) await setFolders(true);
+    if (status?.file_dialogs) await setDialogs(true);
+  }
 
   async function change(request: Promise<DefaultAppsView>) {
     busy = true;
@@ -38,25 +42,19 @@
     <button class="action" class:primary={!status.folders} disabled={busy} aria-pressed={status.folders} onclick={() => setFolders(!status!.folders)}>{status.folders ? "Turn off" : "Turn on"}</button>
   {/if}
 </div>
-{#if status?.folders && status.outdated}
-  <div class="card notice">
-    <span>The installed copy is older than this version of Firewol.</span>
-    <button class="action" disabled={busy} onclick={() => setFolders(true)}>Update copy</button>
-  </div>
-{/if}
-<div class="card spaced" aria-label="File window test">
+<div class="card spaced" aria-label="Open windows">
   <div class="text">
-    <strong>Open and Save windows (test)</strong>
-    <span class="muted">Records which programs ask Windows for a file window, so Firewol can learn which ones it could serve. Those windows stay exactly as they are for now.</span>
+    <strong>Open windows in other programs</strong>
+    <span class="muted">When a program asks you to choose a file or folder, Firewol opens to answer it. If Firewol cannot, the normal Windows window opens instead. Save windows stay as they are.</span>
   </div>
   {#if status}
-    <button class="action" class:primary={!status.dialog_probe} disabled={busy} aria-pressed={status.dialog_probe} onclick={() => setProbe(!status!.dialog_probe)}>{status.dialog_probe ? "Stop test" : "Start test"}</button>
+    <button class="action" class:primary={!status.file_dialogs} disabled={busy} aria-pressed={status.file_dialogs} onclick={() => setDialogs(!status!.file_dialogs)}>{status.file_dialogs ? "Turn off" : "Turn on"}</button>
   {/if}
 </div>
-{#if status && (status.dialog_probe || status.probe_seen.length > 0)}
-  <div class="seen">
-    <div class="seen-head"><strong>Programs seen</strong><button class="link" disabled={busy} onclick={reload}>Refresh</button></div>
-    {#each status.probe_seen as program (program)}<div class="mono">{program}</div>{:else}<div class="muted">None yet. Open a file window in another program, then refresh.</div>{/each}
+{#if status?.outdated}
+  <div class="card notice">
+    <span>The installed copy is older than this version of Firewol.</span>
+    <button class="action" disabled={busy} onclick={updateCopies}>Update copy</button>
   </div>
 {/if}
 {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -66,6 +64,7 @@
   <li>The desktop and the taskbar, which Explorer itself draws.</li>
   <li>The File Explorer icon pinned to the taskbar.</li>
   <li>Virtual folders such as the Recycle Bin, Control Panel and This PC.</li>
+  <li>Save windows, 32-bit programs, and programs running as administrator.</li>
 </ul>
 
 <h3>Where it runs from</h3>
@@ -84,9 +83,6 @@
   .card { display: flex; align-items: center; justify-content: space-between; gap: 16px; max-width: 640px; padding: 12px 14px; border: var(--border-w) solid var(--border); border-radius: var(--radius-s); background: var(--surface-2); }
   .notice, .spaced { margin-top: 8px; }
   .notice { font-size: 13px; }
-  .seen { display: flex; flex-direction: column; gap: 4px; max-width: 640px; margin-top: 8px; padding: 10px 14px; font-size: 12px; }
-  .seen-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
-  .link { padding: 2px 6px; border: 0; background: transparent; color: var(--accent); font-size: 12px; }
   .text { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 13px; }
   .text .muted { font-size: 12px; }
   .action { flex: none; }

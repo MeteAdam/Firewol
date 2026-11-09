@@ -342,10 +342,29 @@ pub struct DefaultAppsView {
     pub installed_path: String,
     /// The installed copy is not this build of Firewol.
     pub outdated: bool,
-    /// The file window probe is registered.
-    pub dialog_probe: bool,
-    /// Programs the probe has seen asking for an Open or Save window.
-    pub probe_seen: Vec<String>,
+    /// Programs' Open windows are answered by Firewol.
+    pub file_dialogs: bool,
+}
+
+/// One entry of an Open window's file type list.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct PickType {
+    pub name: String,
+    pub spec: String,
+}
+
+/// What a program asked of its Open window; this window answers it.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct PickView {
+    pub folders: bool,
+    pub multi: bool,
+    pub title: Option<String>,
+    pub file_name: Option<String>,
+    pub types: Vec<PickType>,
+    /// One-based, as the Windows dialog counts them.
+    pub type_index: u32,
 }
 
 /// One date section of a grouped listing. Bucket 0 is Today, 7 is A long time ago.
@@ -616,6 +635,8 @@ pub struct Startup {
     pub restore: Vec<String>,
     /// Which of `restore` is active.
     pub restore_active: u32,
+    /// Set when this window answers another program's Open window.
+    pub pick: Option<PickView>,
     pub split: bool,
     pub report: bool,
     /// Runs the interface's file-operation self-test (`FIREWOL_SELF_TEST`) and reports it.

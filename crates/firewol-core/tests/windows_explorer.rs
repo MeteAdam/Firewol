@@ -47,6 +47,44 @@ fn sorting_by_date_mixes_folders_with_files() -> anyhow::Result<()> {
 }
 
 #[test]
+fn a_type_filter_keeps_folders_and_matching_files() -> anyhow::Result<()> {
+    use firewol_core::explorer::{Cancellation, Directory, ListFilter, Sort, page};
+    let fixture = tempfile::tempdir()?;
+    std::fs::write(fixture.path().join("Photo.PNG"), b"x")?;
+    std::fs::write(fixture.path().join("note.txt"), b"x")?;
+    std::fs::create_dir(fixture.path().join("folder"))?;
+    let listed = |filter: ListFilter| -> anyhow::Result<Vec<String>> {
+        let cancel = Cancellation::default();
+        let mut directory = Directory::open(fixture.path())?;
+        directory.only(filter);
+        directory.advance(128, &cancel)?;
+        directory.sort(Sort::default(), &cancel)?;
+        Ok(directory
+            .list_dir(page(0), &cancel)?
+            .items
+            .iter()
+            .map(|item| item.name().to_string_lossy().into_owned())
+            .collect())
+    };
+    assert_eq!(
+        listed(ListFilter::from_spec("*.png;*.jpg"))?,
+        ["folder", "Photo.PNG"]
+    );
+    assert_eq!(listed(ListFilter::FoldersOnly)?, ["folder"]);
+    assert_eq!(
+        listed(ListFilter::from_spec("*.*"))?.len(),
+        3,
+        "*.* hides nothing"
+    );
+    assert_eq!(
+        listed(ListFilter::from_spec("report*"))?.len(),
+        3,
+        "an odd pattern hides nothing"
+    );
+    Ok(())
+}
+
+#[test]
 fn grouping_puts_new_items_first_and_counts_each_section() -> anyhow::Result<()> {
     use firewol_core::explorer::{Cancellation, Directory, Sort, SortColumn, page};
     use std::time::{Duration, SystemTime};

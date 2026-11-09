@@ -13,10 +13,6 @@ other_handler: string | null, installed_path: string,
  */
 outdated: boolean, 
 /**
- * The file window probe is registered.
+ * Programs' Open windows are answered by Firewol.
  */
-dialog_probe: boolean, 
-/**
- * Programs the probe has seen asking for an Open or Save window.
- */
-probe_seen: Array<string>, };
+file_dialogs: boolean, };

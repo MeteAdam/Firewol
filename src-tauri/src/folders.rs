@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use firewol_core::explorer::{
     Cancellation, Directory, Filters, FolderKey, FolderStyle, History, Item, ItemId, ItemPage,
-    PAGE_SIZE, SavedView, SearchIndex, SearchQuery, SearchReader, Sort, SortColumn, data_dir,
-    display_path, icons, page, watch_directory,
+    ListFilter, PAGE_SIZE, SavedView, SearchIndex, SearchQuery, SearchReader, Sort, SortColumn,
+    data_dir, display_path, icons, page, watch_directory,
 };
 
 use crate::contract::{
@@ -46,6 +46,8 @@ pub struct Folders {
     show_hidden: OnceLock<HiddenSource>,
     views: OnceLock<ViewSource>,
     pub volumes: Arc<Volumes>,
+    /// What each Open window lists, by the window that shows it.
+    filters: Mutex<HashMap<String, ListFilter>>,
     running_indexes: Arc<AtomicUsize>,
 }
 
@@ -130,8 +132,15 @@ impl Folders {
             .is_some_and(|view| view.group)
     }
 
-    fn directory(&self, path: &Path) -> Result<Directory> {
+    pub fn set_filter(&self, owner: &str, filter: ListFilter) {
+        lock(&self.filters).insert(owner.to_owned(), filter);
+    }
+
+    fn directory(&self, path: &Path, owner: &str) -> Result<Directory> {
         let mut directory = Directory::open(path)?;
+        if let Some(filter) = lock(&self.filters).get(owner) {
+            directory.only(filter.clone());
+        }
         if self.show_hidden.get().is_some_and(|source| !source()) {
             directory.hide_hidden_items();
         }
@@ -280,7 +289,7 @@ impl Folders {
         );
         let cancel = Cancellation::default();
         let listing = Cancellation::default();
-        let mut directory = self.directory(path)?;
+        let mut directory = self.directory(path, owner)?;
         directory.advance(PAGE_SIZE, &listing)?;
         let sort = Sort {
             group: self.grouped(directory.path()),
@@ -324,7 +333,7 @@ impl Folders {
         notify: Notify,
     ) -> Result<FolderView> {
         let listing = Cancellation::default();
-        let mut directory = self.directory(&folder.path)?;
+        let mut directory = self.directory(&folder.path, &folder.owner)?;
         directory.advance(PAGE_SIZE, &listing)?;
         let sort = Sort {
             group: self.grouped(directory.path()),
@@ -594,6 +603,7 @@ impl Folders {
     }
 
     pub fn close_owned(&self, owner: &str) {
+        lock(&self.filters).remove(owner);
         lock(&self.panes).retain(|_, pane| pane.owner != owner);
         lock(&self.open).retain(|_, folder| {
             let keep = folder.owner != owner;

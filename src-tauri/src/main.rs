@@ -18,11 +18,12 @@ use anyhow::Context as _;
 use contract::{
     ClipboardState, DefaultAppsView, DriveSpace, DriveView, FolderStyleView, GoToFolder,
     IndexState, ItemAttributesView, ItemRef, MenuPlaces, Navigation, OpenResult, OperationDone,
-    Page, Pin, SearchCount, SearchRequest, Segment, SessionState, SettingsView, ShellMenuItem,
-    Startup, Step, Subfolders, TransferStatus, VolumeState,
+    Page, PickView, Pin, SearchCount, SearchRequest, Segment, SessionState, SettingsView,
+    ShellMenuItem, Startup, Step, Subfolders, TransferStatus, VolumeState,
 };
-use default_handler::{DialogProbe, FolderHandler, Launch};
+use default_handler::{FileDialogs, FolderHandler, Launch};
 use firewol_core::explorer::icons::{self, Icons};
+use firewol_core::explorer::picker_pipe::{self, PickClient, PickRequest};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
 use firewol_core::explorer::{
     ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, SavedView, Session, actions, custom_icon,
@@ -59,7 +60,17 @@ struct App {
     report: Option<PathBuf>,
     /// Another launch's folder opens as a tab in the window used last.
     last_focused: Mutex<String>,
+    /// Windows answering another program's Open window, by label.
+    pickers: Mutex<HashMap<String, Picker>>,
 }
+
+struct Picker {
+    client: Arc<PickClient>,
+    request: PickRequest,
+}
+
+/// The pipe this launch was asked to answer, when a program's Open window started it.
+static LAUNCH_PICK: OnceLock<String> = OnceLock::new();
 
 /// The folder this launch was started on, when one was named on the command line.
 static LAUNCH_FOLDER: OnceLock<String> = OnceLock::new();
@@ -73,6 +84,7 @@ struct WindowRequest {
     split: bool,
     requested: Instant,
     adopt: Option<contract::TabSnapshot>,
+    pick: Option<PickView>,
 }
 
 #[tauri::command]
@@ -84,6 +96,7 @@ async fn startup(
     let label = window.label().to_owned();
     let request = lock(&state.windows).get(&label).cloned();
     let main = request.is_none();
+    let request_pick = request.as_ref().and_then(|request| request.pick.clone());
     let mut restore = Vec::new();
     let mut restore_active = 0;
     let path = match &request {
@@ -128,6 +141,7 @@ async fn startup(
         path,
         restore,
         restore_active,
+        pick: request_pick,
         split: request.map_or_else(
             || std::env::var_os("FIREWOL_SPLIT").is_some_and(|value| !value.is_empty()),
             |r| r.split,
@@ -181,7 +195,10 @@ async fn navigate(
     let files = files.0.clone();
     blocking(move || {
         let navigation = folders.navigate(&owner, &pane, path.as_deref(), step, sort, notify)?;
-        files.remember_folder(PathBuf::from(&navigation.folder.path));
+        // Browsing in another program's Open window is not where Firewol should reopen.
+        if !owner.starts_with(PICK_LABEL) {
+            files.remember_folder(PathBuf::from(&navigation.folder.path));
+        }
         Ok(navigation)
     })
     .await
@@ -425,20 +442,24 @@ fn default_apps_view(data: &Path) -> anyhow::Result<DefaultAppsView> {
     let installed = default_handler::installed_executable()?;
     let handler = FolderHandler::for_user(data);
     let folders = handler.is_enabled(&installed);
+    let dialogs = FileDialogs::for_user();
+    let current = std::env::current_exe()?;
     Ok(DefaultAppsView {
         folders,
         other_handler: handler.current_command().filter(|_| !folders),
         installed_path: installed.display().to_string(),
-        outdated: folders
-            && default_handler::installed_copy_outdated(&std::env::current_exe()?, &installed),
-        dialog_probe: DialogProbe::for_user().is_enabled(),
-        probe_seen: default_handler::probe_summary(data),
+        outdated: (folders || dialogs.is_enabled())
+            && (default_handler::installed_copy_outdated(&current, &installed)
+                || dialogs
+                    .registered_picker()
+                    .is_some_and(|dll| default_handler::picker_outdated(&current, &dll))),
+        file_dialogs: dialogs.is_enabled(),
     })
 }
 
-/// Records which programs use Windows' file windows; they keep working exactly as before.
+/// Sends programs' Open windows to Firewol. If Firewol cannot answer, Windows' window opens.
 #[tauri::command]
-async fn set_dialog_probe(
+async fn set_file_dialogs(
     window: Window,
     state: State<'_, App>,
     enabled: bool,
@@ -449,19 +470,18 @@ async fn set_dialog_probe(
     let owner = owner(&window)?;
     blocking(move || {
         let data = data_dir()?;
-        let probe = DialogProbe::for_user();
+        let dialogs = FileDialogs::for_user();
         if enabled {
-            if !default_handler::confirm_probe(HWND(owner as _)) {
+            if !dialogs.is_enabled() && !default_handler::confirm_picker(HWND(owner as _)) {
                 return default_apps_view(&data);
             }
-            let dll = default_handler::install_probe(
-                &std::env::current_exe()?,
-                &default_handler::install_dir()?,
-            )?;
-            default_handler::clear_probe_log(&data);
-            probe.enable(&dll)?;
+            let current = std::env::current_exe()?;
+            let dll = default_handler::install_picker(&current, &default_handler::install_dir()?)?;
+            // The DLL starts the program installed beside it.
+            default_handler::install_copy(&current, &default_handler::installed_executable()?)?;
+            dialogs.enable(&dll)?;
         } else {
-            probe.disable()?;
+            dialogs.disable()?;
         }
         default_apps_view(&data)
     })
@@ -478,6 +498,155 @@ async fn remember_tabs(
     let files = files.0.clone();
     blocking(move || files.remember_tabs(tabs.into_iter().map(PathBuf::from).collect(), active))
         .await
+}
+
+const PICK_LABEL: &str = "pick-";
+
+fn pick_view(request: &PickRequest) -> PickView {
+    PickView {
+        folders: request.folders,
+        multi: request.multi,
+        title: request.title.clone(),
+        file_name: request.file_name.clone(),
+        types: request
+            .types
+            .iter()
+            .map(|(name, spec)| contract::PickType {
+                name: name.clone(),
+                spec: spec.clone(),
+            })
+            .collect(),
+        type_index: request.type_index,
+    }
+}
+
+/// Connects to the program waiting on `pipe` and opens a window to answer it. Any failure here
+/// closes the pipe, and the program then shows Windows' own window.
+fn start_pick(app: AppHandle, pipe: String, alone: bool) {
+    std::thread::spawn(move || {
+        if let Err(error) = run_pick(&app, &pipe) {
+            eprintln!("{error:#}");
+            if alone {
+                app.exit(1);
+            }
+        }
+    });
+}
+
+fn run_pick(app: &AppHandle, pipe: &str) -> anyhow::Result<()> {
+    let client = Arc::new(PickClient::connect(pipe)?);
+    let request = client.read_request()?;
+    let state = app.state::<App>();
+    let label = format!(
+        "{PICK_LABEL}{}",
+        state.next_window.fetch_add(1, Ordering::Relaxed) + 1
+    );
+    let start = request
+        .folder
+        .as_deref()
+        .and_then(|folder| firewol_core::explorer::resolve_directory(folder).ok())
+        .or_else(|| {
+            let (tabs, active) = app.state::<Files>().0.settings().startup_tabs();
+            tabs.get(active).cloned()
+        })
+        .map_or_else(home, Ok)?;
+    state
+        .folders
+        .set_filter(&label, request.filter(request.type_index));
+    state.window_count.fetch_add(1, Ordering::Relaxed);
+    lock(&state.windows).insert(
+        label.clone(),
+        WindowRequest {
+            path: text(&start),
+            split: false,
+            requested: Instant::now(),
+            adopt: None,
+            pick: Some(pick_view(&request)),
+        },
+    );
+    let title = request.title.clone();
+    lock(&state.pickers).insert(
+        label.clone(),
+        Picker {
+            client: client.clone(),
+            request,
+        },
+    );
+    let window = match build_window(app, &label) {
+        Ok(window) => window,
+        Err(error) => {
+            lock(&state.pickers).remove(&label);
+            lock(&state.windows).remove(&label);
+            state.window_count.fetch_sub(1, Ordering::Relaxed);
+            return Err(error.into());
+        }
+    };
+    if let Some(title) = title {
+        let _ = window.set_title(&title);
+    }
+    let _ = window.set_focus();
+    // The program gave up or closed: its window has no one to answer any more.
+    while lock(&state.pickers).contains_key(&label) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if !client.alive() {
+            lock(&state.pickers).remove(&label);
+            let _ = window.destroy();
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The window is on screen; the waiting program stops timing the start.
+#[tauri::command]
+fn pick_ready(window: Window, state: State<'_, App>) -> Result<(), String> {
+    let client = lock(&state.pickers)
+        .get(window.label())
+        .map(|picker| picker.client.clone());
+    client.map_or(Ok(()), |client| client.ready().map_err(message))
+}
+
+/// Answers the program and closes the window; `None` is Cancel.
+#[tauri::command]
+async fn finish_pick(
+    window: Window,
+    state: State<'_, App>,
+    paths: Option<Vec<String>>,
+) -> Result<(), String> {
+    let picker = lock(&state.pickers).remove(window.label());
+    let Some(picker) = picker else {
+        return Ok(());
+    };
+    let answered = match paths {
+        None => picker.client.cancel(),
+        Some(paths) => {
+            let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+            let single = picker.request.multi || paths.len() == 1;
+            if !single || paths.is_empty() || paths.len() > 4096 {
+                return Err("Choose the number of items this program asked for".into());
+            }
+            if !paths
+                .iter()
+                .all(|path| picker_pipe::acceptable(&picker.request, path))
+            {
+                return Err("This program cannot open that item".into());
+            }
+            picker.client.finish(&paths)
+        }
+    };
+    let _ = window.destroy();
+    answered.map_err(message)
+}
+
+/// Shows the chosen file type and re-reads the open folder in the interface.
+#[tauri::command]
+fn set_pick_filter(window: Window, state: State<'_, App>, index: u32) -> Result<(), String> {
+    let filter = lock(&state.pickers)
+        .get(window.label())
+        .map(|picker| picker.request.filter(index))
+        .ok_or("This window is not choosing a file")?;
+    state.folders.set_filter(window.label(), filter);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1137,6 +1306,7 @@ async fn open_window(
             split,
             requested: Instant::now(),
             adopt: None,
+            pick: None,
         },
     );
     if let Err(error) = build_window(&app, &label) {
@@ -1189,6 +1359,7 @@ async fn adopt_pane(
             split: false,
             requested: Instant::now(),
             adopt: Some(tab),
+            pick: None,
         },
     );
     if let Err(error) = build_window(&app, &label) {
@@ -1381,6 +1552,10 @@ fn restore_explorer() -> Option<i32> {
 fn open_from_another_launch(app: &AppHandle, arguments: Vec<String>) {
     let launch = default_handler::classify(arguments.into_iter().skip(1).map(Into::into));
     let path = match launch {
+        Launch::Pick(pipe) => {
+            start_pick(app.clone(), pipe, false);
+            return;
+        }
         Launch::Folder(folder) => text(&folder),
         Launch::Default | Launch::HandOff(_) => {
             let (tabs, active) = app.state::<Files>().0.settings().startup_tabs();
@@ -1419,6 +1594,9 @@ fn main() {
         Launch::Folder(folder) => {
             let _ = LAUNCH_FOLDER.set(text(&folder));
         }
+        Launch::Pick(pipe) => {
+            let _ = LAUNCH_PICK.set(pipe);
+        }
         Launch::Default => {}
     }
     STARTED.get_or_init(Instant::now);
@@ -1454,6 +1632,7 @@ fn main() {
             next_window: AtomicU32::new(0),
             window_count: AtomicU32::new(1),
             last_focused: Mutex::new("main".to_owned()),
+            pickers: Mutex::default(),
             report: std::env::var_os("FIREWOL_SPIKE_REPORT")
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from),
@@ -1517,7 +1696,12 @@ fn main() {
                 .use_views(move |folder| views.settings().views.get(&folder).copied());
             refresh_remote_pins(app.handle().clone(), session.clone());
             app.manage(Files(session));
-            build_window(app.handle(), "main")?;
+            match LAUNCH_PICK.get() {
+                Some(pipe) => start_pick(app.handle().clone(), pipe.clone(), true),
+                None => {
+                    build_window(app.handle(), "main")?;
+                }
+            }
             Ok(())
         })
         .on_window_event(move |window, event| match event {
@@ -1525,6 +1709,10 @@ fn main() {
                 closing.close_owned(window.label());
                 let state = window.state::<App>();
                 lock(&state.windows).remove(window.label());
+                // Closing the window any other way is what Cancel means.
+                if let Some(picker) = lock(&state.pickers).remove(window.label()) {
+                    let _ = picker.client.cancel();
+                }
                 if state.window_count.fetch_sub(1, Ordering::Relaxed) == 1 {
                     window.state::<Files>().0.flush_folder();
                 }
@@ -1542,7 +1730,10 @@ fn main() {
             default_apps,
             remember_tabs,
             set_default_folders,
-            set_dialog_probe,
+            set_file_dialogs,
+            pick_ready,
+            finish_pick,
+            set_pick_filter,
             navigate,
             close_pane,
             suspend_pane,

@@ -9,6 +9,7 @@ pub mod icons;
 mod menu_icons;
 mod modern_menu;
 mod operations;
+pub mod picker_pipe;
 mod places;
 mod search;
 mod session;
@@ -18,7 +19,7 @@ pub mod volume;
 mod watch;
 pub use watch::watch_directory;
 
-pub use directory::{Directory, Group, ListedRows, Sort, SortColumn};
+pub use directory::{Directory, Group, ListFilter, ListedRows, Sort, SortColumn};
 pub use drives::{Drive, drives, go_to_folders, is_remote, watch_devices};
 pub use operations::{
     MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations, TransferControl, TransferProgress,

@@ -42,6 +42,7 @@
   import FileIcon from "./lib/FileIcon.svelte";
   import FileList from "./lib/FileList.svelte";
   import FolderIcon from "./lib/FolderIcon.svelte";
+  import PickBar from "./lib/PickBar.svelte";
   import FolderStyleSheet from "./lib/FolderStyleSheet.svelte";
   import { formatCount, formatSize, useLocale, visibleName, withoutExtension } from "./lib/format";
   import { iconChanged } from "./lib/icons.svelte";
@@ -459,6 +460,13 @@
 
   /** One folder replaces the view and several get tabs; files go to their Windows default app. */
   async function openEntries(pane: Pane, entries: Entry[], inNewTab: boolean) {
+    // Answering another program: opening a file is the answer, and folders are just browsed.
+    if (startup?.pick) {
+      const files = entries.filter((entry) => !entry.directory);
+      if (files.length > 0 && !startup.pick.folders) void answerPick(files.map((entry) => entry.path));
+      else if (entries[0]?.directory) void pane.open(entries[0].path);
+      return;
+    }
     const folders = entries.filter((entry) => entry.directory);
     const files = entries.flatMap((entry) => (!entry.directory && entry.id ? [entry.id] : []));
     if (folders.length === 1 && files.length === 0 && !inNewTab) void pane.open(folders[0].path);
@@ -471,6 +479,32 @@
     } catch (reason) {
       notify(String(reason), { error: true });
     }
+  }
+
+  /** Selected items the waiting program can accept. */
+  const pickChosen = $derived.by(() => {
+    if (!startup?.pick) return [];
+    const wanted = startup.pick.folders;
+    const items = active?.selectedEntries().filter((entry) => entry.directory === wanted) ?? [];
+    return startup.pick.multi ? items : items.slice(0, 1);
+  });
+
+  async function answerPick(paths: string[] | null) {
+    const pick = startup?.pick;
+    const answer = paths && pick && !pick.multi ? paths.slice(0, 1) : paths;
+    try { await api.finishPick(answer); }
+    catch (reason) { notify(String(reason), { error: true }); }
+  }
+
+  function confirmPick() {
+    const chosen = pickChosen.map((entry) => entry.path);
+    if (chosen.length > 0) void answerPick(chosen);
+    else if (startup?.pick?.folders && active?.folder) void answerPick([active.folder.path]);
+  }
+
+  async function changePickType(index: number) {
+    await api.setPickFilter(index).catch((reason) => notify(String(reason), { error: true }));
+    await active?.refresh();
   }
 
   function confirmOpen() {
@@ -924,7 +958,7 @@
 
   /** The folder tabs of this window, for the "Last used window" start. */
   async function rememberTabs() {
-    if (startup?.report) return;
+    if (startup?.report || startup?.pick) return;
     const slot = slots[activeIndex] ?? slots[0];
     const tabs = (slot?.tabs ?? []).flatMap((tab) => (tab.kind === "folder" && tab.pane.path ? [tab] : []));
     if (tabs.length === 0) return;
@@ -2394,6 +2428,18 @@
   }
 
   /** Only reads: a test run must never change how Windows opens folders. */
+  /** Driven by Test-Interface.ps1, which plays the program waiting for the answer. */
+  async function pickSelfTest() {
+    const pane = active!;
+    await waitFor(() => pane.complete && (pane.pages[0]?.length ?? 0) > 0, 10000, "the picker's listing");
+    const items = pane.pages[0] ?? [];
+    const filtered = items.some((entry) => entry.directory) && items.filter((entry) => !entry.directory).every((entry) => entry.name.endsWith(".txt"));
+    if (!filtered) { await answerPick(null); return; }
+    await pane.select(items.findIndex((entry) => !entry.directory));
+    await tick();
+    document.querySelector<HTMLButtonElement>(".pick-open")!.click();
+  }
+
   async function startupSteps(check: Check) {
     openSettings("startup");
     await waitFor(() => !!document.querySelector('[aria-label="When Firewol opens"]'), 5000, "the Startup section");
@@ -2412,7 +2458,7 @@
     await waitFor(() => !!document.querySelector('[aria-label="Folders and Win+E"] button'), 5000, "the Default apps section");
     check("Default apps shows the folder switch", true);
     const refused = await api.setDefaultFolders(true).then(() => false, (reason) => String(reason).includes("test run"));
-    const probeRefused = await api.setDialogProbe(true).then(() => false, (reason) => String(reason).includes("test run"));
+    const probeRefused = await api.setFileDialogs(true).then(() => false, (reason) => String(reason).includes("test run"));
     check("a test run cannot change the default apps", refused && probeRefused);
     settingsSection = "appearance";
     const slot = slots[0];
@@ -2721,6 +2767,11 @@
       await painted();
       const firstListMs = info.sinceStartMs + performance.now() - start;
       lists[0]?.focus();
+      if (info.pick) {
+        await api.pickReady();
+        if (info.selfTest) await pickSelfTest();
+        return;
+      }
       if (info.selfTest && info.label === "main") await selfTest(info);
       else if (info.selfTest) await api.saveReport({ label: info.label, ready: true, adopted: info.adopt?.kind ?? null, path: active?.folder?.path ?? null });
       // The self-test ends with a real click on each window's close button (see Test-Interface.ps1).
@@ -2911,6 +2962,9 @@
       </div>
     </div>
 
+    {#if startup?.pick}
+      <PickBar pick={startup.pick} chosen={pickChosen} folderName={active?.label ?? ""} onfilter={changePickType} onopen={confirmPick} oncancel={() => void answerPick(null)} />
+    {/if}
     <footer class="status" role="status" class:collapsed={settingsOnly && !transferRunning && !fatal}>
       {#if fatal || active?.error}
         <span class="error">{fatal || active?.error}</span>

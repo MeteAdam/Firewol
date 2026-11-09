@@ -29,6 +29,60 @@ pub struct Sort {
     pub group: bool,
 }
 
+/// Which items a listing keeps; folders stay so an Open window can still be browsed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ListFilter {
+    #[default]
+    All,
+    FoldersOnly,
+    /// Lowercase name endings such as `.png`.
+    Suffixes(Vec<String>),
+}
+
+impl ListFilter {
+    /// Reads a Windows pattern list such as `*.png;*.jpg`. A pattern that is not a plain
+    /// `*.ext`, like `*.*` or `report*`, shows everything rather than hiding what was asked for.
+    pub fn from_spec(spec: &str) -> Self {
+        let mut suffixes = Vec::new();
+        for pattern in spec
+            .split(';')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            match pattern.strip_prefix('*') {
+                Some(suffix)
+                    if suffix.starts_with('.')
+                        && suffix.len() > 1
+                        && !suffix.contains(['*', '?']) =>
+                {
+                    suffixes.push(suffix.to_lowercase());
+                }
+                _ => return Self::All,
+            }
+        }
+        if suffixes.is_empty() {
+            Self::All
+        } else {
+            Self::Suffixes(suffixes)
+        }
+    }
+
+    fn keeps(&self, directory: bool, name: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::FoldersOnly => directory,
+            Self::Suffixes(suffixes) => {
+                directory || {
+                    let name = name.to_lowercase();
+                    suffixes
+                        .iter()
+                        .any(|suffix| name.ends_with(suffix.as_str()))
+                }
+            }
+        }
+    }
+}
+
 /// One date section of a grouped listing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Group {
@@ -52,6 +106,7 @@ pub struct Directory {
     hide_hidden: bool,
     /// Set while the ordering is grouped, so the groups always match the rows.
     sections: Option<SectionStarts>,
+    filter: ListFilter,
 }
 
 impl Directory {
@@ -81,12 +136,18 @@ impl Directory {
             sort_ms: 0.0,
             hide_hidden: false,
             sections: None,
+            filter: ListFilter::All,
         })
     }
 
     /// Leaves items marked hidden or system out of the listing; call it before enumerating.
     pub fn hide_hidden_items(&mut self) {
         self.hide_hidden = true;
+    }
+
+    /// Lists only what `filter` keeps; call it before enumerating.
+    pub fn only(&mut self, filter: ListFilter) {
+        self.filter = filter;
     }
 
     pub fn path(&self) -> &Path {
@@ -214,6 +275,12 @@ impl Directory {
                     continue;
                 }
                 let directory = kind.is_dir();
+                if !self
+                    .filter
+                    .keeps(directory, &entry.file_name().to_string_lossy())
+                {
+                    continue;
+                }
                 let added = insert.execute(params![
                     next,
                     encode(&entry.file_name()),

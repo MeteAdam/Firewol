@@ -24,6 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows_core::{PCWSTR, w};
 
+use super::picker_pipe::is_pick_pipe;
 use super::resolve_directory;
 
 const USER_CLASSES: &str = r"Software\Classes";
@@ -41,6 +42,8 @@ const LOOP_WINDOW: Duration = Duration::from_secs(3);
 pub enum Launch {
     Default,
     Folder(PathBuf),
+    /// A program's Open window is waiting on this pipe for Firewol's answer.
+    Pick(String),
     /// Something only Explorer can show: Control Panel, the Recycle Bin, a library.
     HandOff(OsString),
 }
@@ -51,6 +54,13 @@ pub fn classify(mut arguments: impl Iterator<Item = OsString>) -> Launch {
         return Launch::Default;
     };
     let text = argument.to_string_lossy();
+    if text == "--pick" {
+        return arguments
+            .next()
+            .map(|pipe| pipe.to_string_lossy().into_owned())
+            .filter(|pipe| is_pick_pipe(pipe))
+            .map_or(Launch::Default, Launch::Pick);
+    }
     if text.starts_with('-') {
         return Launch::Default;
     }
@@ -510,62 +520,91 @@ impl FolderHandler {
     }
 }
 
-/// Windows' Open and Save window classes.
-const DIALOG_CLASSES: [&str; 2] = [
-    "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}",
-    "{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}",
-];
-const PROBE_NAME: &str = "firewol-picker";
-const PROBE_LOG: &str = "file-dialog-probe.log";
-const PROBE_BUILD_NAME: &str = "firewol_picker.dll";
+const OPEN_DIALOG_CLASS: &str = "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}";
+/// The Save class is only ever removed: the earlier test build registered it too.
+const DIALOG_CLASSES: [&str; 2] = [OPEN_DIALOG_CLASS, "{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}"];
+const PICKER_NAME: &str = "firewol-picker";
+const PICKER_BUILD_NAME: &str = "firewol_picker.dll";
 
-/// Copies the probe beside the installed program, named by its contents: a loaded DLL is locked,
-/// so a new build can never replace one that programs still have open.
-pub fn install_probe(current_executable: &Path, folder: &Path) -> Result<PathBuf> {
-    let built = current_executable
+fn built_picker(current_executable: &Path) -> Result<PathBuf> {
+    Ok(current_executable
         .parent()
         .context("The program has no folder")?
-        .join(PROBE_BUILD_NAME);
+        .join(PICKER_BUILD_NAME))
+}
+
+/// Copies the picker DLL beside the installed program, named by its contents: a loaded DLL is
+/// locked, so a new build can never replace one that programs still have open.
+pub fn install_picker(current_executable: &Path, folder: &Path) -> Result<PathBuf> {
+    let built = built_picker(current_executable)?;
     ensure!(
         built.is_file(),
-        "{PROBE_BUILD_NAME} was not built next to Firewol"
+        "{PICKER_BUILD_NAME} was not built next to Firewol"
     );
     let hash: String = digest(&built)?[..4]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
     fs::create_dir_all(folder)?;
-    let installed = folder.join(format!("{PROBE_NAME}-{hash}.dll"));
+    let installed = folder.join(format!("{PICKER_NAME}-{hash}.dll"));
     if !installed.is_file() {
-        fs::copy(&built, &installed).context("Copy the file dialog probe")?;
+        fs::copy(&built, &installed).context("Copy the file picker")?;
     }
+    remove_old_pickers(folder, &installed);
     Ok(installed)
 }
 
-/// Asks at the PC itself. The probe is loaded into every program that opens a file window.
-pub fn confirm_probe(owner: HWND) -> bool {
+/// Best effort: a DLL still loaded in some program stays until it closes.
+fn remove_old_pickers(folder: &Path, keep: &Path) {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(PICKER_NAME) && name.ends_with(".dll") && entry.path() != keep {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// The registered picker is not the one built next to this Firewol.
+pub fn picker_outdated(current_executable: &Path, registered: &Path) -> bool {
+    let Ok(built) = built_picker(current_executable) else {
+        return false;
+    };
+    // The installed copy has no build beside it; there is nothing newer to offer.
+    built.is_file()
+        && match (digest(&built), digest(registered)) {
+            (Ok(now), Ok(copy)) => now != copy,
+            _ => true,
+        }
+}
+
+/// Asks at the PC itself. The DLL is loaded into every program that opens a file window.
+pub fn confirm_picker(owner: HWND) -> bool {
     let answer = unsafe {
         MessageBoxW(
             Some(owner),
             w!(
-                "Programs that open an Open or Save window will load a small Firewol DLL.\n\n\
-                 It writes down the program's name and shows the normal Windows window. Windows \
-                 or antivirus software may flag this technique.\n\n\
+                "Programs that open an Open window will load a small Firewol DLL and show Firewol \
+                 instead.\n\n\
+                 If Firewol cannot answer, the normal Windows window opens. Save windows stay as \
+                 they are. Windows or antivirus software may flag this technique.\n\n\
                  You can turn this off in Settings, or run firewol-tauri.exe --restore-explorer."
             ),
-            w!("Record which programs use file windows?"),
+            w!("Open files through Firewol?"),
             MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2,
         )
     };
     answer == IDOK
 }
 
-/// The per-user registration that puts the probe in front of Windows' file windows.
-pub struct DialogProbe {
+/// The per-user registration that puts Firewol in front of Windows' Open window.
+pub struct FileDialogs {
     root: String,
 }
 
-impl DialogProbe {
+impl FileDialogs {
     pub fn for_user() -> Self {
         Self {
             root: USER_CLASSES.to_owned(),
@@ -581,31 +620,34 @@ impl DialogProbe {
     }
 
     fn is_ours(value: &str) -> bool {
-        value.to_lowercase().contains(PROBE_NAME)
+        value.to_lowercase().contains(PICKER_NAME)
     }
 
     pub fn is_enabled(&self) -> bool {
-        DIALOG_CLASSES.iter().all(|class| {
-            self.registered(class)
-                .is_some_and(|value| Self::is_ours(&value))
-        })
+        self.registered(OPEN_DIALOG_CLASS)
+            .is_some_and(|value| Self::is_ours(&value))
+    }
+
+    /// The DLL Windows loads for the Open window, when it is Firewol's.
+    pub fn registered_picker(&self) -> Option<PathBuf> {
+        self.registered(OPEN_DIALOG_CLASS)
+            .filter(|value| Self::is_ours(value))
+            .map(PathBuf::from)
     }
 
     /// Refuses to replace another program's registration.
     pub fn enable(&self, dll: &Path) -> Result<()> {
-        for class in DIALOG_CLASSES {
-            if let Some(value) = self.registered(class) {
-                ensure!(
-                    Self::is_ours(&value),
-                    "Another program already handles file windows"
-                );
-            }
+        if let Some(value) = self.registered(OPEN_DIALOG_CLASS) {
+            ensure!(
+                Self::is_ours(&value),
+                "Another program already handles Open windows"
+            );
         }
-        let written = DIALOG_CLASSES.iter().try_for_each(|class| {
-            let key = create_key(&self.server(class))?;
+        let written = (|| {
+            let key = create_key(&self.server(OPEN_DIALOG_CLASS))?;
             write_value(&key, PCWSTR::null(), &dll.display().to_string())?;
             write_value(&key, w!("ThreadingModel"), "Apartment")
-        });
+        })();
         if written.is_err() {
             let _ = self.disable();
         }
@@ -631,48 +673,9 @@ impl DialogProbe {
     }
 }
 
-/// Starts a new measurement.
-pub fn clear_probe_log(data: &Path) {
-    let _ = fs::remove_file(data.join(PROBE_LOG));
-}
-
-/// The programs seen so far, such as `Claude.exe (Open, Save)`, in the order they first appeared.
-pub fn probe_summary(data: &Path) -> Vec<String> {
-    let text = fs::read_to_string(data.join(PROBE_LOG)).unwrap_or_default();
-    let mut seen: Vec<(String, bool, bool)> = Vec::new();
-    for line in text.lines() {
-        let Some((kind, program)) = line.split_once('\t') else {
-            continue;
-        };
-        let name = Path::new(program).file_name().map_or_else(
-            || program.to_owned(),
-            |name| name.to_string_lossy().into_owned(),
-        );
-        let index = seen
-            .iter()
-            .position(|entry| entry.0 == name)
-            .unwrap_or_else(|| {
-                seen.push((name, false, false));
-                seen.len() - 1
-            });
-        match kind {
-            "open" => seen[index].1 = true,
-            "save" => seen[index].2 = true,
-            _ => {}
-        }
-    }
-    seen.into_iter()
-        .map(|(name, open, save)| match (open, save) {
-            (true, true) => format!("{name} (Open, Save)"),
-            (true, false) => format!("{name} (Open)"),
-            _ => format!("{name} (Save)"),
-        })
-        .collect()
-}
-
 /// Turns everything off from the command line, for when the interface cannot start.
 pub fn restore_from_command_line(data: &Path) -> Result<()> {
-    DialogProbe::for_user().disable()?;
+    FileDialogs::for_user().disable()?;
     FolderHandler::for_user(data).disable()
 }
 
@@ -785,15 +788,19 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_registers_both_windows_and_leaves_nothing() -> Result<()> {
+    fn the_picker_registers_the_open_window_and_leaves_nothing() -> Result<()> {
         let fixture = Fixture::new("probe")?;
-        let probe = DialogProbe {
+        let probe = FileDialogs {
             root: fixture.handler.root.clone(),
         };
         let dll = Path::new(r"C:\Apps\firewol-picker-ab12.dll");
         probe.enable(dll)?;
         assert!(probe.is_enabled());
-        let key = open_key(&probe.server(DIALOG_CLASSES[1])).context("the key")?;
+        assert!(
+            probe.registered(DIALOG_CLASSES[1]).is_none(),
+            "Save windows are left alone"
+        );
+        let key = open_key(&probe.server(DIALOG_CLASSES[0])).context("the key")?;
         assert_eq!(
             read_value(&key, w!("ThreadingModel")).as_deref(),
             Some("Apartment")
@@ -807,9 +814,9 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_will_not_replace_another_program() -> Result<()> {
+    fn the_picker_will_not_replace_another_program() -> Result<()> {
         let fixture = Fixture::new("foreign")?;
-        let probe = DialogProbe {
+        let probe = FileDialogs {
             root: fixture.handler.root.clone(),
         };
         let foreign = create_key(&probe.server(DIALOG_CLASSES[0]))?;
@@ -824,20 +831,6 @@ mod tests {
         assert_eq!(
             probe.registered(DIALOG_CLASSES[0]).as_deref(),
             Some(r"C:\Other\dialog.dll")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn the_summary_lists_each_program_once() -> Result<()> {
-        let data = tempfile::tempdir()?;
-        fs::write(
-            data.path().join(PROBE_LOG),
-            "open\tC:\\A\\Claude.exe\nsave\tC:\\A\\Claude.exe\nopen\tC:\\B\\app.exe\nopen\tC:\\A\\Claude.exe\n",
-        )?;
-        assert_eq!(
-            probe_summary(data.path()),
-            ["Claude.exe (Open, Save)", "app.exe (Open)"]
         );
         Ok(())
     }
@@ -865,6 +858,12 @@ mod tests {
             classify(args(file.as_os_str())),
             Launch::HandOff(_)
         ));
+        let pick = |pipe: &str| classify(["--pick".into(), pipe.into()].into_iter());
+        assert_eq!(
+            pick(r"\\.\pipe\firewol-pick-1-a"),
+            Launch::Pick(r"\\.\pipe\firewol-pick-1-a".into())
+        );
+        assert_eq!(pick(r"\\.\pipe\other"), Launch::Default);
         Ok(())
     }
 

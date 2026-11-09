@@ -24,6 +24,7 @@ use windows::Win32::UI::Shell::{
 use windows_core::{GUID, HSTRING, PWSTR, w};
 
 use super::icons;
+use super::menu_icons::{self, ResourceIcon};
 use super::shell_menu::{ShellItem, Target, clean_label, parse};
 
 /// `EXPCMDSTATE` values; 0 is enabled.
@@ -173,7 +174,11 @@ fn take_text(text: PWSTR) -> Option<String> {
 
 /// `path,index` from a handler; only programs and icon files can be served by key.
 fn icon_key(location: &str) -> Option<String> {
-    let path = location.rsplit_once(',').map_or(location, |(path, _)| path);
+    let path = match location.rsplit_once(',') {
+        Some((path, index)) if index.trim() == "0" => path,
+        Some(_) => return None,
+        None => location,
+    };
     let key = icons::key(Path::new(&path.trim_matches('"').replace('/', "\\")));
     key.starts_with("path:").then_some(key)
 }
@@ -186,7 +191,11 @@ pub(super) struct Modern {
 
 impl Modern {
     /// Reads the commands that apply to `target`, recording their ids in `allowed`.
-    pub(super) fn load(target: &Target, allowed: &mut HashSet<u32>) -> (Self, Vec<ShellItem>) {
+    pub(super) fn load(
+        target: &Target,
+        allowed: &mut HashSet<u32>,
+        mut store_icon: impl FnMut(ResourceIcon) -> String,
+    ) -> (Self, Vec<ShellItem>) {
         let mut modern = Self::default();
         let verbs: Vec<&Verb> = verbs()
             .iter()
@@ -223,7 +232,9 @@ impl Modern {
             }) else {
                 continue;
             };
-            if let Some(mut row) = modern.row(command, &array, allowed, &mut next, 0) {
+            if let Some(mut row) =
+                modern.row(command, &array, allowed, &mut next, 0, &mut store_icon)
+            {
                 // Packaged commands have no verb; the class id names them in any language.
                 row.verb = format!("{:?}", verb.clsid).to_lowercase();
                 rows.push(row);
@@ -240,6 +251,7 @@ impl Modern {
         allowed: &mut HashSet<u32>,
         next: &mut u32,
         depth: u32,
+        store_icon: &mut impl FnMut(ResourceIcon) -> String,
     ) -> Option<ShellItem> {
         let flags = unsafe { command.GetFlags() }.unwrap_or(0);
         if flags & ECF_ISSEPARATOR.0 as u32 != 0 {
@@ -256,10 +268,7 @@ impl Modern {
         if label.is_empty() {
             return None;
         }
-        let icon = unsafe { command.GetIcon(array) }
-            .ok()
-            .and_then(take_text)
-            .and_then(|location| icon_key(&location));
+        let location = unsafe { command.GetIcon(array) }.ok().and_then(take_text);
         let mut children = Vec::new();
         if flags & ECF_HASSUBCOMMANDS.0 as u32 != 0 && depth < MAX_DEPTH {
             let list = unsafe { command.EnumSubCommands() }.ok()?;
@@ -271,7 +280,7 @@ impl Modern {
                     break;
                 }
                 if let Some(child) = slot[0].take()
-                    && let Some(row) = self.row(child, array, allowed, next, depth + 1)
+                    && let Some(row) = self.row(child, array, allowed, next, depth + 1, store_icon)
                 {
                     children.push(row);
                 }
@@ -286,6 +295,11 @@ impl Modern {
             allowed.insert(id);
             self.commands.insert(id, command);
         }
+        let icon = location.as_deref().and_then(|location| {
+            menu_icons::modern(location)
+                .map(store_icon)
+                .or_else(|| icon_key(location))
+        });
         Some(ShellItem {
             id,
             label,

@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use super::menu_icons::ResourceIcon;
 use anyhow::{Result, ensure};
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::*;
@@ -27,6 +28,7 @@ type Reply = Option<Arc<Vec<u8>>>;
 
 struct Job {
     key: String,
+    resource: Option<ResourceIcon>,
     size: u32,
     deadline: Instant,
     reply: SyncSender<Reply>,
@@ -137,10 +139,12 @@ impl Worker {
                 continue;
             }
             *locked(&self.busy_since) = Some(Instant::now());
-            let extracted = allowed(&job.key)
-                .then(|| extract(&job.key, job.size).ok())
-                .flatten()
-                .map(Arc::new);
+            let extracted = match job.resource {
+                Some(resource) => extract_resource(&resource, job.size).ok(),
+                None if allowed(&job.key) => extract(&job.key, job.size).ok(),
+                None => None,
+            }
+            .map(Arc::new);
             if !self.finish_busy(generation) {
                 let _ = job.reply.send(extracted);
                 break;
@@ -188,7 +192,28 @@ impl Icons {
     }
 
     pub fn request(&self, key: String, size: u32) -> Option<Receiver<Reply>> {
-        if !valid_key(&key) || !(16..=256).contains(&size) {
+        if !valid_key(&key) {
+            return None;
+        }
+        self.submit(key, None, size)
+    }
+
+    pub fn request_menu_resource(
+        &self,
+        resource: ResourceIcon,
+        size: u32,
+    ) -> Option<Receiver<Reply>> {
+        let key = format!("resource:{}:{}", resource.path.display(), resource.index);
+        self.submit(key, Some(resource), size)
+    }
+
+    fn submit(
+        &self,
+        key: String,
+        resource: Option<ResourceIcon>,
+        size: u32,
+    ) -> Option<Receiver<Reply>> {
+        if !(16..=256).contains(&size) {
             return None;
         }
         self.replace_a_stuck_worker();
@@ -196,6 +221,7 @@ impl Icons {
         self.send
             .try_send(Message::Get(Job {
                 key,
+                resource,
                 size,
                 deadline: Instant::now() + TIMEOUT,
                 reply: send,
@@ -438,6 +464,29 @@ fn extract(key: &str, size: u32) -> Result<Vec<u8>> {
             }
         }
     };
+    encode_png(&mut pixels, size, size)
+}
+
+fn extract_resource(resource: &ResourceIcon, size: u32) -> Result<Vec<u8>> {
+    let mut icon = Icon(HICON::default());
+    let result = unsafe {
+        SHDefExtractIconW(
+            &HSTRING::from(resource.path.as_os_str()),
+            resource.index,
+            0,
+            Some(&mut icon.0),
+            None,
+            size,
+        )
+    };
+    result.ok()?;
+    ensure!(
+        !icon.0.is_invalid(),
+        "The resource has no icon at this index"
+    );
+    let dc = Dc(unsafe { CreateCompatibleDC(None) });
+    ensure!(!dc.0.is_invalid(), "Create icon DC");
+    let mut pixels = unmask(&dc, &icon, size)?;
     encode_png(&mut pixels, size, size)
 }
 

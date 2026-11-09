@@ -43,6 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::{HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR, w};
 
 use super::icons::{bitmap_info, encode_png};
+use super::menu_icons::{Archiver, Classic, ResourceIcon};
 use super::modern_menu::Modern;
 
 const FIRST_ID: u32 = 1;
@@ -144,7 +145,13 @@ pub enum Target {
 }
 
 type Task = Box<dyn FnOnce(HWND) + Send>;
-type IconStore = Arc<Mutex<HashMap<String, Arc<Vec<u8>>>>>;
+#[derive(Clone)]
+pub enum MenuIcon {
+    Bitmap(Arc<Vec<u8>>),
+    Resource(ResourceIcon),
+}
+
+type IconStore = Arc<Mutex<HashMap<String, MenuIcon>>>;
 
 struct Worker {
     tasks: Sender<Task>,
@@ -340,7 +347,7 @@ impl ShellMenus {
         }
     }
 
-    pub fn icon(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+    pub fn icon(&self, key: &str) -> Option<MenuIcon> {
         lock(&self.icons).get(key).cloned()
     }
 }
@@ -569,9 +576,18 @@ fn open(window: HWND, label: String, owner: isize, target: Target) -> Result<Vec
             .context("Read the Windows menu")?;
     }
     let mut next_icon = 0;
-    let classic = walk(&mut session, popup, 0, &mut next_icon);
+    let classic = walk(
+        &mut session,
+        popup,
+        0,
+        &mut next_icon,
+        &Classic::default(),
+        None,
+    );
     // Windows 11 lists its packaged commands above the classic ones.
-    let (modern, mut items) = Modern::load(&target, &mut session.commands);
+    let (modern, mut items) = Modern::load(&target, &mut session.commands, |icon| {
+        store_icon(MenuIcon::Resource(icon), generation, &mut next_icon)
+    });
     session.modern = modern;
     items.extend(classic);
     let items = placed(tidy(items));
@@ -622,7 +638,14 @@ pub(super) fn clean_label(text: &str) -> String {
 }
 
 /// Walks one menu level from its end, so removing an item keeps earlier positions valid.
-fn walk(session: &mut Session, menu: HMENU, depth: u32, next_icon: &mut u32) -> Vec<ShellItem> {
+fn walk(
+    session: &mut Session,
+    menu: HMENU,
+    depth: u32,
+    next_icon: &mut u32,
+    classic: &Classic,
+    inherited_archiver: Option<Archiver>,
+) -> Vec<ShellItem> {
     let count = unsafe { GetMenuItemCount(Some(menu)) };
     let mut items = Vec::new();
     for position in (0..count.max(0) as u32).rev() {
@@ -663,6 +686,7 @@ fn walk(session: &mut Session, menu: HMENU, depth: u32, next_icon: &mut u32) -> 
         let label = clean_label(&String::from_utf16_lossy(
             &text[..(info.cch as usize).min(MAX_LABEL - 1)],
         ));
+        let archiver = Archiver::of(&name).or(inherited_archiver);
         let mut children = Vec::new();
         if !info.hSubMenu.is_invalid() && depth < MAX_DEPTH {
             session.handlers.forward(
@@ -670,7 +694,14 @@ fn walk(session: &mut Session, menu: HMENU, depth: u32, next_icon: &mut u32) -> 
                 WPARAM(info.hSubMenu.0 as usize),
                 LPARAM(position as isize),
             );
-            children = tidy(walk(session, info.hSubMenu, depth + 1, next_icon));
+            children = tidy(walk(
+                session,
+                info.hSubMenu,
+                depth + 1,
+                next_icon,
+                classic,
+                archiver,
+            ));
         }
         // An owner-drawn item without text cannot be shown, and neither can an empty submenu.
         if label.is_empty() || (!info.hSubMenu.is_invalid() && children.is_empty()) {
@@ -684,7 +715,19 @@ fn walk(session: &mut Session, menu: HMENU, depth: u32, next_icon: &mut u32) -> 
         } else {
             info.hbmpItem
         };
-        let icon = store_icon(bitmap, session.generation, next_icon);
+        let icon = ((bitmap.0 as isize) > 11)
+            .then(|| bitmap_png(bitmap))
+            .flatten()
+            .map(|png| MenuIcon::Bitmap(Arc::new(png)))
+            .or_else(|| {
+                classic
+                    .resolve(
+                        archiver,
+                        (depth == 0 && name.is_empty()).then_some(label.as_str()),
+                    )
+                    .map(MenuIcon::Resource)
+            })
+            .map(|icon| store_icon(icon, session.generation, next_icon));
         items.push(ShellItem {
             id: info.wID,
             label,
@@ -800,20 +843,15 @@ fn allowed_uri(uri: &str) -> bool {
             .is_some_and(|page| page.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
-fn store_icon(bitmap: HBITMAP, generation: u64, next: &mut u32) -> Option<String> {
-    // Values up to 11 are HBMMENU_* constants, and -1 asks for owner drawing.
-    if (bitmap.0 as isize) <= 11 {
-        return None;
-    }
-    let png = bitmap_png(bitmap)?;
+fn store_icon(icon: MenuIcon, generation: u64, next: &mut u32) -> String {
     let key = format!("menu:{generation}:{next}");
     *next += 1;
     STORE.with_borrow(|store| {
         if let Some(store) = store {
-            lock(store).insert(key.clone(), Arc::new(png));
+            lock(store).insert(key.clone(), icon);
         }
     });
-    Some(key)
+    key
 }
 
 fn bitmap_png(bitmap: HBITMAP) -> Option<Vec<u8>> {
@@ -1080,11 +1118,43 @@ mod tests {
     #[test]
     #[ignore = "prints this machine's menus for review"]
     fn dump_menus_for_common_types() -> Result<()> {
-        fn print(items: &[ShellItem], depth: usize) {
+        let icons = super::super::icons::Icons::start()?;
+        fn print(
+            items: &[ShellItem],
+            depth: usize,
+            menus: &ShellMenus,
+            icons: &super::super::icons::Icons,
+        ) {
             for item in items.iter().filter(|item| !item.separator) {
-                println!("{}{:?} | {}", "  ".repeat(depth + 1), item.verb, item.label);
+                let image = match item.icon.as_deref().and_then(|key| menus.icon(key)) {
+                    Some(MenuIcon::Bitmap(_)) => "bitmap",
+                    Some(MenuIcon::Resource(resource)) => {
+                        if icons
+                            .request_menu_resource(resource, 16)
+                            .and_then(|reply| {
+                                reply
+                                    .recv_timeout(super::super::icons::TIMEOUT)
+                                    .ok()
+                                    .flatten()
+                            })
+                            .is_some_and(|png| png.starts_with(b"\x89PNG\r\n\x1a\n"))
+                        {
+                            "resource"
+                        } else {
+                            "resource unavailable"
+                        }
+                    }
+                    None if item.icon.is_some() => "file",
+                    None => "none",
+                };
+                println!(
+                    "{}{:?} | {} | {image}",
+                    "  ".repeat(depth + 1),
+                    item.verb,
+                    item.label
+                );
                 if depth < 1 {
-                    print(&item.children, depth + 1);
+                    print(&item.children, depth + 1, menus, icons);
                 }
             }
         }
@@ -1137,7 +1207,7 @@ mod tests {
             let items = menus.open("dump", 0, target);
             println!("== {name} ({} ms)", started.elapsed().as_millis());
             match items {
-                Ok(items) => print(&items, 0),
+                Ok(items) => print(&items, 0, &menus, &icons),
                 Err(error) => println!("  ERROR {error:#}"),
             }
         }

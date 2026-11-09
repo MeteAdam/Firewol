@@ -4,6 +4,7 @@ mod directory;
 mod drives;
 pub mod elevation;
 pub mod icons;
+mod menu_icons;
 mod modern_menu;
 mod operations;
 mod places;

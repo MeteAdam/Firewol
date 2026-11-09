@@ -2577,7 +2577,7 @@
       <div class="mi info" role="presentation"><span class="menu-blank"></span><span class="label">{node.label}</span><span class="sc">{node.keys}</span></div>
     {:else}
       <button class="mi" class:on={node.radio} class:wait={node.wait} role={node.radio !== undefined ? "menuitemradio" : node.check !== undefined ? "menuitemcheckbox" : "menuitem"} aria-checked={node.radio ?? node.check} aria-haspopup={node.children ? "menu" : undefined} title={node.title} disabled={node.disabled} onclick={(event) => activate(node, level, event)} onmouseenter={(event) => menuHover(event.currentTarget, node, level)}>
-        {#if node.image}<FileIcon icon={node.image} />
+        {#if node.image}<FileIcon icon={node.image} fallback={false} />
         {:else if node.glyph}<span class="glyph" style:color={node.color}>{node.glyph}</span>
         {:else if node.icon && node.color}<span class="glyph" style:color={node.color}><Icon name={node.icon} /></span>
         {:else if node.icon}<Icon name={node.icon} />

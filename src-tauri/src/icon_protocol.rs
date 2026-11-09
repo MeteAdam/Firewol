@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use firewol_core::explorer::icons::{Icons, TIMEOUT};
-use firewol_core::explorer::shell_menu::ShellMenus;
+use firewol_core::explorer::shell_menu::{MenuIcon, ShellMenus};
 use tauri::{UriSchemeResponder, http::Request};
 
 pub fn respond(
@@ -25,16 +25,20 @@ pub fn respond(
     // The file behind a `path:` key can change, so only type icons stay in WebView2's disk cache.
     let lasting = key.starts_with("ext:");
     // A menu's icons are already in memory and last only as long as the menu.
-    let ready = key.starts_with("menu:").then(|| menus.icon(&key));
-    let reply = if ready.is_none() {
-        icons.request(key, size)
+    let (ready, reply) = if key.starts_with("menu:") {
+        match menus.icon(&key) {
+            Some(MenuIcon::Bitmap(png)) => (Some(png), None),
+            Some(MenuIcon::Resource(resource)) => {
+                (None, icons.request_menu_resource(resource, size))
+            }
+            None => (None, None),
+        }
     } else {
-        None
+        (None, icons.request(key, size))
     };
     tauri::async_runtime::spawn_blocking(move || {
-        let data: Option<Arc<Vec<u8>>> = ready
-            .flatten()
-            .or_else(|| reply.and_then(|reply| reply.recv_timeout(TIMEOUT).ok().flatten()));
+        let data: Option<Arc<Vec<u8>>> =
+            ready.or_else(|| reply.and_then(|reply| reply.recv_timeout(TIMEOUT).ok().flatten()));
         let response = tauri::http::Response::builder()
             .status(if data.is_some() { 200 } else { 404 })
             .header("Content-Type", "image/png")

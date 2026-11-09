@@ -26,6 +26,7 @@ use super::{ItemId, attributes, display_path, unix_seconds};
 use crate::file_identity::information;
 
 const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+const MAX_NEW_FILE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -269,6 +270,10 @@ pub fn create_folder(into: &ItemId, name: &OsStr) -> Result<ItemId> {
 
 /// Never replaces an existing file.
 pub fn create_file(into: &ItemId, name: &OsStr, contents: &str) -> Result<ItemId> {
+    ensure!(
+        contents.len() <= MAX_NEW_FILE_BYTES,
+        "A new file starts from a small template"
+    );
     let path = new_item_path(into, name)?;
     let mut file = OpenOptions::new()
         .write(true)
@@ -362,6 +367,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(made.path())?, "first");
         assert!(create_folder(&into, OsStr::new("b"))?.path().is_dir());
         assert!(create_file(&into, OsStr::new(r"..\escape.txt"), "x").is_err());
+        let huge = "x".repeat(MAX_NEW_FILE_BYTES + 1);
+        assert!(create_file(&into, OsStr::new("huge.txt"), &huge).is_err());
         Ok(())
     }
 

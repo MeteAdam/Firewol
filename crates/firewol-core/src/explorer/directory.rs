@@ -193,6 +193,12 @@ impl Directory {
     }
 
     pub fn list_dir(&self, page: PageRequest, cancel: &Cancellation) -> Result<ItemPage> {
+        self.rows(page, cancel)?.items(cancel)
+    }
+
+    /// The database half of a page. Opening the items can stall on a slow share, so a caller
+    /// holding this directory's lock finishes with [`ListedRows::items`] after releasing it.
+    pub fn rows(&self, page: PageRequest, cancel: &Cancellation) -> Result<ListedRows> {
         let sql = if self.is_sorted() {
             "SELECT name, directory, size, modified, attributes FROM ordering AS o JOIN listing AS l ON l.row = o.row WHERE o.position >= ?1 + 1 ORDER BY o.position LIMIT ?2"
         } else {
@@ -205,7 +211,7 @@ impl Directory {
             cancel.check()?;
             let name: Vec<u8> = row.get(0)?;
             let size: Option<i64> = row.get(2)?;
-            items.push(Item::listed(
+            items.push((
                 self.path.join(decode(&name)),
                 row.get(1)?,
                 size.map(u64::try_from).transpose()?,
@@ -214,10 +220,31 @@ impl Directory {
             ));
         }
         let end = page.offset.saturating_add(items.len() as u32);
-        Ok(ItemPage {
+        Ok(ListedRows {
             offset: page.offset,
-            items,
+            rows: items,
             has_more: end < self.count || !self.is_complete(),
+        })
+    }
+}
+
+pub struct ListedRows {
+    offset: u32,
+    rows: Vec<(PathBuf, bool, Option<u64>, i64, u32)>,
+    has_more: bool,
+}
+
+impl ListedRows {
+    pub fn items(self, cancel: &Cancellation) -> Result<ItemPage> {
+        let mut items = Vec::with_capacity(self.rows.len());
+        for (path, directory, size, modified, attributes) in self.rows {
+            cancel.check()?;
+            items.push(Item::listed(path, directory, size, modified, attributes));
+        }
+        Ok(ItemPage {
+            offset: self.offset,
+            items,
+            has_more: self.has_more,
         })
     }
 }

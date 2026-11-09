@@ -138,6 +138,7 @@ fn the_last_folder_is_saved_best_effort() -> Result<()> {
     fs::set_permissions(&file, permissions.clone())?;
     session.remember_folder(fixture.path().join("third"));
     session.flush_folder();
+    #[allow(clippy::permissions_set_readonly_false, reason = "Windows-only test")]
     permissions.set_readonly(false);
     fs::set_permissions(&file, permissions)?;
     Ok(())

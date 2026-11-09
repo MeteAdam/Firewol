@@ -153,6 +153,7 @@ pub struct SearchReader {
     index: SearchIndex,
 }
 
+const MAX_NAME_UNITS: usize = 255;
 const MAX_INDEXED_PATH: usize = 4096;
 const MAX_INDEXED_DEPTH: usize = 256;
 
@@ -383,6 +384,11 @@ impl SearchReader {
                 term: None,
             }
         } else {
+            // No file name is longer, and a long phrase cannot be interrupted once SQLite starts.
+            ensure!(
+                text.encode_utf16().count() <= MAX_NAME_UNITS,
+                "Enter a search term of up to {MAX_NAME_UNITS} characters"
+            );
             let text = text.to_lowercase();
             if text.chars().count() < 3 {
                 let escaped = text

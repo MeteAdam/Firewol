@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -44,7 +44,15 @@ pub struct Folders {
     show_hidden: OnceLock<HiddenSource>,
     views: OnceLock<ViewSource>,
     pub volumes: Arc<Volumes>,
+    running_indexes: Arc<AtomicUsize>,
 }
+
+// Each open folder holds a database and a thread, and each index a crawler and a watcher. Far above
+// what four windows of tabs need, low enough that a runaway caller cannot exhaust the machine.
+const MAX_PANES: usize = 256;
+const MAX_OPEN_PER_WINDOW: usize = 128;
+const MAX_INDEXES: usize = 32;
+const MAX_QUERY_BYTES: usize = 4096;
 
 struct Folder {
     owner: String,
@@ -136,6 +144,10 @@ impl Folders {
     ) -> Result<Navigation> {
         let (target, position, sequence, reuse) = {
             let mut panes = lock(&self.panes);
+            ensure!(
+                panes.len() < MAX_PANES || panes.contains_key(pane),
+                "Too many tabs are open"
+            );
             let state = panes.entry(pane.to_owned()).or_default();
             ensure!(
                 state.owner.is_empty() || state.owner == owner,
@@ -247,6 +259,14 @@ impl Folders {
     }
 
     fn open(&self, owner: &str, path: &Path, sort: SortView, notify: Notify) -> Result<FolderView> {
+        ensure!(
+            lock(&self.open)
+                .values()
+                .filter(|folder| folder.owner == owner)
+                .count()
+                < MAX_OPEN_PER_WINDOW,
+            "Too many folders are open in this window"
+        );
         let cancel = Cancellation::default();
         let listing = Cancellation::default();
         let mut directory = self.directory(path)?;
@@ -339,12 +359,15 @@ impl Folders {
         let styles = self.styles();
         let sort = sort_core(sort);
         *lock(&folder.sort) = sort;
-        let mut directory = lock(&folder.directory);
-        directory.sort(sort, &folder.cancel)?;
-        let items = directory.list_dir(page(offset), &folder.cancel)?;
+        let (rows, sorted) = {
+            let mut directory = lock(&folder.directory);
+            directory.sort(sort, &folder.cancel)?;
+            let rows = directory.rows(page(offset), &folder.cancel)?;
+            (rows, directory.is_sorted())
+        };
         Ok(Page {
-            sorted: directory.is_sorted(),
-            ..convert(items, &styles)
+            sorted,
+            ..convert(rows.items(&folder.cancel)?, &styles)
         })
     }
 
@@ -362,15 +385,23 @@ impl Folders {
 
     pub fn locate(&self, id: u64, items: &[ItemRef]) -> Result<Vec<Option<u32>>> {
         let folder = self.get(id)?;
-        let directory = lock(&folder.directory);
-        items
+        // The folder check comes first: only an item of this folder is worth opening.
+        let names = items
             .iter()
             .map(|reference| {
                 let item = item_id(reference)?;
-                if item.verify().is_err() || item.path().parent() != Some(folder.path.as_path()) {
-                    return Ok(None);
-                }
-                directory.position(item.path().file_name().unwrap_or_default())
+                Ok(
+                    (item.path().parent() == Some(folder.path.as_path()) && item.verify().is_ok())
+                        .then(|| item.path().file_name().unwrap_or_default().to_owned()),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let directory = lock(&folder.directory);
+        names
+            .into_iter()
+            .map(|name| match name {
+                Some(name) => directory.position(&name),
+                None => Ok(None),
             })
             .collect()
     }
@@ -386,10 +417,16 @@ impl Folders {
                 error: None,
             });
         }
+        ensure!(
+            self.running_indexes.load(Ordering::Relaxed) < MAX_INDEXES,
+            "Too many folders are being indexed"
+        );
         let data = data_dir()?;
         let index = SearchIndex::create(&data)?;
         search.index = Some(index.clone());
         drop(search);
+        self.running_indexes.fetch_add(1, Ordering::Relaxed);
+        let running = self.running_indexes.clone();
         thread::spawn(move || {
             let result = index.watch_folder(&folder.path, &data, &folder.cancel, |count| {
                 lock(&folder.search).ready = Some(count);
@@ -411,6 +448,7 @@ impl Folders {
                     error: Some(format!("{error:#}")),
                 }));
             }
+            running.fetch_sub(1, Ordering::Relaxed);
         });
         Ok(IndexState {
             id,
@@ -445,6 +483,10 @@ impl Folders {
         request: &SearchRequest,
         read: impl FnOnce(&mut SearchReader, SearchQuery, &Cancellation) -> Result<T>,
     ) -> Result<T> {
+        ensure!(
+            request.text.len() <= MAX_QUERY_BYTES,
+            "The search term is too long"
+        );
         let folder = self.get(request.id)?;
         let key = QueryKey {
             text: request.text.clone(),
@@ -667,6 +709,34 @@ fn entry(item: &Item, styles: &Styles) -> Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panes_and_open_folders_are_capped() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let path = text(fixture.path());
+        let folders = Folders::default();
+        let notify: Notify = Arc::new(|_| {});
+        let go = |pane: &str| {
+            folders.navigate(
+                "main",
+                pane,
+                Some(&path),
+                Step::New,
+                SortView::default(),
+                notify.clone(),
+            )
+        };
+        for pane in 0..MAX_OPEN_PER_WINDOW {
+            go(&format!("main:{pane}"))?;
+        }
+        let refused = go("main:one-too-many").err().context("A folder too many")?;
+        assert!(refused.to_string().contains("Too many folders"));
+        lock(&folders.panes)
+            .extend((0..MAX_PANES).map(|pane| (format!("x:{pane}"), Pane::default())));
+        let refused = go("main:new").err().context("A pane too many")?;
+        assert!(refused.to_string().contains("Too many tabs"));
+        Ok(())
+    }
 
     #[test]
     fn suspended_and_adopted_tabs_keep_history_and_release_listings() -> Result<()> {

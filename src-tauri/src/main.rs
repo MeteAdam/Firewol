@@ -1179,6 +1179,7 @@ fn notifier(app: &AppHandle) -> Notify {
         let _ = match notice {
             Notice::Progress(progress) => app.emit(contract::FOLDER_PROGRESS, progress),
             Notice::Index(state) => app.emit(contract::INDEX_STATE, state),
+            Notice::Changed(id) => app.emit(contract::FOLDER_CHANGED, id),
         };
     })
 }

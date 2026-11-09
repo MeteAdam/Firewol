@@ -2,6 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use windows::Win32::Foundation::{ERROR_NOTIFY_ENUM_DIR, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
@@ -13,7 +14,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
 
-use super::decode;
+use super::{Cancellation, decode};
 
 pub(super) struct Watch {
     directory: File,
@@ -21,10 +22,44 @@ pub(super) struct Watch {
     request: Box<OVERLAPPED>,
     buffer: Box<[u32; 16_384]>,
     pending: bool,
+    recursive: bool,
+}
+
+/// How long a folder must stay quiet, and how long a burst may last, before one change is reported.
+const QUIET_MS: u32 = 200;
+const BURST: Duration = Duration::from_secs(1);
+
+/// Calls `changed` after each burst of changes directly inside `path`, until `cancel` fires.
+/// A folder Windows cannot watch (some network shares) simply never reports; a watch that breaks
+/// later (the folder was deleted) reports once more, so the caller finds out by reading it.
+pub fn watch_directory(path: &Path, cancel: &Cancellation, mut changed: impl FnMut()) {
+    let Ok(mut watch) = Watch::open(path, false) else {
+        return;
+    };
+    let mut wait = || -> Result<()> {
+        while !cancel.is_cancelled() {
+            if !watch.changed(None, QUIET_MS)? {
+                continue;
+            }
+            let burst = Instant::now();
+            while burst.elapsed() < BURST
+                && !cancel.is_cancelled()
+                && watch.changed(None, QUIET_MS)?
+            {}
+            if !cancel.is_cancelled() {
+                changed();
+            }
+        }
+        Ok(())
+    };
+    let broken = wait().is_err();
+    if broken && !cancel.is_cancelled() {
+        changed();
+    }
 }
 
 impl Watch {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, recursive: bool) -> Result<Self> {
         let directory = OpenOptions::new()
             .access_mode(FILE_LIST_DIRECTORY.0)
             .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED).0)
@@ -39,6 +74,7 @@ impl Watch {
             }),
             buffer: Box::new([0; 16_384]),
             pending: false,
+            recursive,
         };
         watch.arm()?;
         Ok(watch)
@@ -55,7 +91,7 @@ impl Watch {
                 self.handle(),
                 self.buffer.as_mut_ptr().cast(),
                 size_of_val(self.buffer.as_ref()) as u32,
-                true,
+                self.recursive,
                 FILE_NOTIFY_CHANGE_FILE_NAME
                     | FILE_NOTIFY_CHANGE_DIR_NAME
                     | FILE_NOTIFY_CHANGE_LAST_WRITE

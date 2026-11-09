@@ -25,6 +25,7 @@ export type { ElevationView } from "./bindings/ElevationView";
 export const SETTINGS_CHANGED = "settings-changed";
 export const ICON_CHANGED = "icon-changed";
 export const DRIVES_CHANGED = "drives-changed";
+export const FOLDER_CHANGED = "folder-changed";
 export type { SortView } from "./bindings/SortView";
 export type { SortColumn } from "./bindings/SortColumn";
 export type { TabSnapshot } from "./bindings/TabSnapshot";

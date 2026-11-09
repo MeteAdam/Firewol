@@ -281,7 +281,7 @@ impl SearchIndex {
             .strip_prefix(root)
             .ok()
             .filter(|path| !path.as_os_str().is_empty());
-        let mut watch = Watch::open(root).context("Watch the selected folder for changes")?;
+        let mut watch = Watch::open(root, true).context("Watch the selected folder for changes")?;
         while !cancel.is_cancelled() {
             let started = Instant::now();
             let count = cancellable(&mut db, cancel, |db| {

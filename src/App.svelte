@@ -17,6 +17,7 @@
     SETTINGS_CHANGED,
     ICON_CHANGED,
     DRIVES_CHANGED,
+    FOLDER_CHANGED,
     type SettingsView,
     type SettingsPatch,
     type AppearancePatch,
@@ -2328,6 +2329,25 @@
     await waitFor(() => slot.activeTab === slot.tabs[0].id && !!pane.folder, 5000, "the first tab again");
   }
 
+  /** `create_file` sends no operation result, so only the folder watcher can show its files. */
+  async function outsideChangeSteps(pane: Pane, check: Check) {
+    const into = pane.folder!.item!;
+    const first = await api.createFile(into, "watched-first.txt", "");
+    await waitFor(() => names(pane).includes("watched-first.txt"), 5000, "the new file in the list");
+    check("a file created outside appears without a refresh", true);
+    pane.renaming = 0;
+    const second = await api.createFile(into, "watched-second.txt", "");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    check("an open rename field holds the refresh back", pane.renaming === 0 && !names(pane).includes("watched-second.txt"), names(pane).join());
+    pane.renaming = null;
+    await waitFor(() => names(pane).includes("watched-second.txt"), 5000, "the deferred refresh");
+    check("the refresh follows when the rename ends", true);
+    const done = nextDone();
+    await api.recycle([first, second]);
+    await done;
+    await waitFor(() => !names(pane).includes("watched-first.txt"), 5000, "the recycled files to leave");
+  }
+
   async function toastSteps(check: Check) {
     // An earlier step's toast must be gone, or this one only swaps its text and does not slide in.
     toast = undefined;
@@ -2478,6 +2498,7 @@
       if (extra) { slot.reorder(extra.id, originalTab.id); check("tabs reorder", slot.tabs[0].id === extra.id); await closeTab(slot, extra); }
       check("closing a tab preserves the active tab", slot.activeTab === originalTab.id && slot.tabs.length === 1);
       await middleClickSteps(source, slot, check);
+      await outsideChangeSteps(source, check);
       await toastSteps(check);
       await toggleSplit();
       check("closing split view merges tabs", slots.length === 1 && slots[0].tabs.length === 2);
@@ -2568,6 +2589,7 @@
     const unlisten = [
       listen<FolderProgress>(FOLDER_PROGRESS, (event) => panes.forEach((pane) => pane.progress(event.payload))),
       listen<IndexState>(INDEX_STATE, (event) => panes.forEach((pane) => pane.indexed(event.payload))),
+      listen<number>(FOLDER_CHANGED, (event) => panes.forEach((pane) => pane.changed(event.payload))),
       listen<VolumeState>(VOLUME_STATE, (event) => volumeChanged(event.payload)),
       listen<TransferStatus>(TRANSFER_PROGRESS, (event) => (transfer = event.payload)),
       listen<OperationDone>(OPERATION_DONE, (event) => finished(event.payload)),

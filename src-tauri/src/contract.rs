@@ -16,6 +16,7 @@ pub const SESSION_CHANGED: &str = "session-changed";
 pub const SETTINGS_CHANGED: &str = "settings-changed";
 pub const ICON_CHANGED: &str = "icon-changed";
 pub const DRIVES_CHANGED: &str = "drives-changed";
+pub const FOLDER_CHANGED: &str = "folder-changed";
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "camelCase")]

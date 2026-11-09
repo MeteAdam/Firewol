@@ -14,6 +14,7 @@ mod settings;
 pub mod shell_menu;
 pub mod volume;
 mod watch;
+pub use watch::watch_directory;
 
 pub use directory::{Directory, ListedRows, Sort, SortColumn};
 pub use drives::{Drive, drives, go_to_folders, is_remote, watch_devices};

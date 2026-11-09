@@ -9,7 +9,7 @@ use anyhow::{Context, Result, ensure};
 use firewol_core::explorer::{
     Cancellation, Directory, Filters, FolderKey, FolderStyle, History, Item, ItemId, ItemPage,
     PAGE_SIZE, SavedView, SearchIndex, SearchQuery, SearchReader, Sort, SortColumn, data_dir,
-    display_path, icons, page,
+    display_path, icons, page, watch_directory,
 };
 
 use crate::contract::{
@@ -26,6 +26,8 @@ const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 pub enum Notice {
     Progress(FolderProgress),
     Index(IndexState),
+    /// Something changed inside this open folder.
+    Changed(u64),
 }
 
 pub type Notify = Arc<dyn Fn(Notice) + Send + Sync>;
@@ -289,6 +291,11 @@ impl Folders {
             query: Mutex::default(),
         });
         lock(&self.open).insert(id, folder.clone());
+        // Lives as long as this open folder; a reload keeps it. Holds no reference to the folder.
+        let (watched, stop, changed) = (path.clone(), folder.cancel.clone(), notify.clone());
+        thread::spawn(move || {
+            watch_directory(&watched, &stop, || changed(Notice::Changed(id)));
+        });
         if !complete {
             thread::spawn(move || enumerate(id, &folder, &listing, &notify));
         }

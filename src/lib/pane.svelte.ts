@@ -24,6 +24,9 @@ export const itemKey = (item: ItemRef) => `${item.volume}:${item.index}:${item.p
 const KEEP = PAGE * 6;
 // Typing waits this long before searching, so a burst of keys runs one query.
 const DEBOUNCE_MS = 150;
+// Automatic refreshes rest at least this long, and look again this often while they must wait.
+const REFRESH_REST_MS = 1000;
+const REFRESH_RETRY_MS = 500;
 /** Ctrl+A selects at most this many rows; file operations accept 32 items at a time anyway. */
 export const SELECT_ALL_LIMIT = 10_000;
 const tagged = (items: Entry[]) => items.some((entry) => hasTags(entry.style));
@@ -89,6 +92,12 @@ export class Pane {
   #search = 0;
   #resultPending = new Set<number>();
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The folder changed on disk since the listing was last read. */
+  #stale = false;
+  /** A quiet refresh is reading the new listing. */
+  #quiet = false;
+  #nextRefresh = 0;
 
   constructor(id: string) {
     this.id = id;
@@ -250,19 +259,77 @@ export class Pane {
     return this.folder ? this.#go("reload", this.folder.path) : undefined;
   }
 
-  async #go(step: Step, path: string | null = null) {
+  /** The folder changed on disk. Bursts arrive merged; slow folders are re-read less often. */
+  changed(id: number) {
+    if (id !== this.folder?.id) return;
+    this.#stale = true;
+    this.#scheduleRefresh(Math.max(0, this.#nextRefresh - Date.now()));
+  }
+
+  #scheduleRefresh(wait: number) {
+    if (this.#refreshTimer === undefined) this.#refreshTimer = setTimeout(() => void this.#quietRefresh(), wait);
+  }
+
+  async #quietRefresh() {
+    this.#refreshTimer = undefined;
+    if (!this.#stale || !this.folder) return;
+    // A reload would close the rename field and send search results back to the top.
+    if (this.renaming !== null || this.searching) {
+      this.#scheduleRefresh(REFRESH_RETRY_MS);
+      return;
+    }
+    this.#stale = false;
+    const started = performance.now();
+    await this.#go("reload", this.folder.path, true);
+    this.#nextRefresh = Date.now() + Math.max(REFRESH_REST_MS, 4 * (performance.now() - started));
+  }
+
+  /** Waits for the new listing to finish and reads the pages on screen, so nothing flickers. */
+  async #readQuietly(view: FolderView, navigation: number) {
+    let progress = await api.folderProgress(view.id);
+    while (!progress.complete) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (navigation !== this.#navigation) return undefined;
+      progress = await api.folderProgress(view.id);
+    }
+    const offsets = new Set([0, ...Object.keys(this.pages).map(Number)].filter((offset) => offset === 0 || offset < progress.count));
+    const pages: Record<number, Entry[]> = {};
+    await Promise.all([...offsets].map(async (offset) => {
+      pages[offset] = (await api.listPage(view.id, offset, this.sort)).items;
+    }));
+    return { pages, view: { ...view, count: progress.count, complete: true, sort_ms: progress.sort_ms } };
+  }
+
+  async #go(step: Step, path: string | null = null, quiet = false) {
     const navigation = ++this.#navigation;
     let result: Navigation;
+    let quietPages: Record<number, Entry[]> | undefined;
+    let view: FolderView;
+    this.#quiet = quiet;
     try {
       result = await api.navigate(this.id, path, step, this.sort);
+      view = result.folder;
+      if (quiet) {
+        const read = await this.#readQuietly(view, navigation);
+        if (!read) return;
+        view = read.view;
+        quietPages = read.pages;
+      }
     } catch (reason) {
       if (navigation === this.#navigation && !String(reason).includes("newer navigation")) {
         this.error = String(reason);
       }
       return;
+    } finally {
+      if (navigation === this.#navigation) this.#quiet = false;
     }
     if (navigation !== this.#navigation) return;
-    const view = result.folder;
+    // A rename started while the new listing was read: its row number must stay valid.
+    if (quiet && this.renaming !== null) {
+      this.#stale = true;
+      this.#scheduleRefresh(REFRESH_RETRY_MS);
+      return;
+    }
     const reload = step === "reload" && view.path === (this.folder?.path ?? this.path);
     // The core reloads an open folder in place; its live index survives under the same id.
     const sameFolder = reload && view.id === this.folder?.id;
@@ -278,7 +345,7 @@ export class Pane {
     this.count = view.count;
     this.complete = view.complete;
     this.sortMs = view.sort_ms;
-    this.pages = { 0: view.page.items };
+    this.pages = quietPages ?? { 0: view.page.items };
     this.canBack = result.canBack;
     this.canForward = result.canForward;
     this.renaming = null;
@@ -309,7 +376,8 @@ export class Pane {
   }
 
   progress(event: FolderProgress) {
-    if (event.id !== this.folder?.id) return;
+    // A quiet refresh shows the new listing only when it is whole.
+    if (event.id !== this.folder?.id || this.#quiet) return;
     this.count = event.count;
     const finished = event.complete && !this.complete;
     this.complete = event.complete;
@@ -579,6 +647,10 @@ export class Pane {
 
   release() {
     clearTimeout(this.#timer);
+    clearTimeout(this.#refreshTimer);
+    this.#refreshTimer = undefined;
+    this.#stale = false;
+    this.#quiet = false;
     this.#navigation++;
     this.#search++;
     this.#revision++;

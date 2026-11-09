@@ -284,6 +284,9 @@ export class Pane {
     this.renaming = null;
     this.error = "";
     if (!reload) {
+      // The old folder's items must never stay selected, even if the new folder selects nothing.
+      this.selected = -1;
+      this.selection = new Map();
       this.scroll = 0;
       clearTimeout(this.#timer);
       this.#search++;

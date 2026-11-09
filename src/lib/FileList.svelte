@@ -366,12 +366,13 @@
     window.removeEventListener("keydown", boxKey, true);
   }
 
-  function rowMenu(event: MouseEvent, row: number) {
+  async function rowMenu(event: MouseEvent, row: number) {
     event.preventDefault();
     event.stopPropagation();
-    if (!pane.isSelected(row)) void pane.select(row);
+    // A row still loading is selected first, or the menu would act on the previous selection.
+    if (!pane.isSelected(row)) await pane.select(row);
     else pane.selected = row;
-    onmenu(event.clientX, event.clientY, true);
+    if (pane.isSelected(row)) onmenu(event.clientX, event.clientY, true);
   }
 
   function areaMenu(event: MouseEvent) {

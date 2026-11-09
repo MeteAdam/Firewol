@@ -895,10 +895,14 @@
     if (address.trim()) void active?.open(address.trim());
   }
 
+  /** The item the open menu was raised on; later selection changes must not retarget it. */
+  let menuItem: ItemRef | undefined;
+
   /** Opens a menu that fits the window, with focus on its first enabled item. */
   async function showMenu(kind: MenuKind, x: number, y: number, target?: Place) {
     if (!menu) menuReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const opening = ++menuOpening;
+    menuItem = focused?.id ?? undefined;
     loadAttributes(kind);
     await Promise.race([loadShellMenu(kind, target), new Promise((resolve) => setTimeout(resolve, SHELL_SETTLE_MS))]);
     if (opening !== menuOpening) return;
@@ -910,7 +914,7 @@
 
   function loadAttributes(kind: MenuKind) {
     menuAttributes = null;
-    const target = kind === "item" && selectedCount === 1 ? focused?.id : kind === "area" ? active?.folder?.item : undefined;
+    const target = kind === "item" && selectedCount === 1 ? menuItem : kind === "area" ? active?.folder?.item : undefined;
     if (!target) return;
     const opening = menuOpening;
     void api.itemAttributes(target).then((state) => { if (opening === menuOpening) menuAttributes = state; }, () => {});
@@ -966,7 +970,7 @@
   }
 
   /** The target of the open menu: the clicked item, or the open folder on empty space. */
-  const menuTarget = () => (menu?.kind === "item" ? focused?.id : active?.folder?.item) ?? undefined;
+  const menuTarget = () => (menu?.kind === "item" ? menuItem : active?.folder?.item) ?? undefined;
   const reportFailure = (reason: unknown) => notify(String(reason), { error: true });
   const canElevateShell = () => settings?.elevation.mode === "all_executables" || !!settings?.elevation.executables.some((path) => /\\system32\\cmd\.exe$/i.test(path));
 

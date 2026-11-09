@@ -1,5 +1,6 @@
 mod pipe;
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::os::windows::ffi::OsStringExt;
@@ -32,7 +33,7 @@ use windows::Win32::System::LibraryLoader::{
     LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
 };
 
-use super::search::{INSERT, IndexedItem, cancellable, rebuild, reset};
+use super::search::{INSERT, IndexedItem, cancellable, indexable, rebuild, reset, rest_after};
 use super::{Cancellation, SearchIndex, attributes, encode, resolve_directory};
 use crate::file_identity::{FileIdentity, identity, open_item};
 use crate::ntfs::{self, Records};
@@ -79,6 +80,7 @@ impl SearchIndex {
         );
         let mut db = self.writer()?;
         let pipe = Pipe::launch(drive, serial, cancel)?;
+        let mut visibility = Visibility::default();
         let mut block = Vec::new();
         let mut initial = false;
         let mut writing = false;
@@ -91,6 +93,7 @@ impl SearchIndex {
                     }
                     db.execute_batch("BEGIN IMMEDIATE")?;
                     reset(&db)?;
+                    visibility = Visibility::default();
                     writing = true;
                     initial = true;
                     changed = true;
@@ -109,6 +112,7 @@ impl SearchIndex {
                             &volume_hint,
                             &root,
                             &excluded,
+                            &mut visibility,
                             FileIdentity {
                                 volume: serial,
                                 index: reference,
@@ -181,6 +185,7 @@ fn resolve_reference(
     hint: &File,
     root: &Path,
     excluded: &Path,
+    visibility: &mut Visibility,
     expected: FileIdentity,
 ) -> Option<VisibleItem> {
     let descriptor = FILE_ID_DESCRIPTOR {
@@ -210,7 +215,8 @@ fn resolve_reference(
     if path == root
         || !path.starts_with(root)
         || path.starts_with(excluded)
-        || !visible_parent(&path)
+        || !indexable(&path)
+        || !visibility.parent_visible(&path)
     {
         return None;
     }
@@ -243,16 +249,47 @@ fn path_of(handle: HANDLE) -> Option<PathBuf> {
     }
 }
 
+fn listable(folder: &Path) -> bool {
+    OpenOptions::new()
+        .access_mode(FILE_LIST_DIRECTORY.0)
+        .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+        .open(folder)
+        .ok()
+        .and_then(|file| attributes(&file).ok())
+        .is_some_and(|(directory, reparse, _, _)| directory && !reparse)
+}
+
 pub(super) fn visible_parent(path: &Path) -> bool {
-    path.ancestors().skip(1).all(|parent| {
-        OpenOptions::new()
-            .access_mode(FILE_LIST_DIRECTORY.0)
-            .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
-            .open(parent)
-            .ok()
-            .and_then(|file| attributes(&file).ok())
-            .is_some_and(|(directory, reparse, _, _)| directory && !reparse)
-    })
+    path.ancestors().skip(1).all(listable)
+}
+
+/// [`visible_parent`] for a whole pass over a volume, where most files share their ancestors.
+/// Bounded and short-lived, because a volume can hold millions of folders.
+#[derive(Default)]
+struct Visibility(HashMap<PathBuf, bool>);
+
+impl Visibility {
+    const REMEMBERED: usize = 1024;
+
+    fn parent_visible(&mut self, path: &Path) -> bool {
+        let mut unknown = Vec::new();
+        let mut visible = true;
+        for ancestor in path.ancestors().skip(1) {
+            if let Some(known) = self.0.get(ancestor) {
+                visible = *known;
+                break;
+            }
+            unknown.push(ancestor);
+        }
+        if self.0.len() + unknown.len() > Self::REMEMBERED {
+            self.0.clear();
+        }
+        for ancestor in unknown.into_iter().rev() {
+            visible = visible && listable(ancestor);
+            self.0.insert(ancestor.to_owned(), visible);
+        }
+        visible
+    }
 }
 
 fn update_reference(db: &Connection, row: i64, item: Option<&VisibleItem>) -> Result<bool> {
@@ -297,7 +334,12 @@ fn feed_journal(drive: char, serial: u32, pipe: &mut Sender) -> Result<()> {
     let mut references = Vec::with_capacity(8192);
     let mut buffer = vec![0; 64 * 1024];
     let mut was_active = false;
+    let mut rest_until = None;
     while pipe.connected() {
+        // A folder renamed anywhere on the volume restarts the pass, so space restarts out.
+        while rest_until.is_some_and(|until| Instant::now() < until) && pipe.connected() {
+            thread::sleep(Duration::from_millis(250));
+        }
         let wait = Instant::now();
         let before = loop {
             match journal(&volume) {
@@ -317,6 +359,7 @@ fn feed_journal(drive: char, serial: u32, pipe: &mut Sender) -> Result<()> {
         };
         was_active = true;
         pipe.send(RESET, &[])?;
+        let started = Instant::now();
         let enumerated = ntfs::enumerate(&volume, |records| {
             references.clear();
             for record in records {
@@ -329,6 +372,7 @@ fn feed_journal(drive: char, serial: u32, pipe: &mut Sender) -> Result<()> {
             continue;
         }
         enumerated?;
+        rest_until = Some(Instant::now() + rest_after(started.elapsed()).max(MIN_RESCAN));
         let mut cursor = before.NextUsn;
         while pipe.connected() {
             let after = match journal(&volume) {
@@ -357,6 +401,8 @@ fn feed_journal(drive: char, serial: u32, pipe: &mut Sender) -> Result<()> {
     }
     Ok(())
 }
+
+const MIN_RESCAN: Duration = Duration::from_secs(5);
 
 fn journal_lost(error: &anyhow::Error) -> bool {
     error
@@ -488,7 +534,7 @@ mod tests {
         let source = directory.join("initial-火.txt");
         fs::write(&source, b"reference lookup")?;
         let id = identity(&open_item(&source)?)?;
-        let resolved = resolve_reference(&hint, &root, &excluded, id)
+        let resolved = resolve_reference(&hint, &root, &excluded, &mut Visibility::default(), id)
             .context("Resolve a visible NTFS file by reference")?;
         assert_eq!(resolved.path, source);
 
@@ -510,7 +556,7 @@ mod tests {
 
         let renamed = directory.join("renamed-火.txt");
         fs::rename(&source, &renamed)?;
-        let resolved = resolve_reference(&hint, &root, &excluded, id)
+        let resolved = resolve_reference(&hint, &root, &excluded, &mut Visibility::default(), id)
             .context("Resolve the renamed NTFS file")?;
         assert!(update_reference(&db, id.index as i64, Some(&resolved))?);
         assert!(reader.search(&search("initial"), &cancel)?.items.is_empty());
@@ -520,7 +566,9 @@ mod tests {
         );
         let hidden = data.join("excluded.txt");
         fs::rename(&renamed, &hidden)?;
-        assert!(resolve_reference(&hint, &root, &excluded, id).is_none());
+        assert!(
+            resolve_reference(&hint, &root, &excluded, &mut Visibility::default(), id).is_none()
+        );
         assert!(update_reference(&db, id.index as i64, None)?);
         assert!(reader.search(&search("renamed"), &cancel)?.items.is_empty());
         Ok(())

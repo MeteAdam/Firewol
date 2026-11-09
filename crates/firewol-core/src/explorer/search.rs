@@ -1,4 +1,5 @@
 use std::fs::{self, ReadDir};
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -152,6 +153,17 @@ pub struct SearchReader {
     index: SearchIndex,
 }
 
+const MAX_INDEXED_PATH: usize = 4096;
+const MAX_INDEXED_DEPTH: usize = 256;
+
+/// Every row stores its whole path and opening a path gets slower with depth, so a crafted tree
+/// of thousands of levels could cost gigabytes and hours. No real tree gets near these limits.
+pub(super) fn indexable(path: &Path) -> bool {
+    path.as_os_str().len() <= 4 * MAX_INDEXED_PATH
+        && path.as_os_str().encode_wide().count() <= MAX_INDEXED_PATH
+        && path.components().count() <= MAX_INDEXED_DEPTH
+}
+
 pub(super) const INSERT: &str = "INSERT INTO entries (id, path, directory, name_key, extension, size, modified, file_ref, file_volume)
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 
@@ -225,10 +237,12 @@ impl SearchIndex {
             .filter(|path| !path.as_os_str().is_empty());
         let mut watch = Watch::open(root).context("Watch the selected folder for changes")?;
         while !cancel.is_cancelled() {
+            let started = Instant::now();
             let count = cancellable(&mut db, cancel, |db| {
                 rebuild_folder(db, root, &excluded, cancel)
             })?;
             updated(count);
+            let rest = rest_after(started.elapsed());
             while !cancel.is_cancelled() {
                 if watch.changed(relative_excluded, 200)? {
                     let start = Instant::now();
@@ -236,6 +250,11 @@ impl SearchIndex {
                         && !cancel.is_cancelled()
                         && watch.changed(relative_excluded, 150)?
                     {}
+                    // Constant writes under a large tree must not mean constant full rebuilds.
+                    let start = Instant::now();
+                    while start.elapsed() < rest && !cancel.is_cancelled() {
+                        watch.changed(relative_excluded, 150)?;
+                    }
                     break;
                 }
             }
@@ -442,6 +461,11 @@ impl IndexedItem<'_> {
     }
 }
 
+/// How long to wait before the next full pass, in proportion to what the last one cost.
+pub(super) fn rest_after(took: Duration) -> Duration {
+    (took * 4).min(Duration::from_secs(300))
+}
+
 pub(super) fn reset(db: &Connection) -> Result<()> {
     db.execute_batch(RESET)?;
     Ok(())
@@ -484,7 +508,7 @@ fn rebuild_folder(
             };
             let Ok(entry) = entry else { continue };
             let path = entry.path();
-            if path == excluded {
+            if path == excluded || !indexable(&path) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };

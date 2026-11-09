@@ -354,6 +354,25 @@ pub struct PickType {
     pub spec: String,
 }
 
+/// An item of the open folder whose name matches what was typed.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct PickMatch {
+    pub name: String,
+    pub path: String,
+    pub directory: bool,
+    pub row: u32,
+}
+
+/// What a typed name or path turned out to be.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct PickResolved {
+    #[ts(type = "'file' | 'folder' | 'none'")]
+    pub kind: String,
+    pub path: String,
+}
+
 /// What a program asked of its Open window; this window answers it.
 #[derive(Clone, Serialize, TS)]
 #[ts(export)]

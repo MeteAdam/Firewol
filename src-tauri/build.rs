@@ -16,6 +16,8 @@ fn main() {
             "remember_tabs",
             "set_file_dialogs",
             "pick_ready",
+            "pick_matches",
+            "pick_resolve",
             "finish_pick",
             "set_pick_filter",
             "set_default_folders",

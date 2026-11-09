@@ -38,6 +38,7 @@
     type ShellMenuItem,
     type MenuPlaces,
     type ItemAttributesView,
+    type PickMatch,
   } from "./lib/contract";
   import FileIcon from "./lib/FileIcon.svelte";
   import FileList from "./lib/FileList.svelte";
@@ -404,7 +405,9 @@
   }
 
   function newPane() {
-    return new Pane(`${startup?.label ?? "main"}:${++paneCounter}`);
+    const pane = new Pane(`${startup?.label ?? "main"}:${++paneCounter}`);
+    if (startup?.pick) pane.autoSelect = false;
+    return pane;
   }
 
   function notify(message: string, options: { undo?: boolean; error?: boolean } = {}) {
@@ -500,6 +503,38 @@
     const chosen = pickChosen.map((entry) => entry.path);
     if (chosen.length > 0) void answerPick(chosen);
     else if (startup?.pick?.folders && active?.folder) void answerPick([active.folder.path]);
+  }
+
+  let pickBar = $state<PickBar>();
+
+  const searchPick = (text: string) => (active?.folder ? api.pickMatches(active.folder.id, text) : Promise.resolve([]));
+
+  async function choosePickMatch(match: PickMatch) {
+    const pane = active;
+    if (!pane) return;
+    if (match.directory && !startup?.pick?.folders) {
+      await pane.open(match.path);
+      pickBar?.focus();
+      return;
+    }
+    await pane.select(match.row);
+    lists[activeIndex]?.reveal(match.row);
+  }
+
+  /** Enter in the File name field: a file is the answer, a folder is opened. */
+  async function openTypedName(text: string) {
+    const pane = active;
+    if (!pane?.folder || !startup?.pick) return;
+    try {
+      const found = await api.pickResolve(pane.folder.path, text);
+      if (found.kind === "folder") {
+        await pane.open(found.path);
+        pickBar?.focus();
+      } else if (found.kind === "file" && !startup.pick.folders) void answerPick([found.path]);
+      else notify(`Nothing named ${text.trim()} here`, { error: true });
+    } catch (reason) {
+      notify(String(reason), { error: true });
+    }
   }
 
   async function changePickType(index: number) {
@@ -2434,9 +2469,18 @@
     await waitFor(() => pane.complete && (pane.pages[0]?.length ?? 0) > 0, 10000, "the picker's listing");
     const items = pane.pages[0] ?? [];
     const filtered = items.some((entry) => entry.directory) && items.filter((entry) => !entry.directory).every((entry) => entry.name.endsWith(".txt"));
-    if (!filtered) { await answerPick(null); return; }
-    await pane.select(items.findIndex((entry) => !entry.directory));
-    await tick();
+    const untouched = pane.selection.size === 0 && !!document.querySelector<HTMLButtonElement>(".pick-open")?.disabled;
+    if (!filtered || !untouched) { await answerPick(null); return; }
+    // Types the name of the file in the middle of the list and takes the suggestion.
+    const name = items.filter((entry) => !entry.directory).at(-1)!.name;
+    const input = document.querySelector<HTMLInputElement>(".pick-name")!;
+    input.value = name.slice(1, 6);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitFor(() => !!document.querySelector(".match"), 5000, "the suggestions");
+    const option = [...document.querySelectorAll<HTMLButtonElement>(".match")].find((item) => item.textContent?.trim() === name);
+    if (!option) { await answerPick(null); return; }
+    option.click();
+    await waitFor(() => pane.selection.size === 1 && input.value === name, 5000, "the suggestion to select its row");
     document.querySelector<HTMLButtonElement>(".pick-open")!.click();
   }
 
@@ -2769,6 +2813,7 @@
       lists[0]?.focus();
       if (info.pick) {
         await api.pickReady();
+        pickBar?.focus();
         if (info.selfTest) await pickSelfTest();
         return;
       }
@@ -2963,9 +3008,9 @@
     </div>
 
     {#if startup?.pick}
-      <PickBar pick={startup.pick} chosen={pickChosen} folderName={active?.label ?? ""} onfilter={changePickType} onopen={confirmPick} oncancel={() => void answerPick(null)} />
+      <PickBar bind:this={pickBar} pick={startup.pick} chosen={pickChosen} onfilter={changePickType} onopen={confirmPick} oncancel={() => void answerPick(null)} onsearch={searchPick} onmatch={choosePickMatch} ontyped={openTypedName} onresize={() => void appWindow.startResizeDragging("SouthEast")} />
     {/if}
-    <footer class="status" role="status" class:collapsed={settingsOnly && !transferRunning && !fatal}>
+    <footer class="status" role="status" class:collapsed={(settingsOnly && !transferRunning && !fatal) || !!startup?.pick} class:picking={!!startup?.pick}>
       {#if fatal || active?.error}
         <span class="error">{fatal || active?.error}</span>
       {:else if active}
@@ -3152,6 +3197,7 @@
   .body.settings-only { padding: 8px 12px 0 8px; }
   .glyph { display: inline-flex; justify-content: center; flex: none; width: 16px; color: var(--accent); }
   .status.collapsed { height: 12px; overflow: hidden; visibility: hidden; }
+  .status.picking { height: 0; }
   .status { display: flex; align-items: center; gap: 12px; flex: none; height: 32px; padding: 0 16px 0 20px; font-size: 12px; color: var(--muted); }
   .grow { flex-grow: 1; }
   .space { flex: none; white-space: nowrap; }

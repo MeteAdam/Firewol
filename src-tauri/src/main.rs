@@ -26,8 +26,8 @@ use firewol_core::explorer::icons::{self, Icons};
 use firewol_core::explorer::picker_pipe::{self, PickClient, PickRequest};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
 use firewol_core::explorer::{
-    ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, SavedView, Session, actions, custom_icon,
-    data_dir, default_handler, display_path, elevation, home, is_remote,
+    ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, PickWindow, SavedView, Session, actions,
+    custom_icon, data_dir, default_handler, display_path, elevation, home, is_remote,
 };
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::webview::NewWindowResponse;
@@ -62,6 +62,8 @@ struct App {
     last_focused: Mutex<String>,
     /// Windows answering another program's Open window, by label.
     pickers: Mutex<HashMap<String, Picker>>,
+    /// Where each Open window is now, saved when it closes.
+    pick_windows: Mutex<HashMap<String, PickWindow>>,
 }
 
 struct Picker {
@@ -541,12 +543,16 @@ fn run_pick(app: &AppHandle, pipe: &str) -> anyhow::Result<()> {
         "{PICK_LABEL}{}",
         state.next_window.fetch_add(1, Ordering::Relaxed) + 1
     );
-    let start = request
-        .folder
+    let settings = app.state::<Files>().0.settings();
+    let usable = |folder: &Path| firewol_core::explorer::resolve_directory(folder).ok();
+    // The last place anything was chosen from comes first, in every program.
+    let start = settings
+        .pick_folder
         .as_deref()
-        .and_then(|folder| firewol_core::explorer::resolve_directory(folder).ok())
+        .and_then(usable)
+        .or_else(|| request.folder.as_deref().and_then(usable))
         .or_else(|| {
-            let (tabs, active) = app.state::<Files>().0.settings().startup_tabs();
+            let (tabs, active) = settings.startup_tabs();
             tabs.get(active).cloned()
         })
         .map_or_else(home, Ok)?;
@@ -584,6 +590,8 @@ fn run_pick(app: &AppHandle, pipe: &str) -> anyhow::Result<()> {
     if let Some(title) = title {
         let _ = window.set_title(&title);
     }
+    place_pick_window(&window, settings.pick_window);
+    let _ = window.show();
     let _ = window.set_focus();
     // The program gave up or closed: its window has no one to answer any more.
     while lock(&state.pickers).contains_key(&label) {
@@ -597,13 +605,113 @@ fn run_pick(app: &AppHandle, pipe: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Puts an Open window where the last one was, unless that spot is on no connected screen.
+fn place_pick_window(window: &WebviewWindow, saved: Option<PickWindow>) {
+    let Some(saved) = saved.filter(|saved| saved.width > 0 && saved.height > 0) else {
+        note_pick_window(&window.as_ref().window());
+        return;
+    };
+    let (center_x, center_y) = (
+        saved.x.saturating_add((saved.width / 2) as i32),
+        saved.y.saturating_add((saved.height / 2) as i32),
+    );
+    let on_screen = window.available_monitors().is_ok_and(|monitors| {
+        monitors.iter().any(|monitor| {
+            let (place, size) = (monitor.position(), monitor.size());
+            (place.x..place.x + size.width as i32).contains(&center_x)
+                && (place.y..place.y + size.height as i32).contains(&center_y)
+        })
+    });
+    let _ = window.set_size(tauri::PhysicalSize::new(saved.width, saved.height));
+    // Built centred, which is also where a window from a removed screen belongs.
+    if on_screen {
+        let _ = window.set_position(tauri::PhysicalPosition::new(saved.x, saved.y));
+    }
+    if saved.maximized {
+        let _ = window.maximize();
+    }
+    note_pick_window(&window.as_ref().window());
+}
+
+/// Follows an Open window as it moves. A maximized window keeps its restored rectangle.
+fn note_pick_window(window: &Window) {
+    if !window.label().starts_with(PICK_LABEL) || window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    // These wait for the main thread, so they must come before the lock: the main thread takes
+    // the same lock when the window moves.
+    let maximized = window.is_maximized().unwrap_or(false);
+    let place = window.outer_position();
+    let size = window.inner_size();
+    let state = window.state::<App>();
+    let mut windows = lock(&state.pick_windows);
+    let entry = windows.entry(window.label().to_owned()).or_default();
+    entry.maximized = maximized;
+    if !maximized
+        && let (Ok(place), Ok(size)) = (place, size)
+        && size.width > 0
+    {
+        entry.x = place.x;
+        entry.y = place.y;
+        entry.width = size.width;
+        entry.height = size.height;
+    }
+}
+
+/// Up to this many suggestions fit above the File name field.
+const PICK_MATCHES: usize = 12;
+
+#[tauri::command]
+async fn pick_matches(
+    window: Window,
+    state: State<'_, App>,
+    id: u64,
+    text: String,
+) -> Result<Vec<contract::PickMatch>, String> {
+    if !window.label().starts_with(PICK_LABEL) {
+        return Err("This window is not choosing a file".into());
+    }
+    let folders = state.folders.clone();
+    blocking(move || folders.pick_matches(id, &text, PICK_MATCHES)).await
+}
+
+/// What a typed name, relative to `base`, or a pasted path refers to.
+#[tauri::command]
+async fn pick_resolve(
+    window: Window,
+    base: String,
+    text: String,
+) -> Result<contract::PickResolved, String> {
+    if !window.label().starts_with(PICK_LABEL) {
+        return Err("This window is not choosing a file".into());
+    }
+    blocking(move || {
+        let typed = text.trim().trim_matches('"');
+        let path = Path::new(&base).join(typed);
+        let kind = match fs::metadata(&path) {
+            Ok(item) if item.is_dir() => "folder",
+            Ok(_) => "file",
+            Err(_) => "none",
+        };
+        Ok(contract::PickResolved {
+            kind: kind.to_owned(),
+            path: folders::text(&path),
+        })
+    })
+    .await
+}
+
 /// The window is on screen; the waiting program stops timing the start.
 #[tauri::command]
-fn pick_ready(window: Window, state: State<'_, App>) -> Result<(), String> {
+async fn pick_ready(window: Window, state: State<'_, App>) -> Result<(), String> {
     let client = lock(&state.pickers)
         .get(window.label())
         .map(|picker| picker.client.clone());
-    client.map_or(Ok(()), |client| client.ready().map_err(message))
+    match client {
+        // A write can wait on the other program, so it never runs on the interface thread.
+        Some(client) => blocking(move || client.ready()).await,
+        None => Ok(()),
+    }
 }
 
 /// Answers the program and closes the window; `None` is Cancel.
@@ -611,6 +719,7 @@ fn pick_ready(window: Window, state: State<'_, App>) -> Result<(), String> {
 async fn finish_pick(
     window: Window,
     state: State<'_, App>,
+    files: State<'_, Files>,
     paths: Option<Vec<String>>,
 ) -> Result<(), String> {
     let picker = lock(&state.pickers).remove(window.label());
@@ -631,7 +740,23 @@ async fn finish_pick(
             {
                 return Err("This program cannot open that item".into());
             }
-            picker.client.finish(&paths)
+            let answered = picker.client.finish(&paths);
+            // Remembered for every program, so the next Open window starts here.
+            let folder = if picker.request.folders {
+                paths.first().cloned()
+            } else {
+                paths
+                    .first()
+                    .and_then(|path| path.parent().map(Path::to_owned))
+            };
+            let session = files.0.clone();
+            let _ = blocking(move || {
+                session
+                    .update_settings(|settings| settings.pick_folder = folder)
+                    .map(drop)
+            })
+            .await;
+            answered
         }
     };
     let _ = window.destroy();
@@ -998,7 +1123,7 @@ async fn menu_places() -> Result<MenuPlaces, String> {
                 .into_iter()
                 .map(|(name, path)| GoToFolder {
                     name: name.to_owned(),
-                    path: text(&path),
+                    path: folders::text(&path),
                 })
                 .collect(),
             windows_terminal: actions::windows_terminal_installed(),
@@ -1374,6 +1499,7 @@ async fn adopt_pane(
 }
 
 fn build_window(app: &AppHandle, label: &str) -> tauri::Result<WebviewWindow> {
+    let picking = label.starts_with(PICK_LABEL);
     let mut arguments = BROWSER_ARGS.to_owned();
     // These could open a debugging port, so a release build never reads them.
     if cfg!(debug_assertions)
@@ -1382,10 +1508,17 @@ fn build_window(app: &AppHandle, label: &str) -> tauri::Result<WebviewWindow> {
         arguments.push(' ');
         arguments.push_str(&extra);
     }
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()));
+    let builder = if picking { builder.center() } else { builder };
+    builder
         .title("Firewol")
-        .inner_size(1280.0, 800.0)
+        .inner_size(
+            if picking { 1040.0 } else { 1280.0 },
+            if picking { 700.0 } else { 800.0 },
+        )
         .min_inner_size(640.0, 420.0)
+        // An Open window appears only once it stands where it was left.
+        .visible(!picking)
         .decorations(false)
         .additional_browser_args(&arguments)
         .on_navigation(|url| own_page(url.scheme(), url.host_str()))
@@ -1633,6 +1766,7 @@ fn main() {
             window_count: AtomicU32::new(1),
             last_focused: Mutex::new("main".to_owned()),
             pickers: Mutex::default(),
+            pick_windows: Mutex::default(),
             report: std::env::var_os("FIREWOL_SPIKE_REPORT")
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from),
@@ -1711,12 +1845,21 @@ fn main() {
                 lock(&state.windows).remove(window.label());
                 // Closing the window any other way is what Cancel means.
                 if let Some(picker) = lock(&state.pickers).remove(window.label()) {
-                    let _ = picker.client.cancel();
+                    std::thread::spawn(move || {
+                        let _ = picker.client.cancel();
+                    });
+                }
+                if let Some(place) = lock(&state.pick_windows).remove(window.label()) {
+                    let files = window.state::<Files>();
+                    let _ = files
+                        .0
+                        .update_settings(|settings| settings.pick_window = Some(place));
                 }
                 if state.window_count.fetch_sub(1, Ordering::Relaxed) == 1 {
                     window.state::<Files>().0.flush_folder();
                 }
             }
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) => note_pick_window(window),
             WindowEvent::Focused(focused) => {
                 if *focused {
                     *lock(&window.state::<App>().last_focused) = window.label().to_owned();
@@ -1732,6 +1875,8 @@ fn main() {
             set_default_folders,
             set_file_dialogs,
             pick_ready,
+            pick_matches,
+            pick_resolve,
             finish_pick,
             set_pick_filter,
             navigate,

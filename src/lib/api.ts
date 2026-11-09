@@ -25,6 +25,8 @@ import type {
   FolderDisplay,
   FolderGroup,
   DefaultAppsView,
+  PickMatch,
+  PickResolved,
   MenuPlaces,
   ItemAttributesView,
 } from "./contract";
@@ -53,6 +55,8 @@ export const api = {
   setDefaultFolders: (enabled: boolean) => invoke<DefaultAppsView>("set_default_folders", { enabled }),
   setFileDialogs: (enabled: boolean) => invoke<DefaultAppsView>("set_file_dialogs", { enabled }),
   pickReady: () => invoke<void>("pick_ready"),
+  pickMatches: (id: number, text: string) => invoke<PickMatch[]>("pick_matches", { id, text }),
+  pickResolve: (base: string, text: string) => invoke<PickResolved>("pick_resolve", { base, text }),
   finishPick: (paths: string[] | null) => invoke<void>("finish_pick", { paths }),
   setPickFilter: (index: number) => invoke<void>("set_pick_filter", { index }),
   folderGroups: (id: number) => invoke<FolderGroup[]>("folder_groups", { id }),

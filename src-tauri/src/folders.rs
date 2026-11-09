@@ -14,7 +14,8 @@ use firewol_core::explorer::{
 
 use crate::contract::{
     Entry, FolderDisplay, FolderGroup, FolderProgress, FolderView, IndexState, ItemRef, Navigation,
-    Page, SearchCount, SearchFilters, SearchRequest, SearchScope, Segment, SortView, Step,
+    Page, PickMatch, SearchCount, SearchFilters, SearchRequest, SearchScope, Segment, SortView,
+    Step,
 };
 use crate::volumes::{self, Volumes};
 
@@ -414,6 +415,24 @@ impl Folders {
                 start: group.start,
                 count: group.count,
                 bucket: group.bucket,
+            })
+            .collect())
+    }
+
+    pub fn pick_matches(&self, id: u64, text: &str, limit: usize) -> Result<Vec<PickMatch>> {
+        let folder = self.get(id)?;
+        let found = lock(&folder.directory).matching(text, limit)?;
+        Ok(found
+            .into_iter()
+            .map(|(path, directory, row)| PickMatch {
+                name: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                path: self::text(&path),
+                directory,
+                row,
             })
             .collect())
     }

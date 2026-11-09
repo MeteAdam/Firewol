@@ -225,6 +225,41 @@ impl Directory {
         Ok(())
     }
 
+    /// Items whose names contain `text`, names that begin with it first, with their rows.
+    pub fn matching(&self, text: &str, limit: usize) -> Result<Vec<(PathBuf, bool, u32)>> {
+        let wanted = text.to_lowercase();
+        let mut statement = self
+            .db
+            .prepare_cached("SELECT name, directory, sort_name FROM listing")?;
+        let mut rows = statement.query([])?;
+        let mut found: Vec<(bool, String, Vec<u8>, bool)> = Vec::new();
+        while let Some(row) = rows.next()? {
+            let label: String = row.get(2)?;
+            let folded = label.to_lowercase();
+            if let Some(at) = folded.find(&wanted) {
+                found.push((at != 0, label, row.get(0)?, row.get(1)?));
+            }
+        }
+        drop(rows);
+        found.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| super::places::natural_order(&left.1, &right.1))
+        });
+        found
+            .into_iter()
+            .take(limit)
+            .filter_map(|(_, _, name, directory)| {
+                let name = decode(&name);
+                match self.position(&name) {
+                    Ok(Some(row)) => Some(Ok((self.path.join(name), directory, row))),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .collect()
+    }
+
     /// The date sections of a grouped listing, in row order; empty when it is not grouped.
     pub fn groups(&self) -> Result<Vec<Group>> {
         let Some(starts) = self.sections.as_ref().filter(|_| self.is_sorted()) else {

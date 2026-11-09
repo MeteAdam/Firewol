@@ -85,6 +85,36 @@ fn a_type_filter_keeps_folders_and_matching_files() -> anyhow::Result<()> {
 }
 
 #[test]
+fn typed_text_finds_names_with_those_that_begin_with_it_first() -> anyhow::Result<()> {
+    use firewol_core::explorer::{Cancellation, Directory, Sort, page};
+    let fixture = tempfile::tempdir()?;
+    for name in [
+        "my-report.txt",
+        "report-2.txt",
+        "REPORT-10.txt",
+        "other.txt",
+    ] {
+        std::fs::write(fixture.path().join(name), b"x")?;
+    }
+    let cancel = Cancellation::default();
+    let mut directory = Directory::open(fixture.path())?;
+    directory.advance(128, &cancel)?;
+    directory.sort(Sort::default(), &cancel)?;
+    let found = directory.matching("report", 10)?;
+    let names: Vec<_> = found
+        .iter()
+        .map(|(path, _, _)| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["report-2.txt", "REPORT-10.txt", "my-report.txt"]);
+    let listed = directory.list_dir(page(0), &cancel)?.items;
+    for (path, _, row) in &found {
+        assert_eq!(listed[*row as usize].name(), path.file_name().unwrap());
+    }
+    assert_eq!(directory.matching("report", 1)?.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn grouping_puts_new_items_first_and_counts_each_section() -> anyhow::Result<()> {
     use firewol_core::explorer::{Cancellation, Directory, Sort, SortColumn, page};
     use std::time::{Duration, SystemTime};

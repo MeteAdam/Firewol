@@ -44,6 +44,8 @@ export const filterCount = (filters: SearchFilters) => Object.values(filters).fi
 /** One folder view. Navigation history lives in the core; this keeps what the list renders. */
 export class Pane {
   readonly id: string;
+  /** An Open window waits for a choice instead of preselecting the first row. */
+  autoSelect = true;
   path = $state("");
   label = $state("Folder");
   scroll = $state(0);
@@ -375,7 +377,7 @@ export class Pane {
       this.indexCount = 0;
     }
     if (reload) await this.remap();
-    else if (view.count > 0) void this.select(0);
+    else if (view.count > 0 && this.autoSelect) void this.select(0);
     else {
       this.selected = -1;
       this.selection = new Map();

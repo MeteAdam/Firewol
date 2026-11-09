@@ -163,6 +163,16 @@ impl FolderKey {
     }
 }
 
+/// Where an Open window was left, in physical pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickWindow {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
+}
+
 /// What Firewol shows when it opens.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum StartupChoice {
@@ -373,6 +383,9 @@ pub struct Settings {
     pub last_folder: Option<PathBuf>,
     /// What a new launch shows.
     pub startup: StartupChoice,
+    /// The folder of the last item chosen in an Open window, in any program.
+    pub pick_folder: Option<PathBuf>,
+    pub pick_window: Option<PickWindow>,
     /// The folder tabs of the window closed last, and which of them was active.
     pub last_tabs: Vec<PathBuf>,
     pub last_tab: u32,
@@ -414,6 +427,8 @@ impl Default for Settings {
             theme_migrated: false,
             last_folder: None,
             startup: StartupChoice::Last,
+            pick_folder: None,
+            pick_window: None,
             last_tabs: Vec::new(),
             last_tab: 0,
             pins: Vec::new(),
@@ -446,6 +461,10 @@ struct Stored {
     theme_migrated: bool,
     last_folder: Option<Vec<u16>>,
     /// 0 is the last window, 1 a pin and 2 a chosen folder.
+    #[serde(default)]
+    pick_folder: Option<Vec<u16>>,
+    #[serde(default)]
+    pick_window: Option<PickWindow>,
     #[serde(default)]
     startup_kind: u8,
     #[serde(default)]
@@ -555,6 +574,8 @@ impl Settings {
                 (2, Some(folder)) => StartupChoice::Folder(folder),
                 _ => StartupChoice::Last,
             },
+            pick_folder: stored.pick_folder.map(path),
+            pick_window: stored.pick_window,
             last_tabs: stored.last_tabs.into_iter().map(path).collect(),
             last_tab: stored.last_tab,
             pins: stored.pins.into_iter().map(path).collect(),
@@ -668,6 +689,8 @@ impl Settings {
                 StartupChoice::Last => None,
                 StartupChoice::Pin(folder) | StartupChoice::Folder(folder) => Some(units(folder)),
             },
+            pick_folder: self.pick_folder.as_ref().map(units),
+            pick_window: self.pick_window,
             last_tabs: self.last_tabs.iter().map(units).collect(),
             last_tab: self.last_tab,
             pins: self.pins.iter().map(units).collect(),

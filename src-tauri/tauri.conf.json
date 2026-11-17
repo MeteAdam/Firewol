@@ -3,8 +3,9 @@
   "productName": "Firewol",
   "version": "0.1.0",
   "identifier": "dev.firewol.app",
+  "mainBinaryName": "firewol-tauri",
   "build": {
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && cargo build --release --locked -p firewol-picker",
     "frontendDist": "../dist"
   },
   "app": {
@@ -15,7 +16,17 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/icon.ico"]
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "../target/release/firewol_picker.dll": "firewol_picker.dll"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./installer-hooks.nsh"
+      }
+    }
   }
 }

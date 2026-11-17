@@ -165,7 +165,8 @@ impl Operations {
             match result {
                 Ok(entry) => recycled.push(entry),
                 Err(error) => {
-                    first_error = Some(error.context(format!("{}", item.path().display())));
+                    first_error =
+                        Some(error.context(format!("{}", display_path(item.path()).display())));
                     break;
                 }
             }

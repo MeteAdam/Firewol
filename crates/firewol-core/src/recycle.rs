@@ -9,13 +9,14 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, BHID_SFUIObject, BHID_Transfer, CMF_NORMAL, CMINVOKECOMMANDINFO,
+    COPYENGINE_E_SHARING_VIOLATION_DEST, COPYENGINE_E_SHARING_VIOLATION_SRC,
     FOLDERID_RecycleBinFolder, IContextMenu, IEnumShellItems, IShellItem, ITransferSource,
     KF_FLAG_DEFAULT, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHCreateItemFromParsingName,
     SHCreateItemFromRelativeName, SHGetKnownFolderItem, SICHINT_TEST_FILESYSPATH_IF_NOT_EQUAL,
     SIGDN_FILESYSPATH, SIGDN_PARENTRELATIVEPARSING, TSF_NORMAL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu, HMENU, SW_SHOWNORMAL};
-use windows::core::{PCWSTR, s};
+use windows::core::{HRESULT, PCWSTR, s};
 
 use crate::explorer::display_path;
 use crate::file_identity::{FileIdentity, identity, open_item};
@@ -187,6 +188,20 @@ impl RecycledItem {
     }
 }
 
+/// Whether a Shell failure means another process holds the item open.
+fn is_in_use(code: HRESULT) -> bool {
+    // HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION)
+    const SHARING_VIOLATION: HRESULT = HRESULT(0x8007_0020_u32 as i32);
+    const LOCK_VIOLATION: HRESULT = HRESULT(0x8007_0021_u32 as i32);
+    [
+        SHARING_VIOLATION,
+        LOCK_VIOLATION,
+        COPYENGINE_E_SHARING_VIOLATION_SRC,
+        COPYENGINE_E_SHARING_VIOLATION_DEST,
+    ]
+    .contains(&code)
+}
+
 pub(crate) fn recycle(original: &Path, id: FileIdentity) -> Result<RecycledItem> {
     ensure!(
         identity(&open_item(original)?)? == id,
@@ -199,8 +214,14 @@ pub(crate) fn recycle(original: &Path, id: FileIdentity) -> Result<RecycledItem>
     let transfer: ITransferSource =
         unsafe { parent.BindToHandler(None::<&IBindCtx>, &BHID_Transfer) }
             .context("Bind filesystem transfer source")?;
-    let recycled = unsafe { transfer.RecycleItem(&item, &bin, TSF_NORMAL.0 as u32) }
-        .context("Recycle the fixture through ITransferSource::RecycleItem")?;
+    let recycled = match unsafe { transfer.RecycleItem(&item, &bin, TSF_NORMAL.0 as u32) } {
+        Ok(recycled) => recycled,
+        // The caller prefixes the path, so the message does not repeat the name.
+        Err(error) if is_in_use(error.code()) => {
+            anyhow::bail!("Open in another program. Close it and try again.")
+        }
+        Err(error) => return Err(error).context("Move to the Recycle Bin"),
+    };
     ensure!(
         identity(&open_item(&filesystem_path(&recycled)?)?)? == id,
         "Could not verify the recycled item"

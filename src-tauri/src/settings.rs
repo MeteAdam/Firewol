@@ -70,6 +70,7 @@ pub fn view(settings: &Settings) -> Result<SettingsView> {
         shell_items: settings.shell_items.unwrap_or(true),
         show_hidden: settings.show_hidden.unwrap_or(true),
         show_extensions: settings.show_extensions.unwrap_or(true),
+        mix_folders: settings.mix_folders.unwrap_or(false),
         startup: startup_view(&settings.startup),
         columns: mirror(settings.columns.unwrap_or_default())?,
         appearance: mirror(&settings.appearance)?,
@@ -326,6 +327,9 @@ pub fn update(
         }
         if let Some(show_extensions) = patch.show_extensions {
             settings.show_extensions = Some(show_extensions);
+        }
+        if let Some(mix_folders) = patch.mix_folders {
+            settings.mix_folders = Some(mix_folders);
         }
         if let Some(columns) = columns {
             settings.columns = Some(columns);

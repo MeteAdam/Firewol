@@ -26,4 +26,8 @@ show_hidden: boolean,
 /**
  * File names show their extension.
  */
-show_extensions: boolean, columns: ColumnWidthsView, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, startup: StartupView, };
+show_extensions: boolean, 
+/**
+ * Folders sort among files in every column instead of staying together.
+ */
+mix_folders: boolean, columns: ColumnWidthsView, appearance: AppearanceView, menu: Array<MenuEntryView>, folders: Array<StyledFolder>, elevation: ElevationView, startup: StartupView, };

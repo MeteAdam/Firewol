@@ -15,6 +15,8 @@ pub const OPERATION_DONE: &str = "operation-done";
 pub const SESSION_CHANGED: &str = "session-changed";
 pub const SETTINGS_CHANGED: &str = "settings-changed";
 pub const ICON_CHANGED: &str = "icon-changed";
+/// Every Shell icon may have changed, for example because a default app changed.
+pub const ICONS_CHANGED: &str = "icons-changed";
 pub const DRIVES_CHANGED: &str = "drives-changed";
 pub const FOLDER_CHANGED: &str = "folder-changed";
 pub const OPEN_PATH: &str = "open-path";
@@ -178,6 +180,8 @@ pub struct SettingsView {
     pub show_hidden: bool,
     /// File names show their extension.
     pub show_extensions: bool,
+    /// Folders sort among files in every column instead of staying together.
+    pub mix_folders: bool,
     pub columns: ColumnWidthsView,
     pub appearance: AppearanceView,
     pub menu: Vec<MenuEntryView>,
@@ -223,6 +227,8 @@ pub struct SettingsPatch {
     pub show_hidden: Option<bool>,
     #[ts(optional)]
     pub show_extensions: Option<bool>,
+    #[ts(optional)]
+    pub mix_folders: Option<bool>,
     #[ts(optional)]
     pub columns: Option<ColumnWidthsView>,
     #[ts(optional)]
@@ -373,12 +379,44 @@ pub struct PickResolved {
     pub path: String,
 }
 
-/// What a program asked of its Open window; this window answers it.
+/// One item in the Recycle Bin. `path` is where Windows keeps it while it is deleted.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct RecycledView {
+    pub path: String,
+    pub name: String,
+    /// The folder it was deleted from.
+    pub from: String,
+    pub directory: bool,
+    #[ts(type = "number")]
+    pub size: u64,
+    /// Unix seconds.
+    #[ts(type = "number")]
+    pub deleted: i64,
+}
+
+/// Where a name typed in a Save window leads. `message` says why a `refused` name cannot be saved.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct PickSaveTarget {
+    #[ts(type = "'folder' | 'new' | 'exists' | 'refused'")]
+    pub kind: String,
+    pub path: String,
+    pub message: Option<String>,
+}
+
+/// What a program asked of its Open or Save window; this window answers it.
 #[derive(Clone, Serialize, TS)]
 #[ts(export)]
 pub struct PickView {
     pub folders: bool,
     pub multi: bool,
+    /// A Save window: the name is typed or taken from the list, and the file need not exist.
+    pub save: bool,
+    /// Asks before replacing a file that exists.
+    pub overwrite_prompt: bool,
+    /// The program's own text for the Open or Save button.
+    pub ok_label: Option<String>,
     pub title: Option<String>,
     pub file_name: Option<String>,
     pub types: Vec<PickType>,

@@ -272,8 +272,12 @@
 
   function gridDown(event: MouseEvent) {
     onactivate();
-    // Without this a middle press starts the browser's autoscroll.
-    if (event.button === 1) event.preventDefault();
+    // Without this a middle press starts the browser's autoscroll; we scroll on our own instead.
+    if (event.button === 1) {
+      event.preventDefault();
+      beginMiddleScroll(event);
+      return;
+    }
     if (event.button !== 0 || (event.target as Element).closest("[data-row], .hdr, .rename")) return;
     const bounds = grid.getBoundingClientRect();
     // A press on the list's own scroll bars is not a press on the list.
@@ -388,6 +392,71 @@
     window.removeEventListener("keydown", boxKey, true);
   }
 
+  // Middle-button scroll: hold the wheel button and move up or down, as in browsers.
+  const MIDDLE_DEAD = 8;
+  let middleActive = $state(false);
+  let middle: { originY: number; y: number; active: boolean; frame: number } | undefined;
+
+  function beginMiddleScroll(event: MouseEvent) {
+    endMiddleScroll();
+    middle = { originY: event.clientY, y: event.clientY, active: false, frame: 0 };
+    window.addEventListener("pointermove", middleMove, true);
+    window.addEventListener("pointerup", endMiddleScroll, true);
+    window.addEventListener("pointercancel", endMiddleScroll, true);
+    window.addEventListener("keydown", middleKey, true);
+  }
+
+  function middleMove(event: PointerEvent) {
+    if (!middle) return;
+    middle.y = event.clientY;
+    if (middle.active || Math.abs(middle.y - middle.originY) <= MIDDLE_DEAD) return;
+    middle.active = true;
+    middleActive = true;
+    middle.frame = requestAnimationFrame(middleFrame);
+  }
+
+  function middleFrame() {
+    if (!middle) return;
+    const delta = middle.y - middle.originY;
+    if (Math.abs(delta) > MIDDLE_DEAD) {
+      grid.scrollTop += Math.sign(delta) * Math.min(60, ((Math.abs(delta) - MIDDLE_DEAD) / 6) ** 1.3);
+    }
+    middle.frame = requestAnimationFrame(middleFrame);
+  }
+
+  function middleKey(event: KeyboardEvent) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    endMiddleScroll();
+  }
+
+  function endMiddleScroll() {
+    const finished = middle;
+    if (finished) cancelAnimationFrame(finished.frame);
+    middle = undefined;
+    middleActive = false;
+    window.removeEventListener("pointermove", middleMove, true);
+    window.removeEventListener("pointerup", endMiddleScroll, true);
+    window.removeEventListener("pointercancel", endMiddleScroll, true);
+    window.removeEventListener("keydown", middleKey, true);
+    if (!finished?.active) return;
+    // A scroll that ended over a folder must not open it in a new tab.
+    const swallow = (event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      stop();
+    };
+    const timer = setTimeout(() => stop(), 300);
+    const stop = () => {
+      clearTimeout(timer);
+      window.removeEventListener("auxclick", swallow, true);
+    };
+    window.addEventListener("auxclick", swallow, true);
+  }
+
+  $effect(() => endMiddleScroll);
+
   async function rowMenu(event: MouseEvent, row: number) {
     event.preventDefault();
     event.stopPropagation();
@@ -483,6 +552,7 @@
 <section data-pane={pane.id} class="list" class:tiles class:marked class:searching={pane.searching} class:tagged aria-label={pane.folder?.path ?? "Folder"} style:--row={`${ROW}px`} style:--row-font={`${rowFont}px`} style:--cols={columnTemplate} style:--table={`${tableWidth}px`}>
   <div
     class="grid"
+    class:middle-scrolling={middleActive}
     role="grid"
     tabindex="0"
     aria-multiselectable="true"
@@ -598,7 +668,16 @@
     {#if box}
       <div class="marquee" aria-hidden="true" style:left={`${box.left}px`} style:top={`${box.top}px`} style:width={`${box.width}px`} style:height={`${box.height}px`}></div>
     {/if}
-    {#if rows === 0}
+    {#if rows === 0 && pane.denied && !pane.folder}
+      <div class="empty denied" role="alert">
+        <p><strong>You don't currently have permission to access this folder.</strong></p>
+        <p class="muted">Continue asks Windows for administrator approval, then gives your account lasting permission to open it, as File Explorer does.</p>
+        <div class="denied-actions">
+          {#if pane.deniedSegments.length > 1}<button class="action" onclick={() => void pane.openDeniedParent()}>Open parent folder</button>{/if}
+          <button class="action primary" onclick={() => void pane.grantAccess()}><Icon name="shield" /> Continue</button>
+        </div>
+      </div>
+    {:else if rows === 0}
       <p class="empty">
         {#if pane.searching && pane.searchError}{pane.searchError}
         {:else if pane.searching && !pane.searchReady}{pane.volume ? `Indexing ${pane.volume}: — results appear when the first pass finishes.` : "Indexing this folder…"}
@@ -627,6 +706,7 @@
   }
   .list.marked { outline: 2px solid var(--accent); outline-offset: -2px; }
   .grid { position: relative; flex: 1; min-width: 0; min-height: 0; padding: 0 6px 6px; overflow: auto; overflow-anchor: none; }
+  .grid.middle-scrolling, .grid.middle-scrolling :global(*) { cursor: ns-resize; }
   .grid:focus-visible { outline: none; }
   .grid:focus-visible .row.focus { outline: 2px solid var(--accent); outline-offset: -2px; }
   .cols {
@@ -710,4 +790,9 @@
   .group-head { display: flex; align-items: center; padding: 0 10px; border-bottom: 1px solid var(--sep); color: var(--muted); font-size: 12px; font-weight: 600; }
   .placeholder { height: 8px; width: 40%; border-radius: 4px; background: var(--sep); }
   .empty { position: absolute; inset: 56px 24px auto 24px; margin: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .denied { display: grid; gap: 8px; max-width: 520px; color: var(--text); white-space: normal; }
+  .denied p { margin: 0; }
+  .denied .muted { color: var(--muted); }
+  .denied-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .denied-actions .action { display: inline-flex; align-items: center; gap: 6px; }
 </style>

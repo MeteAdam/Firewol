@@ -407,6 +407,8 @@ pub struct Settings {
     pub show_hidden: Option<bool>,
     /// File names show their extension (default on). Firewol's own view only.
     pub show_extensions: Option<bool>,
+    /// Folders sort among files in every column (default off: Explorer's order).
+    pub mix_folders: Option<bool>,
     pub columns: Option<ColumnWidths>,
     pub appearance: Appearance,
     pub elevation: ElevationPolicy,
@@ -441,6 +443,7 @@ impl Default for Settings {
             shell_items: None,
             show_hidden: None,
             show_extensions: None,
+            mix_folders: None,
             columns: None,
             appearance: Appearance::default(),
             elevation: ElevationPolicy::default(),
@@ -493,6 +496,8 @@ struct Stored {
     show_hidden: Option<bool>,
     #[serde(default)]
     show_extensions: Option<bool>,
+    #[serde(default)]
+    mix_folders: Option<bool>,
     #[serde(default)]
     columns: Option<ColumnWidths>,
     #[serde(default)]
@@ -588,6 +593,7 @@ impl Settings {
             shell_items: stored.shell_items,
             show_hidden: stored.show_hidden,
             show_extensions: stored.show_extensions,
+            mix_folders: stored.mix_folders,
             columns: stored.columns,
             appearance: stored.appearance,
             elevation: stored.elevation,
@@ -703,6 +709,7 @@ impl Settings {
             shell_items: self.shell_items,
             show_hidden: self.show_hidden,
             show_extensions: self.show_extensions,
+            mix_folders: self.mix_folders,
             columns: self.columns,
             appearance: self.appearance.clone(),
             elevation: self.elevation.clone(),

@@ -1,25 +1,29 @@
-//! The drives and Windows user folders the sidebar shows, and device-change notifications.
+//! The drives and Windows user folders the sidebar shows, and the device and default-app
+//! notifications that change what Firewol shows.
 
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::WindowsProgramming::{DRIVE_CDROM, DRIVE_REMOTE, DRIVE_REMOVABLE};
+use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures,
     FOLDERID_Profile, FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_ProgramFilesX86,
     FOLDERID_RoamingAppData, FOLDERID_StartMenu, FOLDERID_System, FOLDERID_UserProfiles,
-    FOLDERID_Videos, FOLDERID_Windows, KF_FLAG_DEFAULT, SHFILEINFOW, SHGFI_DISPLAYNAME,
-    SHGetFileInfoW, SHGetKnownFolderPath,
+    FOLDERID_Videos, FOLDERID_Windows, KF_FLAG_DEFAULT, SHCNE_ASSOCCHANGED, SHCNRF_NewDelivery,
+    SHCNRF_ShellLevel, SHChangeNotification_Lock, SHChangeNotification_Unlock, SHChangeNotifyEntry,
+    SHChangeNotifyRegister, SHFILEINFOW, SHGFI_DISPLAYNAME, SHGetFileInfoW, SHGetKnownFolderIDList,
+    SHGetKnownFolderPath,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, RegisterClassW,
-    WINDOW_EX_STYLE, WM_DEVICECHANGE, WNDCLASSW, WS_POPUP,
+    WINDOW_EX_STYLE, WM_APP, WM_DEVICECHANGE, WNDCLASSW, WS_POPUP,
 };
 use windows_core::{GUID, HSTRING, PCWSTR, w};
 
@@ -185,7 +189,31 @@ pub fn go_to_folders() -> Vec<(&'static str, PathBuf)> {
 }
 
 type Changed = Box<dyn Fn() + Send + Sync>;
-static CHANGED: OnceLock<Changed> = OnceLock::new();
+static DEVICES: OnceLock<Changed> = OnceLock::new();
+static ASSOCIATIONS: OnceLock<Changed> = OnceLock::new();
+/// What the Shell posts for the notifications registered below.
+const WM_SHELL_CHANGE: u32 = WM_APP + 1;
+
+/// Reads one Shell notification, which must be unlocked whatever it holds.
+unsafe fn shell_event(wparam: WPARAM, lparam: LPARAM) -> u32 {
+    let mut items: *mut *mut ITEMIDLIST = std::ptr::null_mut();
+    let mut event = 0i32;
+    let lock = unsafe {
+        SHChangeNotification_Lock(
+            HANDLE(wparam.0 as _),
+            lparam.0 as u32,
+            Some(&mut items),
+            Some(&mut event),
+        )
+    };
+    if lock.is_invalid() {
+        return 0;
+    }
+    unsafe {
+        let _ = SHChangeNotification_Unlock(lock);
+    }
+    event as u32
+}
 
 unsafe extern "system" fn device_window(
     window: HWND,
@@ -198,20 +226,58 @@ unsafe extern "system" fn device_window(
             wparam.0,
             DBT_DEVNODES_CHANGED | DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE
         )
-        && let Some(changed) = CHANGED.get()
+        && let Some(changed) = DEVICES.get()
     {
         changed();
+    }
+    if message == WM_SHELL_CHANGE {
+        if unsafe { shell_event(wparam, lparam) } & SHCNE_ASSOCCHANGED.0 != 0
+            && let Some(changed) = ASSOCIATIONS.get()
+        {
+            changed();
+        }
+        return LRESULT(0);
     }
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }
 
-/// Calls `changed` when a drive appears or disappears. WM_DEVICECHANGE is broadcast to top-level
-/// windows only, so this is an invisible popup rather than a message-only window.
-pub fn watch_devices(changed: impl Fn() + Send + Sync + 'static) -> Result<()> {
-    CHANGED
-        .set(Box::new(changed))
+/// Asks the Shell to post a message when a default app or file type icon changes anywhere, as
+/// Windows' Open with window and Settings > Default apps announce it.
+unsafe fn watch_associations(window: HWND) {
+    let Ok(desktop) =
+        (unsafe { SHGetKnownFolderIDList(&FOLDERID_Desktop, KF_FLAG_DEFAULT.0 as u32, None) })
+    else {
+        return;
+    };
+    // Kept for the life of the process, as the registration is.
+    let entry = SHChangeNotifyEntry {
+        pidl: desktop,
+        fRecursive: true.into(),
+    };
+    unsafe {
+        SHChangeNotifyRegister(
+            window,
+            SHCNRF_ShellLevel | SHCNRF_NewDelivery,
+            SHCNE_ASSOCCHANGED.0 as i32,
+            WM_SHELL_CHANGE,
+            1,
+            &entry,
+        );
+    }
+}
+
+/// Calls `devices` when a drive appears or disappears and `associations` when a default app
+/// changes. WM_DEVICECHANGE is broadcast to top-level windows only, so this is an invisible popup
+/// rather than a message-only window.
+pub fn watch_system(
+    devices: impl Fn() + Send + Sync + 'static,
+    associations: impl Fn() + Send + Sync + 'static,
+) -> Result<()> {
+    DEVICES
+        .set(Box::new(devices))
         .ok()
         .context("Device changes are already watched")?;
+    let _ = ASSOCIATIONS.set(Box::new(associations));
     std::thread::Builder::new()
         .name("device-watch".into())
         .spawn(|| unsafe {
@@ -225,7 +291,7 @@ pub fn watch_devices(changed: impl Fn() + Send + Sync + 'static) -> Result<()> {
                 lpszClassName: class,
                 ..Default::default()
             });
-            if CreateWindowExW(
+            let Ok(window) = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 class,
                 w!(""),
@@ -238,11 +304,10 @@ pub fn watch_devices(changed: impl Fn() + Send + Sync + 'static) -> Result<()> {
                 None,
                 Some(module.into()),
                 None,
-            )
-            .is_err()
-            {
+            ) else {
                 return;
-            }
+            };
+            watch_associations(window);
             let mut message = MSG::default();
             while GetMessageW(&mut message, None, 0, 0).as_bool() {
                 let _ = DispatchMessageW(&message);

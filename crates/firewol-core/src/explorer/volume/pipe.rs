@@ -61,6 +61,13 @@ fn running_executable() -> Option<FileIdentity> {
     identity(&file).ok()
 }
 
+/// This Firewol's own executable, held open so it cannot be swapped before it is elevated.
+pub(crate) fn pinned_self() -> Result<(std::path::PathBuf, File)> {
+    let executable = std::env::current_exe()?;
+    let pinned = pin_executable(&executable, *EXECUTABLE.get_or_init(running_executable))?;
+    Ok((executable, pinned))
+}
+
 /// Opens the program about to be elevated and blocks replacing it while the handle lives.
 fn pin_executable(path: &Path, expected: Option<FileIdentity>) -> Result<File> {
     let file = OpenOptions::new()

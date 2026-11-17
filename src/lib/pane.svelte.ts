@@ -11,11 +11,13 @@ import type {
   SearchCount,
   SearchFilters,
   SearchRequest,
+  Segment,
   Step,
   SortView,
   SortColumn,
   VolumeState,
 } from "./contract";
+import { RECYCLE_BIN, isRecycleBin } from "./recycleBin";
 import { hasTags } from "./styles";
 import { volumes } from "./volumes.svelte";
 
@@ -86,6 +88,10 @@ export class Pane {
   index = $state<"none" | "building" | "ready">("none");
   indexCount = $state(0);
   error = $state("");
+  /** A folder this account may not list, waiting for Continue (administrator consent) or Cancel. */
+  denied = $state<string | null>(null);
+  /** The pane shows the Recycle Bin; `folder` stays the folder Back returns to. */
+  recycle = $state(false);
   // Set once a listed page shows a tagged folder and kept until the next folder, so the Tags
   // column does not come and go while scrolling.
   #tagged = $state(false);
@@ -249,8 +255,72 @@ export class Pane {
     return this.#go("new", path);
   }
 
+  /** Like Explorer: a folder refused to this account offers Continue instead of an error alone. */
+  async #explainDenied(path: string, navigation: number) {
+    const denied = await api.folderAccessDenied(path).catch(() => false);
+    if (!denied || navigation !== this.#navigation) return;
+    this.denied = path;
+    // Opened from Win+R or another program, there is no folder to stay in: show where it was.
+    if (!this.folder) {
+      this.path = path;
+      this.label = path.replace(/\\+$/, "").split("\\").at(-1) || path;
+    }
+  }
+
+  /** The breadcrumb of a refused folder that is shown instead of any open one. */
+  get deniedSegments(): Segment[] {
+    if (!this.denied || this.folder) return [];
+    const parts = this.denied.replace(/^\\\\\?\\/, "").replace(/\\+$/, "").split("\\");
+    return parts.map((name, index) => ({
+      name: index === 0 ? `${name}\\` : name,
+      path: parts.slice(0, index + 1).join("\\") + (index === 0 ? "\\" : ""),
+      icon: null,
+    }));
+  }
+
+  /** Continue: Windows asks for administrator consent, then the folder opens from now on. */
+  async grantAccess() {
+    const path = this.denied;
+    if (!path) return;
+    try {
+      await api.grantFolderAccess(path);
+      this.denied = null;
+      await this.open(path);
+    } catch (reason) {
+      this.error = String(reason);
+    }
+  }
+
+  dismissDenied() {
+    this.denied = null;
+  }
+
+  openDeniedParent() {
+    const segments = this.deniedSegments;
+    const parent = segments.at(-2);
+    this.denied = null;
+    return parent ? this.open(parent.path) : undefined;
+  }
+
+  /** Back from the Recycle Bin returns to the folder shown before it. */
+  get canGoBack() {
+    return this.canBack || (this.recycle && !!this.folder);
+  }
+
   back() {
+    if (this.recycle && this.folder) {
+      this.recycle = false;
+      this.path = this.folder.path;
+      this.label = this.folder.segments.at(-1)?.name ?? this.folder.path;
+      return Promise.resolve();
+    }
     return this.canBack ? this.#go("back") : undefined;
+  }
+
+  /** What the breadcrumb shows: the folder, the Recycle Bin, or a folder this account may not open. */
+  get crumbs(): Segment[] {
+    if (this.recycle) return [{ name: "Recycle Bin", path: RECYCLE_BIN, icon: null }];
+    return this.folder?.segments ?? this.deniedSegments;
   }
 
   forward() {
@@ -282,7 +352,8 @@ export class Pane {
     if (!this.#stale || !this.folder) return;
     // A reload would close the rename field and send search results back to the top.
     // A navigation under way must not be replaced by a reload of the folder it is leaving.
-    if (this.renaming !== null || this.searching || this.#navigating > 0) {
+    // The folder behind the Recycle Bin view waits until it is shown again.
+    if (this.renaming !== null || this.searching || this.#navigating > 0 || this.recycle) {
       this.#scheduleRefresh(REFRESH_RETRY_MS);
       return;
     }
@@ -310,6 +381,17 @@ export class Pane {
 
   async #go(step: Step, path: string | null = null, quiet = false) {
     const navigation = ++this.#navigation;
+    // The Recycle Bin is no folder of the core's; its own view lists it.
+    if (path && isRecycleBin(path)) {
+      if (!quiet) {
+        this.recycle = true;
+        this.path = RECYCLE_BIN;
+        this.label = "Recycle Bin";
+        this.denied = null;
+        this.error = "";
+      }
+      return;
+    }
     let result: Navigation;
     let quietPages: Record<number, Entry[]> | undefined;
     let view: FolderView;
@@ -327,6 +409,8 @@ export class Pane {
     } catch (reason) {
       if (navigation === this.#navigation && !String(reason).includes("newer navigation")) {
         this.error = String(reason);
+        // A new tab or window loads its first folder as a reload; that is an opening too.
+        if ((step === "new" || !this.folder) && path && !quiet) void this.#explainDenied(path, navigation);
       }
       return;
     } finally {
@@ -362,6 +446,8 @@ export class Pane {
     this.canForward = result.canForward;
     this.renaming = null;
     this.error = "";
+    this.denied = null;
+    if (!quiet) this.recycle = false;
     if (!reload) {
       // The old folder's items must never stay selected, even if the new folder selects nothing.
       this.selected = -1;

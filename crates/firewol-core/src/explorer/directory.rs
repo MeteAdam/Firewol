@@ -27,6 +27,8 @@ pub struct Sort {
     pub descending: bool,
     /// Sections by date come first; the column orders the items inside each one.
     pub group: bool,
+    /// Folders take their place among the files in every column, not only by date.
+    pub mix_folders: bool,
 }
 
 /// Which items a listing keeps; folders stay so an Open window can still be browsed.
@@ -202,8 +204,12 @@ impl Directory {
             .as_ref()
             .map_or_else(String::new, |starts| format!("{}, ", section_sql(starts)));
         // As in Explorer, an order by date is about time: folders take their place among the files.
-        let folders_first = if sort.group || sort.column == SortColumn::Modified {
+        // Other columns keep folders together, first when ascending and last when descending.
+        let folders_first = if sort.group || sort.mix_folders || sort.column == SortColumn::Modified
+        {
             ""
+        } else if sort.descending {
+            "directory ASC, "
         } else {
             "directory DESC, "
         };

@@ -23,11 +23,12 @@ use contract::{
 };
 use default_handler::{FileDialogs, FolderHandler, Launch};
 use firewol_core::explorer::icons::{self, Icons};
-use firewol_core::explorer::picker_pipe::{self, PickClient, PickRequest};
+use firewol_core::explorer::picker_pipe::{self, PickClient, PickRequest, SaveTarget};
 use firewol_core::explorer::shell_menu::{ShellItem, ShellMenus, Target};
 use firewol_core::explorer::{
-    ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, PickWindow, SavedView, Session, actions,
-    custom_icon, data_dir, default_handler, display_path, elevation, home, is_remote,
+    ItemId, MAX_TRANSFER_ITEMS, MenuAction, Operation, PickWindow, SavedView, Session, access,
+    actions, custom_icon, data_dir, default_handler, display_path, elevation, home, is_remote,
+    recycle_bin,
 };
 use folders::{Folders, Notice, Notify, item_id, item_ref, lock, segment, text};
 use tauri::webview::NewWindowResponse;
@@ -417,6 +418,44 @@ fn transfer(
     })
 }
 
+/// Files dropped from Explorer or the desktop: copied into `into`, moved while Shift is held.
+#[tauri::command]
+fn transfer_paths(
+    app: AppHandle,
+    files: State<'_, Files>,
+    transfers: State<'_, Arc<Transfers>>,
+    paths: Vec<String>,
+    into: ItemRef,
+) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
+    let into = item_id(&into).map_err(message)?;
+    let items = paths
+        .into_iter()
+        .map(|path| ItemId::at(PathBuf::from(path)))
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map_err(message)?;
+    let move_items = unsafe { GetAsyncKeyState(i32::from(VK_SHIFT.0)) } < 0;
+    watched(&app, &files, &transfers, |session| {
+        session.transfer(items, into, move_items)
+    })
+}
+
+/// Starts a Shell drag of the items to Explorer, the desktop or another program. Returns at once;
+/// the drag loop runs on the main thread, which has OLE initialized.
+#[tauri::command]
+fn drag_out(window: tauri::WebviewWindow, items: Vec<ItemRef>) -> Result<(), String> {
+    let paths = verified_paths(&item_ids(&items)?).map_err(message)?;
+    let hwnd = window.hwnd().map_err(message)?.0 as isize;
+    window
+        .run_on_main_thread(move || {
+            if let Err(error) = firewol_core::explorer::drag_out::drag_out(HWND(hwnd as _), &paths)
+            {
+                eprintln!("drag out failed: {error:#}");
+            }
+        })
+        .map_err(message)
+}
+
 #[tauri::command]
 fn rename(files: State<'_, Files>, item: ItemRef, name: String) -> Result<(), String> {
     let item = item_id(&item).map_err(message)?;
@@ -452,6 +491,7 @@ fn default_apps_view(data: &Path) -> anyhow::Result<DefaultAppsView> {
         installed_path: installed.display().to_string(),
         outdated: (folders || dialogs.is_enabled())
             && (default_handler::installed_copy_outdated(&current, &installed)
+                || dialogs.is_incomplete()
                 || dialogs
                     .registered_picker()
                     .is_some_and(|dll| default_handler::picker_outdated(&current, &dll))),
@@ -459,7 +499,8 @@ fn default_apps_view(data: &Path) -> anyhow::Result<DefaultAppsView> {
     })
 }
 
-/// Sends programs' Open windows to Firewol. If Firewol cannot answer, Windows' window opens.
+/// Sends programs' Open and Save windows to Firewol. If Firewol cannot answer, Windows' window
+/// opens.
 #[tauri::command]
 async fn set_file_dialogs(
     window: Window,
@@ -508,6 +549,9 @@ fn pick_view(request: &PickRequest) -> PickView {
     PickView {
         folders: request.folders,
         multi: request.multi,
+        save: request.save,
+        overwrite_prompt: request.overwrite_prompt,
+        ok_label: request.ok_label.clone(),
         title: request.title.clone(),
         file_name: request.file_name.clone(),
         types: request
@@ -545,11 +589,12 @@ fn run_pick(app: &AppHandle, pipe: &str) -> anyhow::Result<()> {
     );
     let settings = app.state::<Files>().0.settings();
     let usable = |folder: &Path| firewol_core::explorer::resolve_directory(folder).ok();
-    // The last place anything was chosen from comes first, in every program.
-    let start = settings
-        .pick_folder
-        .as_deref()
+    // A file being saved again starts in its own folder. Otherwise the last place anything was
+    // chosen from comes first, in every program.
+    let start = request
+        .save_as_folder()
         .and_then(usable)
+        .or_else(|| settings.pick_folder.as_deref().and_then(usable))
         .or_else(|| request.folder.as_deref().and_then(usable))
         .or_else(|| {
             let (tabs, active) = settings.startup_tabs();
@@ -701,6 +746,44 @@ async fn pick_resolve(
     .await
 }
 
+/// What a name typed in a Save window means, relative to the open folder `base`.
+#[tauri::command]
+async fn pick_save_target(
+    window: Window,
+    state: State<'_, App>,
+    base: String,
+    text: String,
+    type_index: u32,
+) -> Result<contract::PickSaveTarget, String> {
+    let request = lock(&state.pickers)
+        .get(window.label())
+        .map(|picker| picker.request.clone())
+        .filter(|request| request.save)
+        .ok_or("This window is not saving a file")?;
+    blocking(move || {
+        let target = request.save_target(Path::new(&base), &text, type_index);
+        let (kind, path, message) = match target {
+            SaveTarget::Folder(path) => ("folder", Some(path), None),
+            SaveTarget::Exists(path) => ("exists", Some(path), None),
+            SaveTarget::New(path) => match path.parent() {
+                Some(folder) if request.test_create && !picker_pipe::accepts_new_files(folder) => (
+                    "refused",
+                    None,
+                    Some("Firewol can't save a new file in this folder".to_owned()),
+                ),
+                _ => ("new", Some(path), None),
+            },
+            SaveTarget::Refused(message) => ("refused", None, Some(message)),
+        };
+        Ok(contract::PickSaveTarget {
+            kind: kind.to_owned(),
+            path: path.as_deref().map(folders::text).unwrap_or_default(),
+            message,
+        })
+    })
+    .await
+}
+
 /// The window is on screen; the waiting program stops timing the start.
 #[tauri::command]
 async fn pick_ready(window: Window, state: State<'_, App>) -> Result<(), String> {
@@ -714,13 +797,15 @@ async fn pick_ready(window: Window, state: State<'_, App>) -> Result<(), String>
     }
 }
 
-/// Answers the program and closes the window; `None` is Cancel.
+/// Answers the program and closes the window; `None` is Cancel. A Save window also reports the
+/// file type that was chosen.
 #[tauri::command]
 async fn finish_pick(
     window: Window,
     state: State<'_, App>,
     files: State<'_, Files>,
     paths: Option<Vec<String>>,
+    type_index: Option<u32>,
 ) -> Result<(), String> {
     let picker = lock(&state.pickers).remove(window.label());
     let Some(picker) = picker else {
@@ -738,9 +823,16 @@ async fn finish_pick(
                 .iter()
                 .all(|path| picker_pipe::acceptable(&picker.request, path))
             {
-                return Err("This program cannot open that item".into());
+                return Err(if picker.request.save {
+                    "This program cannot save there".into()
+                } else {
+                    "This program cannot open that item".into()
+                });
             }
-            let answered = picker.client.finish(&paths);
+            let type_index = type_index
+                .filter(|_| picker.request.save)
+                .filter(|index| (1..=picker.request.types.len() as u32).contains(index));
+            let answered = picker.client.finish(&paths, type_index);
             // Remembered for every program, so the next Open window starts here.
             let folder = if picker.request.folders {
                 paths.first().cloned()
@@ -759,8 +851,37 @@ async fn finish_pick(
             answered
         }
     };
+    let client = picker.client.clone();
+    let _ = blocking(move || {
+        client.wait_back(BACK_WITHIN);
+        Ok(())
+    })
+    .await;
     let _ = window.destroy();
     answered.map_err(message)
+}
+
+/// How long a closing Open or Save window waits for the program to take the focus back.
+const BACK_WITHIN: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Cancel through the window's own X or Alt+F4. The window stays until the program has its focus
+/// back, which closing it first would hand to some other program. The interface leaves Open and
+/// Save windows to this, so it also closes one that has already answered.
+fn cancel_pick_on_close(window: &Window) -> bool {
+    if !window.label().starts_with(PICK_LABEL) {
+        return false;
+    }
+    let picker = lock(&window.state::<App>().pickers).remove(window.label());
+    let window = window.clone();
+    std::thread::spawn(move || {
+        if let Some(picker) = picker
+            && picker.client.cancel().is_ok()
+        {
+            picker.client.wait_back(BACK_WITHIN);
+        }
+        let _ = window.destroy();
+    });
+    true
 }
 
 /// Shows the chosen file type and re-reads the open folder in the interface.
@@ -781,6 +902,68 @@ async fn default_apps() -> Result<DefaultAppsView, String> {
 
 /// Changes how Windows opens folders, after asking outside the WebView. Report mode is refused:
 /// the unattended self-test isolates files, but the registry is the real one.
+/// True when a folder could not be opened only because this account may not list it, which
+/// Continue can change (Explorer's "You don't currently have permission to access this folder").
+#[tauri::command]
+async fn folder_access_denied(path: String) -> Result<bool, String> {
+    blocking(move || Ok(access::is_access_denied(Path::new(&path)))).await
+}
+
+/// Continue: Windows asks for administrator consent, then the account may read and list the
+/// folder from now on.
+#[tauri::command]
+async fn grant_folder_access(
+    window: Window,
+    state: State<'_, App>,
+    path: String,
+) -> Result<(), String> {
+    if state.report.is_some() {
+        return Err("Folder permissions cannot change during a test run".into());
+    }
+    let owner = owner(&window)?;
+    blocking(move || access::request_access(Path::new(&path), HWND(owner as _))).await
+}
+
+/// The Recycle Bin of every fixed drive, newest first.
+#[tauri::command]
+async fn recycle_bin_list() -> Result<Vec<contract::RecycledView>, String> {
+    blocking(|| {
+        Ok(recycle_bin::list()?
+            .into_iter()
+            .map(|item| contract::RecycledView {
+                name: item.name(),
+                from: item.original.parent().map(text).unwrap_or_default(),
+                path: text(&item.path),
+                directory: item.directory,
+                size: item.size,
+                deleted: item.deleted,
+            })
+            .collect())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn recycle_bin_restore(paths: Vec<String>) -> Result<(), String> {
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    blocking(move || recycle_bin::restore(&paths)).await
+}
+
+#[tauri::command]
+async fn recycle_bin_delete(paths: Vec<String>) -> Result<(), String> {
+    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+    blocking(move || recycle_bin::delete_forever(&paths)).await
+}
+
+/// Empties every drive's bin. A test run must never empty the person's real Recycle Bin.
+#[tauri::command]
+async fn recycle_bin_empty(state: State<'_, App>) -> Result<(), String> {
+    if state.report.is_some() {
+        return Err("The Recycle Bin cannot be emptied during a test run".into());
+    }
+    blocking(recycle_bin::empty).await
+}
+
 #[tauri::command]
 async fn set_default_folders(
     window: Window,
@@ -935,10 +1118,12 @@ async fn update_settings(
     let owner = owner(&window)?;
     // The self-test and the measuring scripts run unattended, in a process they started themselves.
     let unattended = state.report.is_some();
+    let folders = state.folders.clone();
     blocking(move || {
         let view = settings::update(&files, patch, |changes| {
             unattended || elevation::confirm_policy_change(HWND(owner as _), changes)
         })?;
+        folders.set_mix_folders(view.mix_folders);
         app.emit(contract::SETTINGS_CHANGED, &view)?;
         Ok(view)
     })
@@ -1055,6 +1240,25 @@ async fn run_as_administrator(
         actions::run_as_administrator(&target, &policy, HWND(owner as _))
     })
     .await
+}
+
+/// A default app changed somewhere. Windows announces it several times in a row, so the icons are
+/// read again once the announcements settle.
+fn default_apps_changed(app: AppHandle) -> impl Fn() + Send + Sync + 'static {
+    let (send, receive) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        while receive.recv().is_ok() {
+            while receive
+                .recv_timeout(std::time::Duration::from_millis(400))
+                .is_ok()
+            {}
+            app.state::<App>().icons.forget_all();
+            let _ = app.emit(contract::ICONS_CHANGED, ());
+        }
+    });
+    move || {
+        let _ = send.send(());
+    }
 }
 
 /// Tells every window that an item's Windows icon changed, after dropping the cached images.
@@ -1660,6 +1864,20 @@ fn ntfs_helper() -> Option<i32> {
     })
 }
 
+/// The elevated side of Continue: `--grant-access SID PATH`. Like the NTFS helper it returns
+/// before Tauri starts, so the elevated process never opens a window.
+fn grant_access_helper() -> Option<i32> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_none_or(|arg| arg != "--grant-access") {
+        return None;
+    }
+    let [_, sid, path] = args.as_slice() else {
+        eprintln!("Usage: --grant-access SID PATH");
+        return Some(1);
+    };
+    Some(access::run_grant_helper(&sid.to_string_lossy(), Path::new(path)) as i32)
+}
+
 /// `--restore-explorer` undoes the default-app registration even if the interface cannot start.
 fn restore_explorer() -> Option<i32> {
     std::env::args_os()
@@ -1690,6 +1908,7 @@ fn open_from_another_launch(app: &AppHandle, arguments: Vec<String>) {
             return;
         }
         Launch::Folder(folder) => text(&folder),
+        Launch::RecycleBin => recycle_bin::RECYCLE_BIN.to_owned(),
         Launch::Default | Launch::HandOff(_) => {
             let (tabs, active) = app.state::<Files>().0.settings().startup_tabs();
             tabs.get(active)
@@ -1713,7 +1932,10 @@ fn open_from_another_launch(app: &AppHandle, arguments: Vec<String>) {
 
 fn main() {
     firewol_core::explorer::volume::remember_executable();
-    if let Some(code) = ntfs_helper().or_else(restore_explorer) {
+    if let Some(code) = ntfs_helper()
+        .or_else(grant_access_helper)
+        .or_else(restore_explorer)
+    {
         std::process::exit(code);
     }
     match default_handler::classify(std::env::args_os().skip(1)) {
@@ -1726,6 +1948,9 @@ fn main() {
         }
         Launch::Folder(folder) => {
             let _ = LAUNCH_FOLDER.set(text(&folder));
+        }
+        Launch::RecycleBin => {
+            let _ = LAUNCH_FOLDER.set(recycle_bin::RECYCLE_BIN.to_owned());
         }
         Launch::Pick(pipe) => {
             let _ = LAUNCH_PICK.set(pipe);
@@ -1813,9 +2038,12 @@ fn main() {
             let _ = session.seed_groups();
             let session = Arc::new(session);
             let devices = app.handle().clone();
-            let _ = firewol_core::explorer::watch_devices(move || {
-                let _ = devices.emit(contract::DRIVES_CHANGED, ());
-            });
+            let _ = firewol_core::explorer::watch_system(
+                move || {
+                    let _ = devices.emit(contract::DRIVES_CHANGED, ());
+                },
+                default_apps_changed(app.handle().clone()),
+            );
             let styles = session.clone();
             app.state::<App>()
                 .folders
@@ -1828,6 +2056,9 @@ fn main() {
             app.state::<App>()
                 .folders
                 .use_views(move |folder| views.settings().views.get(&folder).copied());
+            app.state::<App>()
+                .folders
+                .set_mix_folders(session.settings().mix_folders.unwrap_or(false));
             refresh_remote_pins(app.handle().clone(), session.clone());
             app.manage(Files(session));
             match LAUNCH_PICK.get() {
@@ -1839,6 +2070,11 @@ fn main() {
             Ok(())
         })
         .on_window_event(move |window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                if cancel_pick_on_close(window) {
+                    api.prevent_close();
+                }
+            }
             WindowEvent::Destroyed => {
                 closing.close_owned(window.label());
                 let state = window.state::<App>();
@@ -1870,6 +2106,12 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             startup,
+            folder_access_denied,
+            grant_folder_access,
+            recycle_bin_list,
+            recycle_bin_restore,
+            recycle_bin_delete,
+            recycle_bin_empty,
             default_apps,
             remember_tabs,
             set_default_folders,
@@ -1877,6 +2119,7 @@ fn main() {
             pick_ready,
             pick_matches,
             pick_resolve,
+            pick_save_target,
             finish_pick,
             set_pick_filter,
             navigate,
@@ -1898,6 +2141,8 @@ fn main() {
             set_clipboard,
             paste,
             transfer,
+            transfer_paths,
+            drag_out,
             rename,
             recycle,
             subfolders,

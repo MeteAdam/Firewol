@@ -1,5 +1,5 @@
 //! Asks Firewol to pick files over a private named pipe, keeping the calling program responsive.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,6 +32,8 @@ const WAIT_OBJECT_FIRST: u32 = 0;
 pub struct PickRequest {
     pub folders: bool,
     pub multi: bool,
+    /// A Save window: one file, which need not exist yet.
+    pub save: bool,
     pub title: Option<String>,
     pub folder: Option<String>,
     pub file_name: Option<String>,
@@ -39,6 +41,20 @@ pub struct PickRequest {
     pub types: Vec<(String, String)>,
     /// One-based, as the Windows dialog counts them.
     pub type_index: u32,
+    /// What Windows adds to a typed name without an extension, such as `png`.
+    pub default_extension: Option<String>,
+    /// The program's own text for the Open or Save button.
+    pub ok_label: Option<String>,
+    /// The file the program is saving again; its folder and name come first.
+    pub save_as: Option<String>,
+    /// Ask before replacing a file that exists.
+    pub overwrite_prompt: bool,
+    /// The name must end in one of the chosen type's extensions.
+    pub strict_types: bool,
+    /// A read-only file may not be chosen.
+    pub no_read_only: bool,
+    /// Check that the folder accepts a new file before answering.
+    pub test_create: bool,
 }
 
 /// A value travels on one line, so it can hold neither the separator nor a line break.
@@ -48,16 +64,35 @@ fn field(value: &str) -> String {
 
 impl PickRequest {
     pub fn to_wire(&self) -> String {
+        let mode = if self.folders {
+            "folder"
+        } else if self.save {
+            "save"
+        } else {
+            "open"
+        };
         let mut text = format!(
-            "mode\t{}\nmulti\t{}\ntypeIndex\t{}\n",
-            if self.folders { "folder" } else { "open" },
+            "mode\t{mode}\nmulti\t{}\ntypeIndex\t{}\n",
             u8::from(self.multi),
             self.type_index
         );
+        if self.save {
+            for (key, on) in [
+                ("overwrite", self.overwrite_prompt),
+                ("strict", self.strict_types),
+                ("noReadOnly", self.no_read_only),
+                ("testCreate", self.test_create),
+            ] {
+                text.push_str(&format!("{key}\t{}\n", u8::from(on)));
+            }
+        }
         for (key, value) in [
             ("title", &self.title),
             ("folder", &self.folder),
             ("name", &self.file_name),
+            ("defaultExt", &self.default_extension),
+            ("okLabel", &self.ok_label),
+            ("saveAs", &self.save_as),
         ] {
             if let Some(value) = value {
                 text.push_str(&format!("{key}\t{}\n", field(value)));
@@ -71,9 +106,17 @@ impl PickRequest {
     }
 }
 
+/// What Firewol chose.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Pick {
+    pub paths: Vec<PathBuf>,
+    /// The file type chosen in a Save window, one-based.
+    pub type_index: Option<u32>,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Outcome {
-    Picked(Vec<PathBuf>),
+    Picked(Pick),
     Cancelled,
     /// Anything else: the caller shows the normal Windows window instead.
     Failed,
@@ -83,24 +126,54 @@ pub enum Outcome {
 struct Reply {
     collecting: bool,
     paths: Vec<PathBuf>,
+    type_index: Option<u32>,
+}
+
+/// A file to be saved need not exist, but its folder must, and it must not be a folder itself.
+fn savable(path: &Path) -> bool {
+    path.is_absolute() && path.parent().is_some_and(Path::is_dir) && !path.is_dir()
+}
+
+/// Whether the answer is one the program can use; anything else means Windows' own window.
+fn usable(request: &PickRequest, paths: &[PathBuf]) -> bool {
+    if request.save {
+        paths.len() == 1 && savable(&paths[0])
+    } else {
+        !paths.is_empty()
+            && (request.multi || paths.len() == 1)
+            && paths.iter().all(|path| path.exists())
+    }
 }
 
 /// Reads one finished line of the reply; returns the outcome once the reply is complete.
-fn take_line(line: &str, reply: &mut Reply, ready: &AtomicBool) -> Option<Outcome> {
+fn take_line(
+    line: &str,
+    reply: &mut Reply,
+    ready: &AtomicBool,
+    request: &PickRequest,
+) -> Option<Outcome> {
     match line {
         "ready" if !reply.collecting => ready.store(true, Ordering::Release),
         "cancel" if !reply.collecting => return Some(Outcome::Cancelled),
         "ok" if !reply.collecting => reply.collecting = true,
         "end" if reply.collecting => {
             let paths = std::mem::take(&mut reply.paths);
-            let usable = !paths.is_empty() && paths.iter().all(|path| path.exists());
-            return Some(if usable {
-                Outcome::Picked(paths)
+            return Some(if usable(request, &paths) {
+                Outcome::Picked(Pick {
+                    paths,
+                    type_index: reply.type_index,
+                })
             } else {
                 Outcome::Failed
             });
         }
         path if reply.collecting => reply.paths.push(PathBuf::from(path)),
+        typed if typed.starts_with("typeIndex\t") => {
+            reply.type_index = typed["typeIndex\t".len()..]
+                .parse()
+                .ok()
+                .filter(|index| (1..=request.types.len() as u32).contains(index));
+        }
         _ => {}
     }
     None
@@ -116,11 +189,18 @@ struct Shared {
 }
 
 impl Shared {
+    /// The pipe stays open: the program still tells Firewol when its window is back in front.
     fn finish(&self, outcome: Outcome) {
         *self
             .outcome
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(outcome);
+        unsafe {
+            let _ = SetEvent(HANDLE(self.done as _));
+        }
+    }
+
+    fn close(&self) {
         if let Some(pipe) = self
             .pipe
             .lock()
@@ -131,8 +211,26 @@ impl Shared {
                 let _ = CloseHandle(HANDLE(pipe as _));
             }
         }
+    }
+
+    /// Tells Firewol the program's window is enabled and in front, so Firewol may close its own.
+    fn say_back(&self) {
+        let Some(pipe) = *self
+            .pipe
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+        else {
+            return;
+        };
+        let pipe = HANDLE(pipe as _);
+        let Ok(event) = (unsafe { CreateEventW(None, true, false, None) }) else {
+            return;
+        };
+        let _ = complete(pipe, event, |overlapped| unsafe {
+            WriteFile(pipe, Some(b"back\n"), None, Some(overlapped))
+        });
         unsafe {
-            let _ = SetEvent(HANDLE(self.done as _));
+            let _ = CloseHandle(event);
         }
     }
 
@@ -170,13 +268,14 @@ fn complete(
     Ok(bytes)
 }
 
-fn serve(pipe: HANDLE, request: &str, shared: &Shared) -> Result<Outcome> {
+fn serve(pipe: HANDLE, request: &PickRequest, shared: &Shared) -> Result<Outcome> {
+    let wire = request.to_wire();
     let event = unsafe { CreateEventW(None, true, false, None)? };
     let result = (|| -> Result<Outcome> {
         complete(pipe, event, |overlapped| unsafe {
             ConnectNamedPipe(pipe, Some(overlapped))
         })?;
-        let mut unsent = request.as_bytes();
+        let mut unsent = wire.as_bytes();
         while !unsent.is_empty() {
             let sent = complete(pipe, event, |overlapped| unsafe {
                 WriteFile(pipe, Some(unsent), None, Some(overlapped))
@@ -202,9 +301,12 @@ fn serve(pipe: HANDLE, request: &str, shared: &Shared) -> Result<Outcome> {
             while let Some(end) = pending.iter().position(|&byte| byte == b'\n') {
                 let line: Vec<u8> = pending.drain(..=end).collect();
                 let text = String::from_utf8_lossy(&line[..end]);
-                if let Some(outcome) =
-                    take_line(text.trim_end_matches('\r'), &mut reply, &shared.ready)
-                {
+                if let Some(outcome) = take_line(
+                    text.trim_end_matches('\r'),
+                    &mut reply,
+                    &shared.ready,
+                    request,
+                ) {
                     return Ok(outcome);
                 }
             }
@@ -310,6 +412,19 @@ pub fn run_pick(
     ready_within: Duration,
     launch: impl FnOnce(&str) -> bool,
 ) -> Outcome {
+    run_pick_with(request, ready_within, launch, || {})
+}
+
+/// As `run_pick`, and `restore` puts the program's window back (enabled, in front) before
+/// Firewol hears `back` and closes its window. In that order Windows has no reason to hand the
+/// focus to another program, which it does when the window in front closes while the program's
+/// window is still disabled.
+pub fn run_pick_with(
+    request: &PickRequest,
+    ready_within: Duration,
+    launch: impl FnOnce(&str) -> bool,
+    restore: impl FnOnce(),
+) -> Outcome {
     let name = unique_pipe_name();
     let Ok(pipe) = create_pipe(&name) else {
         return Outcome::Failed;
@@ -327,10 +442,10 @@ pub fn run_pick(
         done: done.0 as isize,
     });
     let worker = {
-        let (shared, wire) = (shared.clone(), request.to_wire());
+        let (shared, request) = (shared.clone(), request.clone());
         let raw = pipe.0 as isize;
         std::thread::spawn(move || {
-            let outcome = serve(HANDLE(raw as _), &wire, &shared).unwrap_or(Outcome::Failed);
+            let outcome = serve(HANDLE(raw as _), &request, &shared).unwrap_or(Outcome::Failed);
             shared.finish(outcome);
         })
     };
@@ -355,6 +470,11 @@ pub fn run_pick(
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .take();
+    restore();
+    if finished && matches!(outcome, Some(Outcome::Picked(_) | Outcome::Cancelled)) {
+        shared.say_back();
+    }
+    shared.close();
     if finished {
         outcome.unwrap_or(Outcome::Failed)
     } else {

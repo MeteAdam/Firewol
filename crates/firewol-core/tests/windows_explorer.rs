@@ -31,6 +31,7 @@ fn sorting_by_date_mixes_folders_with_files() -> anyhow::Result<()> {
                 column: SortColumn::Modified,
                 descending,
                 group: false,
+                mix_folders: false,
             },
             &cancel,
         )?;
@@ -139,6 +140,7 @@ fn grouping_puts_new_items_first_and_counts_each_section() -> anyhow::Result<()>
             column: SortColumn::Name,
             descending: false,
             group: true,
+            mix_folders: false,
         },
         &cancel,
     )?;
@@ -165,7 +167,7 @@ fn grouping_puts_new_items_first_and_counts_each_section() -> anyhow::Result<()>
 }
 
 #[test]
-fn natural_sort_keeps_folders_first_and_pages_stable() -> anyhow::Result<()> {
+fn natural_sort_keeps_folders_together_like_explorer_and_pages_stable() -> anyhow::Result<()> {
     use firewol_core::explorer::{Cancellation, Directory, Sort, SortColumn, page};
     let fixture = tempfile::tempdir()?;
     for (name, size) in [("file10.txt", 10), ("file2.txt", 2), ("İzmir火.txt", 1)] {
@@ -194,20 +196,71 @@ fn natural_sort_keeps_folders_first_and_pages_stable() -> anyhow::Result<()> {
         names.iter().position(|name| name == "file2.txt")
             < names.iter().position(|name| name == "file10.txt")
     );
+    // Explorer reverses the whole order: largest files first, folders last.
     directory.sort(
         Sort {
             column: SortColumn::Size,
             descending: true,
             group: false,
+            mix_folders: false,
         },
         &cancel,
     )?;
     let items = directory.list_dir(page(0), &cancel)?.items;
-    assert!(items[0].directory);
-    assert_eq!(items[1].name(), "file10.txt");
+    assert_eq!(items[0].name(), "file10.txt");
+    assert!(items.last().expect("rows").directory);
     assert_eq!(
         directory.position(std::ffi::OsStr::new("file2.txt"))?,
-        Some(2)
+        Some(1)
+    );
+    Ok(())
+}
+
+#[test]
+fn folders_go_last_when_descending_and_mix_on_request() -> anyhow::Result<()> {
+    use firewol_core::explorer::{Cancellation, Directory, Sort, SortColumn, page};
+    let fixture = tempfile::tempdir()?;
+    for name in ["apple.txt", "cherry.txt"] {
+        std::fs::write(fixture.path().join(name), b"x")?;
+    }
+    for name in ["banana", "date"] {
+        std::fs::create_dir(fixture.path().join(name))?;
+    }
+    let cancel = Cancellation::default();
+    let mut directory = Directory::open(fixture.path())?;
+    directory.advance(128, &cancel)?;
+    let mut names = |descending, mix_folders| -> anyhow::Result<Vec<String>> {
+        directory.sort(
+            Sort {
+                column: SortColumn::Name,
+                descending,
+                group: false,
+                mix_folders,
+            },
+            &cancel,
+        )?;
+        Ok(directory
+            .list_dir(page(0), &cancel)?
+            .items
+            .iter()
+            .map(|item| item.name().to_string_lossy().into_owned())
+            .collect())
+    };
+    assert_eq!(
+        names(false, false)?,
+        ["banana", "date", "apple.txt", "cherry.txt"]
+    );
+    assert_eq!(
+        names(true, false)?,
+        ["cherry.txt", "apple.txt", "date", "banana"]
+    );
+    assert_eq!(
+        names(false, true)?,
+        ["apple.txt", "banana", "cherry.txt", "date"]
+    );
+    assert_eq!(
+        names(true, true)?,
+        ["date", "cherry.txt", "banana", "apple.txt"]
     );
     Ok(())
 }

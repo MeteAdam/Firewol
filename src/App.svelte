@@ -1,5 +1,6 @@
 <script lang="ts">
   import { emit, listen } from "@tauri-apps/api/event";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick, untrack } from "svelte";
   import { cubicOut } from "svelte/easing";
@@ -16,6 +17,7 @@
     SESSION_CHANGED,
     SETTINGS_CHANGED,
     ICON_CHANGED,
+    ICONS_CHANGED,
     DRIVES_CHANGED,
     FOLDER_CHANGED,
     OPEN_PATH,
@@ -42,11 +44,13 @@
   } from "./lib/contract";
   import FileIcon from "./lib/FileIcon.svelte";
   import FileList from "./lib/FileList.svelte";
+import RecycleBin from "./lib/RecycleBin.svelte";
+import { RECYCLE_BIN } from "./lib/recycleBin";
   import FolderIcon from "./lib/FolderIcon.svelte";
   import PickBar from "./lib/PickBar.svelte";
   import FolderStyleSheet from "./lib/FolderStyleSheet.svelte";
   import { formatCount, formatSize, useLocale, visibleName, withoutExtension } from "./lib/format";
-  import { iconChanged } from "./lib/icons.svelte";
+  import { iconChanged, iconsChanged } from "./lib/icons.svelte";
   import Icon from "./lib/Icon.svelte";
   import { NO_FILTERS, Pane, SELECT_ALL_LIMIT, itemKey } from "./lib/pane.svelte";
   import { COLOR_SLOTS, PRESETS, colors, mergeAppearance, paletteOf, presetClass } from "./lib/appearance";
@@ -123,6 +127,8 @@
   let places = $state.raw<MenuPlaces | null>(null);
   let menuAttributes = $state.raw<ItemAttributesView | null>(null);
   let takeOwnAsk = $state.raw<{ item: ItemRef; path: string }>();
+  /** A Save window named a file that exists. */
+  let replaceAsk = $state.raw<{ path: string }>();
   let toast = $state<{ message: string; undo: boolean; error: boolean }>();
   /** The running transfer, or the last result until dismissed; sent by the core every 250 ms. */
   let transfer = $state.raw<TransferStatus | null>(null);
@@ -232,7 +238,11 @@
     const request = ++settingsRefresh;
     try {
       const latest = await api.getSettings();
-      if (request === settingsRefresh) settings = withPending(latest);
+      if (request !== settingsRefresh) return;
+      // Another window changed how folders sort; this one's listings follow.
+      const resort = !!settings && settings.mix_folders !== latest.mix_folders;
+      settings = withPending(latest);
+      if (resort) allPanes().forEach((pane) => { if (pane.folder) void pane.refresh(); });
     } catch (reason) {
       if (request === settingsRefresh) notify(String(reason), { error: true });
     }
@@ -466,7 +476,9 @@
     // Answering another program: opening a file is the answer, and folders are just browsed.
     if (startup?.pick) {
       const files = entries.filter((entry) => !entry.directory);
-      if (files.length > 0 && !startup.pick.folders) void answerPick(files.map((entry) => entry.path));
+      // Saving over a file goes through the same checks as typing its name.
+      if (files.length > 0 && startup.pick.save) void saveTyped(files[0].name);
+      else if (files.length > 0 && !startup.pick.folders) void answerPick(files.map((entry) => entry.path));
       else if (entries[0]?.directory) void pane.open(entries[0].path);
       return;
     }
@@ -495,8 +507,34 @@
   async function answerPick(paths: string[] | null) {
     const pick = startup?.pick;
     const answer = paths && pick && !pick.multi ? paths.slice(0, 1) : paths;
-    try { await api.finishPick(answer); }
+    try { await api.finishPick(answer, pick?.save ? pickType : undefined); }
     catch (reason) { notify(String(reason), { error: true }); }
+  }
+
+  /** Save: a typed name becomes a path with the extension Windows would add, and a file that
+   *  exists is replaced only after asking when the program wants that. */
+  async function saveTyped(text: string) {
+    const pane = active;
+    const pick = startup?.pick;
+    if (!pane?.folder || !pick?.save) return;
+    try {
+      const target = await api.pickSaveTarget(pane.folder.path, text, pickType);
+      if (target.kind === "folder") {
+        await pane.open(target.path);
+        pickBar?.setText(pick.file_name ?? "");
+        pickBar?.focus();
+      } else if (target.kind === "refused") notify(target.message ?? `${text.trim()} cannot be saved`, { error: true });
+      else if (target.kind === "exists" && pick.overwrite_prompt) replaceAsk = { path: target.path };
+      else void answerPick([target.path]);
+    } catch (reason) {
+      notify(String(reason), { error: true });
+    }
+  }
+
+  function confirmReplace() {
+    const ask = replaceAsk;
+    replaceAsk = undefined;
+    if (ask) void answerPick([ask.path]);
   }
 
   function confirmPick() {
@@ -506,6 +544,8 @@
   }
 
   let pickBar = $state<PickBar>();
+  /** The file type chosen in the window, one-based; a Save window reports it back. */
+  let pickType = $state(1);
 
   const searchPick = (text: string) => (active?.folder ? api.pickMatches(active.folder.id, text) : Promise.resolve([]));
 
@@ -523,6 +563,7 @@
 
   /** Enter in the File name field: a file is the answer, a folder is opened. */
   async function openTypedName(text: string) {
+    if (startup?.pick?.save) return saveTyped(text);
     const pane = active;
     if (!pane?.folder || !startup?.pick) return;
     try {
@@ -538,6 +579,7 @@
   }
 
   async function changePickType(index: number) {
+    pickType = index;
     await api.setPickFilter(index).catch((reason) => notify(String(reason), { error: true }));
     await active?.refresh();
   }
@@ -653,7 +695,39 @@
     dragFrame = requestAnimationFrame(autoScroll);
   }
 
-  function dragMove(event: PointerEvent) { hover(event.clientX, event.clientY, event.shiftKey); }
+  function dragMove(event: PointerEvent) {
+    const outside = event.clientX < 0 || event.clientY < 0 || event.clientX >= innerWidth || event.clientY >= innerHeight;
+    const entries = drag?.entries;
+    if (!outside || !entries) return hover(event.clientX, event.clientY, event.shiftKey);
+    // Left the window: hand the files to the Shell so other programs can take them.
+    try { (event.target as Element | null)?.releasePointerCapture(event.pointerId); } catch { /* Not captured. */ }
+    endDrag();
+    const items = entries.flatMap((entry) => (entry.id ? [entry.id] : []));
+    if (items.length > 0 && items.length <= MAX_ITEMS) void api.dragOut(items).catch((reason) => notify(String(reason), { error: true }));
+  }
+
+  // Files dragged in from Explorer or the desktop: Tauri reports physical pixels and full paths.
+  let outerTarget: HTMLElement | undefined;
+  function outerDrop(payload: { type: string; position?: { x: number; y: number }; paths?: string[] }) {
+    outerTarget?.classList.remove("drop-target");
+    outerTarget = undefined;
+    if (payload.type === "leave" || !payload.position) return;
+    const target = dropAt(payload.position.x / devicePixelRatio, payload.position.y / devicePixelRatio);
+    if (payload.type === "over") {
+      outerTarget = target?.element;
+      outerTarget?.classList.add("drop-target");
+      return;
+    }
+    const paths = payload.paths ?? [];
+    if (paths.length === 0) return;
+    const refusal = !target ? "Drop on a folder, a pane, a tab or a pin"
+      : paths.some((path) => samePath(path.slice(0, path.lastIndexOf("\\")).replace(/\\$/, ""), target.path.replace(/\\$/, ""))) ? "Already in this folder"
+      : paths.some((path) => within(target.path, path)) ? "A folder cannot go into itself"
+      : paths.length > MAX_ITEMS ? `Drop at most ${MAX_ITEMS} items`
+      : "";
+    if (refusal || !target) notify(refusal, { error: true });
+    else void start(api.transferPaths(paths, target.item));
+  }
 
   function dragKey(event: KeyboardEvent) {
     if (!drag) return;
@@ -964,7 +1038,8 @@
     // The window's only tab closes the window. The tab stays intact until the usual close checks pass.
     if (!detached && slots.length === 1 && slot.tabs.length === 1) { await appWindow.close(); return; }
     if (tab.kind === "folder") { if (detached) tab.pane.release(); else tab.pane.close(); }
-    const index = slot.tabs.indexOf(tab);
+    // By id: the tab may be the plain object newTab returned rather than the state's proxy of it.
+    const index = slot.tabs.findIndex(current => current.id === tab.id);
     const wasActive = slot.activeTab === tab.id;
     slot.tabs = slot.tabs.filter(current => current.id !== tab.id);
     if (!slot.tabs.length) {
@@ -1151,6 +1226,7 @@
     },
     showHidden: (show) => void saveSettings({ show_hidden: show }).then(() => allPanes().forEach((pane) => { if (pane.folder) void pane.refresh(); })),
     showExtensions: (show) => void saveSettings({ show_extensions: show }),
+    mixFolders: (mix) => void saveSettings({ mix_folders: mix }).then(() => allPanes().forEach((pane) => { if (pane.folder) void pane.refresh(); })),
     attribute: (name, enabled) => {
       const item = menuTarget();
       const pane = active;
@@ -1194,6 +1270,7 @@
       grouped: active?.folder?.view?.group ?? false,
       showHidden: settings?.show_hidden ?? true,
       showExtensions: settings?.show_extensions ?? true,
+      mixFolders: settings?.mix_folders ?? false,
       pinned: menu.kind === "item" ? session.pins.some((pin) => pin.path === focused?.path) : pinned,
       searching: !!active?.searching,
       canElevate: canElevateShell(),
@@ -1878,6 +1955,26 @@
     await pane.open(`${root}\\locked`);
     await painted();
     check("an inaccessible folder explains itself and keeps the open folder", pane.folder?.path === from && /denied/i.test(pane.error) && document.querySelector(".status .error")?.textContent === pane.error, pane.error);
+    // Like Explorer it offers Continue; Cancel keeps the open folder. A test never asks for consent.
+    const deniedSheet = () => document.querySelector<HTMLDialogElement>('dialog[aria-label^="You don\'t currently have permission"]');
+    await waitFor(() => !!deniedSheet(), 5000, "the permission sheet");
+    const offered = [...deniedSheet()!.querySelectorAll("button")].map((button) => button.textContent?.trim());
+    [...deniedSheet()!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Cancel")!.click();
+    await waitFor(() => !deniedSheet(), 5000, "the permission sheet to close");
+    check("an inaccessible folder offers Continue, and Cancel keeps the open folder", offered.includes("Continue") && pane.folder?.path === from && pane.denied === null, offered.join());
+    // Opened on its own (Win+R, another program), there is no folder to keep: it must not hang on "Reading folder…".
+    const lockedSlot = slots.find((slot) => slot.tabs.some((tab) => tab.kind === "folder" && tab.pane === pane))!;
+    const homeTab = lockedSlot.tabs.find((tab) => tab.kind === "folder" && tab.pane === pane)!;
+    const lockedTab = await newTab(`${root}\\locked`, lockedSlot);
+    const lockedPane = lockedTab?.kind === "folder" ? lockedTab.pane : undefined;
+    await waitFor(() => !!lockedPane?.denied, 5000, "the refused folder in a new tab");
+    await painted();
+    const shown = document.querySelector(".denied")?.textContent ?? "";
+    check("a refused folder opened on its own shows its path and Continue instead of Reading folder…", !lockedPane!.folder && lockedPane!.label === "locked" && lockedPane!.deniedSegments.at(-1)?.name === "locked" && /permission/.test(shown) && /Continue/.test(shown) && !document.querySelector(".list .empty:not(.denied)"), shown);
+    if (lockedTab) await closeTab(lockedSlot, lockedTab);
+    // The tab this test works in was suspended meanwhile; it reloads before the next step.
+    await selectTab(lockedSlot, homeTab);
+    await waitFor(() => !!pane.folder && pane.folder.path === from, 5000, "the test tab to come back");
     let deep = `${root}\\Ünïcode 火 \u{1F600}`;
     for (let n = 1; n <= 8; n++) deep += `\\uzun-klasör-adı-${String(n).padStart(2, "0")}-${"x".repeat(20)}`;
     const file = "ünïcöde-火.txt";
@@ -2058,6 +2155,15 @@
     let result = await done;
     await source.refresh();
     check("the core recycles every selected item", result.succeeded && result.message === "Moved 3 items to Recycle Bin" && names(source).join() === "z-folder", `${result.message} / ${names(source).join()}`);
+    // The Recycle Bin opens in Firewol, not Explorer, and shows where each item came from.
+    const folderPath = source.folder!.path;
+    await source.open(RECYCLE_BIN);
+    const binRows = () => [...document.querySelectorAll<HTMLElement>("section.bin .row:not(.head)")];
+    await waitFor(() => files.split(",").every((name) => binRows().some((row) => row.title.toLowerCase() === `${folderPath}\\${name}`.toLowerCase())), 10000, "the recycled files in the Recycle Bin view");
+    check("the Recycle Bin opens in Firewol and lists each item with where it came from", source.recycle && source.crumbs[0]?.name === "Recycle Bin" && source.label === "Recycle Bin", source.label);
+    await source.back();
+    await tick();
+    check("Back leaves the Recycle Bin for the folder", !source.recycle && source.folder?.path === folderPath && source.path === folderPath, source.path);
     done = nextDone();
     undo();
     result = await done;
@@ -2467,6 +2573,14 @@
   async function pickSelfTest() {
     const pane = active!;
     await waitFor(() => pane.complete && (pane.pages[0]?.length ?? 0) > 0, 10000, "the picker's listing");
+    if (startup?.pick?.save) {
+      // The reason stays in the report; the waiting program hears Cancel and fails the run.
+      await savePickSelfTest().catch(async (reason) => {
+        await api.saveReport({ label: "pick-save", error: String(reason), toast: toast?.message ?? null, folder: active?.folder?.path ?? null, type: pickType }).catch(() => {});
+        await answerPick(null);
+      });
+      return;
+    }
     const items = pane.pages[0] ?? [];
     const filtered = items.some((entry) => entry.directory) && items.filter((entry) => !entry.directory).every((entry) => entry.name.endsWith(".txt"));
     const untouched = pane.selection.size === 0 && !!document.querySelector<HTMLButtonElement>(".pick-open")?.disabled;
@@ -2482,6 +2596,40 @@
     option.click();
     await waitFor(() => pane.selection.size === 1 && input.value === name, 5000, "the suggestion to select its row");
     document.querySelector<HTMLButtonElement>(".pick-open")!.click();
+  }
+
+  /** A Save window: the name comes prefilled, the type changes its extension, an existing name
+   *  asks before replacing, and the answer carries the chosen type. Cancels on any surprise. */
+  async function savePickSelfTest() {
+    const pick = startup!.pick!;
+    const input = document.querySelector<HTMLInputElement>(".pick-name")!;
+    const types = document.querySelector<HTMLSelectElement>(".pick-bar .types")!;
+    const button = document.querySelector<HTMLButtonElement>(".pick-open")!;
+    if (input.value !== (pick.file_name ?? "") || button.textContent?.trim() !== "Save") throw new Error("not prefilled");
+    const type = (index: number) => {
+      types.value = String(index);
+      types.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const write = (text: string) => {
+      input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    write("note.txt");
+    type(2);
+    await waitFor(() => input.value === "note.log", 2000, "the Log extension");
+    type(1);
+    await waitFor(() => input.value === "note.txt", 2000, "the Text extension");
+    if (pick.title === "Save a note") {
+      write("existing");
+      button.click();
+      await waitFor(() => !!document.querySelector(".replace-file"), 5000, "the Replace question");
+      document.querySelector<HTMLButtonElement>(".replace-file")!.click();
+    } else {
+      write("fresh");
+      type(2);
+      await waitFor(() => pickType === 2, 2000, "the Log type");
+      button.click();
+    }
   }
 
   async function startupSteps(check: Check) {
@@ -2564,6 +2712,17 @@
     try {
       const sourcePath = info.path;
       const destPath = `${source.folder?.segments.at(-2)?.path}\\dest`;
+      // Folders stay together as in Explorer: first ascending, last descending; or among files.
+      check("folders come first by name", names(source)[0] === "z-folder", names(source).join(", "));
+      await source.sortBy("name");
+      check("folders come last by name, descending", names(source).at(-1) === "z-folder", names(source).join(", "));
+      await source.sortBy("name");
+      await saveSettings({ mix_folders: true });
+      await source.refresh();
+      check("Mix folders with files sorts a folder among the files", names(source).indexOf("z-folder") > names(source).indexOf("note.txt"), names(source).join(", "));
+      await saveSettings({ mix_folders: false });
+      await source.refresh();
+      check("folders come first again", names(source)[0] === "z-folder", names(source).join(", "));
       pick(source, "note.txt");
       await waitFor(() => {
         const icon = document.querySelector<HTMLImageElement>('img[src^="http://icon.localhost/"]');
@@ -2745,13 +2904,14 @@
         check("Ctrl+Shift+N hands the tab to a new window", refused, "the old window can no longer drive the detached tab");
       }
     } catch (reason) {
-      if (steps.every((step) => step.ok)) steps.push({ step: "error", ok: false, detail: String(reason) });
+      if (steps.every((step) => step.ok)) steps.push({ step: "error", ok: false, detail: reason instanceof Error && reason.stack ? reason.stack.split("\n").slice(0, 4).join(" | ") : String(reason) });
     }
     await api.saveReport({ steps, passed: steps.every((step) => step.ok) });
   }
 
   onMount(() => {
     const unlisten = [
+      getCurrentWebview().onDragDropEvent((event) => outerDrop(event.payload)),
       listen<FolderProgress>(FOLDER_PROGRESS, (event) => panes.forEach((pane) => pane.progress(event.payload))),
       listen<IndexState>(INDEX_STATE, (event) => panes.forEach((pane) => pane.indexed(event.payload))),
       listen<number>(FOLDER_CHANGED, (event) => panes.forEach((pane) => pane.changed(event.payload))),
@@ -2761,6 +2921,7 @@
       listen<SessionState>(SESSION_CHANGED, (event) => (session = event.payload)),
       listen(SETTINGS_CHANGED, () => void refreshSettings()),
       listen<string>(ICON_CHANGED, (event) => windowsIconChanged(event.payload)),
+      listen(ICONS_CHANGED, () => iconsChanged()),
       listen(DRIVES_CHANGED, () => refreshDrives(300)),
       appWindow.onFocusChanged((event) => { if (event.payload) refreshDrives(); }),
       appWindow.listen<string>(OPEN_PATH, (event) => void newTab(event.payload)),
@@ -2768,6 +2929,9 @@
         // Not prevented: the API then destroys the window, which needs `core:window:allow-destroy`.
         if (allowClose) return;
         event.preventDefault();
+        // An Open or Save window: the core cancels it, waits until the program has its focus
+        // back, then destroys the window; closing it here would pass the focus to another program.
+        if (startup?.pick) return;
         // A failed save or query must never leave the window impossible to close.
         await flushAppearance().catch(() => {});
         await rememberTabs();
@@ -2812,6 +2976,7 @@
       const firstListMs = info.sinceStartMs + performance.now() - start;
       lists[0]?.focus();
       if (info.pick) {
+        pickType = info.pick.type_index;
         await api.pickReady();
         pickBar?.focus();
         if (info.selfTest) await pickSelfTest();
@@ -2874,9 +3039,9 @@
     {#if !settingsOnly}
     <div class="toolbar">
       <button class="ib" class:on={sidebar} aria-pressed={sidebar} aria-label="Sidebar (Ctrl+B)" title="Sidebar (Ctrl+B)" onclick={toggleSidebar}><Icon name="sidebar" /></button>
-      <button class="ib" aria-label="Back (Alt+Left)" title="Back (Alt+Left)" disabled={!active?.canBack} onclick={() => active?.back()}><Icon name="back" /></button>
+      <button class="ib" aria-label="Back (Alt+Left)" title="Back (Alt+Left)" disabled={!active?.canGoBack} onclick={() => active?.back()}><Icon name="back" /></button>
       <button class="ib" aria-label="Forward (Alt+Right)" title="Forward (Alt+Right)" disabled={!active?.canForward} onclick={() => active?.forward()}><Icon name="forward" /></button>
-      <button class="ib" aria-label="Up one level (Alt+Up)" title="Up one level (Alt+Up)" disabled={(active?.folder?.segments.length ?? 0) < 2} onclick={() => active?.up()}><Icon name="up" /></button>
+      <button class="ib" aria-label="Up one level (Alt+Up)" title="Up one level (Alt+Up)" disabled={!!active?.recycle || (active?.folder?.segments.length ?? 0) < 2} onclick={() => active?.up()}><Icon name="up" /></button>
       {#if editing}
         <form class="field address" onsubmit={submitAddress}>
           <label class="sr" for="address">Folder path</label>
@@ -2884,7 +3049,7 @@
         </form>
       {:else}
         <Breadcrumb
-          segments={active?.folder?.segments ?? []}
+          segments={active?.crumbs ?? []}
           icon={active?.icon}
           onopen={(path) => void active?.open(path)}
           onedit={editAddress}
@@ -2926,7 +3091,7 @@
             {@const style = styleOf(pin.item)}
             {@const place = { path: pin.path, item: pin.item, name: style?.alias || pin.name }}
             {@const showLine = !!pinDrag && !pinStays(pinDrag.path, pinDrag.before)}
-            <button class="pin" data-pin={pin.path} data-pinned class:on={pin.path === active?.folder?.path} class:moving={pinDrag?.path === pin.path} class:line-before={showLine && pinDrag?.before === pin.path} class:line-after={showLine && pinDrag?.before === null && pin === session.pins.at(-1)} title={pin.path} onpointerdown={(event) => pinDown(event, pin.path)} onclick={() => active?.open(pin.path)} onauxclick={(event) => placeAuxClick(event, place)} oncontextmenu={(event) => placeMenu(event, "pin", place)} onkeydown={(event) => placeMenu(event, "pin", place)}>
+            <button class="pin" data-pin={pin.path} data-pinned class:on={!active?.recycle && pin.path === active?.folder?.path} class:moving={pinDrag?.path === pin.path} class:line-before={showLine && pinDrag?.before === pin.path} class:line-after={showLine && pinDrag?.before === null && pin === session.pins.at(-1)} title={pin.path} onpointerdown={(event) => pinDown(event, pin.path)} onclick={() => active?.open(pin.path)} onauxclick={(event) => placeAuxClick(event, place)} oncontextmenu={(event) => placeMenu(event, "pin", place)} onkeydown={(event) => placeMenu(event, "pin", place)}>
               <FolderIcon color={tint(style)} glyph={style?.icon} icon={pin.icon} /><span>{style?.alias || pin.name}</span>
             </button>
           {:else}
@@ -2938,10 +3103,13 @@
           {#if pcOpen}
             {#each drives as drive (drive.path)}
               {@const place = { path: drive.path, item: drive.item, name: drive.name }}
-              <button class="pin" data-pin={drive.path} class:on={drive.path === active?.folder?.path} title={drive.path} onclick={() => active?.open(drive.path)} onauxclick={(event) => placeAuxClick(event, place)} oncontextmenu={(event) => placeMenu(event, "drive", place)} onkeydown={(event) => placeMenu(event, "drive", place)}>
+              <button class="pin" data-pin={drive.path} class:on={!active?.recycle && drive.path === active?.folder?.path} title={drive.path} onclick={() => active?.open(drive.path)} onauxclick={(event) => placeAuxClick(event, place)} oncontextmenu={(event) => placeMenu(event, "drive", place)} onkeydown={(event) => placeMenu(event, "drive", place)}>
                 <FolderIcon icon={drive.icon} /><span>{drive.name}</span>
               </button>
             {/each}
+            <button class="pin" data-pin={RECYCLE_BIN} class:on={!!active?.recycle} title="Recycle Bin" onclick={() => active?.open(RECYCLE_BIN)}>
+              <span class="bin-icon"><Icon name="trash" size={16} /></span><span>Recycle Bin</span>
+            </button>
           {/if}
         </nav>
         <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
@@ -2969,7 +3137,7 @@
             {#if slot.active?.kind === "folder"}
               {@const pane = slot.active.pane}
               <div class="pane-nav">
-                <button class="ib" title="Back" aria-label="Pane back" disabled={!pane.canBack} onclick={() => pane.back()}><Icon name="back" /></button>
+                <button class="ib" title="Back" aria-label="Pane back" disabled={!pane.canGoBack} onclick={() => pane.back()}><Icon name="back" /></button>
                 <button class="ib" title="Forward" aria-label="Pane forward" disabled={!pane.canForward} onclick={() => pane.forward()}><Icon name="forward" /></button>
                 <input class="field pane-address" aria-label="Pane folder path" value={pane.path} onfocus={() => (activeIndex = index)} onkeydown={(event) => { if (event.key === "Enter") void pane.open(event.currentTarget.value); }} />
                 <div class="pane-search" onfocusin={() => (activeIndex = index)}>
@@ -2978,7 +3146,9 @@
               </div>
             {/if}
           {/if}
-          {#if slot.active?.kind === "folder"}
+          {#if slot.active?.kind === "folder" && slot.active.pane.recycle}
+            <RecycleBin onactivate={() => (activeIndex = index)} onerror={(message) => notify(message, { error: true })} />
+          {:else if slot.active?.kind === "folder"}
           {#key slot.active.id}
           <FileList
             bind:this={lists[index]}
@@ -3103,6 +3273,15 @@
       </div>
     </Sheet>
   {/if}
+  {#if replaceAsk}
+    <Sheet title={`${visibleName(replaceAsk.path.split("\\").at(-1) ?? replaceAsk.path)} already exists`} onclose={() => (replaceAsk = undefined)}>
+      <p>Do you want to replace it?</p>
+      <div class="actions">
+        <button class="action" onclick={() => (replaceAsk = undefined)}>Cancel</button>
+        <button class="action primary replace-file" use:initialFocus onclick={confirmReplace}>Replace</button>
+      </div>
+    </Sheet>
+  {/if}
   {#if takeOwnAsk}
     <Sheet title="Take ownership?" onclose={() => (takeOwnAsk = undefined)}>
       <p>Administrators become the owner of <strong>{visibleName(takeOwnAsk.path)}</strong> and everything inside it, with full control.</p>
@@ -3130,6 +3309,17 @@
       <div class="actions">
         <button class="action" onclick={() => (volumeAsk = undefined)}>Cancel</button>
         <button class="action primary" onclick={startVolume}>Continue</button>
+      </div>
+    </Sheet>
+  {/if}
+  {#if active?.denied && active.folder}
+    {@const pane = active}
+    <Sheet title="You don't currently have permission to access this folder" onclose={() => pane.dismissDenied()}>
+      <p><strong>{visibleName(pane.denied!)}</strong></p>
+      <p class="muted">Continue asks Windows for administrator approval, then gives your account lasting permission to open this folder, as File Explorer does.</p>
+      <div class="actions">
+        <button class="action" onclick={() => pane.dismissDenied()}>Cancel</button>
+        <button class="action primary" use:initialFocus onclick={() => void pane.grantAccess()}><Icon name="shield" /> Continue</button>
       </div>
     </Sheet>
   {/if}

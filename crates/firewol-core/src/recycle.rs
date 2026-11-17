@@ -140,6 +140,16 @@ fn restore(
         identity(&open_item(&path)?)? == id,
         "Recycled item identity changed"
     );
+    undelete(bin, recycled)?;
+    ensure!(
+        identity(&open_item(original)?)? == id,
+        "Restored a different item"
+    );
+    Ok(())
+}
+
+/// Puts one recycled item back where it was deleted from, through the Recycle Bin's own Restore.
+pub(crate) fn undelete(bin: &IShellItem, recycled: &IShellItem) -> Result<()> {
     let item = namespace_item(bin, recycled)?;
     let menu: IContextMenu = unsafe { item.BindToHandler(None::<&IBindCtx>, &BHID_SFUIObject) }
         .context("Open exact recycled item's restore handler")?;
@@ -156,11 +166,12 @@ fn restore(
         ..Default::default()
     };
     unsafe { menu.InvokeCommand(&command) }.context("Restore the exact recycled item")?;
-    ensure!(
-        identity(&open_item(original)?)? == id,
-        "Restored a different item"
-    );
     Ok(())
+}
+
+/// The Recycle Bin as a Shell item, the parent every recycled item is restored through.
+pub(crate) fn bin_item() -> Result<IShellItem> {
+    Ok(unsafe { SHGetKnownFolderItem(&FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, None) }?)
 }
 
 pub(crate) struct RecycledItem {

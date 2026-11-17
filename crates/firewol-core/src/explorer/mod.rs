@@ -1,8 +1,10 @@
+pub mod access;
 pub mod actions;
 pub mod custom_icon;
 mod date_groups;
 pub mod default_handler;
 mod directory;
+pub mod drag_out;
 mod drives;
 pub mod elevation;
 pub mod icons;
@@ -11,6 +13,7 @@ mod modern_menu;
 mod operations;
 pub mod picker_pipe;
 mod places;
+pub mod recycle_bin;
 mod search;
 mod session;
 mod settings;
@@ -20,7 +23,7 @@ mod watch;
 pub use watch::watch_directory;
 
 pub use directory::{Directory, Group, ListFilter, ListedRows, Sort, SortColumn};
-pub use drives::{Drive, drives, go_to_folders, is_remote, watch_devices};
+pub use drives::{Drive, drives, go_to_folders, is_remote, watch_system};
 pub use operations::{
     MAX_TRANSFER_ITEMS, Operation, OperationResult, Operations, TransferControl, TransferProgress,
     TransferRequest, TransferState,

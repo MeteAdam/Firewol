@@ -50,6 +50,7 @@ export type MenuActions = {
   takeOwnership(): void;
   showHidden(show: boolean): void;
   showExtensions(show: boolean): void;
+  mixFolders(mix: boolean): void;
   attribute(name: AttributeName, enabled: boolean): void;
   newFolder(name: "datetime" | "guid"): void;
   newFile(kind: NewFileKind): void;
@@ -86,6 +87,8 @@ export type MenuEnv = {
   grouped: boolean;
   showHidden: boolean;
   showExtensions: boolean;
+  /** Folders sort among files instead of staying together. */
+  mixFolders: boolean;
   /** The folder is pinned to the sidebar. */
   pinned: boolean;
   searching: boolean;
@@ -333,6 +336,8 @@ export function areaMenu(env: MenuEnv): MenuNode[] {
     separator,
     command("Ascending", undefined, () => act.direction(false), { radio: !env.sort.descending, disabled: env.searching }),
     command("Descending", undefined, () => act.direction(true), { radio: env.sort.descending, disabled: env.searching }),
+    separator,
+    command("Mix folders with files", env.mixFolders ? "check" : undefined, () => act.mixFolders(!env.mixFolders), { check: env.mixFolders, disabled: env.searching }),
   ];
   const grouping: MenuNode[] = [
     command("None", undefined, () => act.group(false), { radio: !env.grouped, disabled: env.searching }),

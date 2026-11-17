@@ -13,7 +13,7 @@
     /** Items of the open folder whose names contain the text. */
     onsearch: (text: string) => Promise<PickMatch[]>;
     onmatch: (match: PickMatch) => void;
-    /** Enter on a name or path that was typed rather than picked from the list. */
+    /** Enter on a name or path that was typed rather than picked from the list; every Save. */
     ontyped: (text: string) => void;
     onresize: () => void;
   } = $props();
@@ -25,10 +25,38 @@
   let typing = $state(false);
   let matches = $state<PickMatch[]>([]);
   let highlight = $state(-1);
+  let typeIndex = $state(untrack(() => pick.type_index));
   let timer: ReturnType<typeof setTimeout> | undefined;
   let searchId = 0;
 
-  const canOpen = $derived(chosen.length > 0 || pick.folders || (typing && text.trim().length > 0));
+  const canOpen = $derived(pick.save ? text.trim().length > 0 : chosen.length > 0 || pick.folders || (typing && text.trim().length > 0));
+  const okLabel = $derived(pick.ok_label ?? (pick.save ? "Save" : pick.folders ? "Select folder" : "Open"));
+
+  /** The plain extensions of a pattern list such as `*.jpg;*.jpeg`, lowercase. */
+  function extensionsOf(spec: string | undefined) {
+    return (spec ?? "").split(";").map((part) => part.trim()).flatMap((part) => /^\*\.[^*?.]+$/.test(part) ? [part.slice(2).toLowerCase()] : []);
+  }
+
+  /** As in Windows' Save window: a name ending in the old type's extension takes the new one's. */
+  function chooseType(index: number) {
+    const before = extensionsOf(pick.types[typeIndex - 1]?.spec);
+    const after = extensionsOf(pick.types[index - 1]?.spec);
+    typeIndex = index;
+    if (pick.save && after.length > 0) {
+      const dot = text.lastIndexOf(".");
+      const extension = dot > 0 ? text.slice(dot + 1).toLowerCase() : "";
+      if (extension && (before.includes(extension) || pick.types.some((type) => extensionsOf(type.spec).includes(extension))) && !after.includes(extension)) {
+        text = `${text.slice(0, dot)}.${after[0]}`;
+      }
+    }
+    onfilter(index);
+  }
+
+  export function setText(value: string) {
+    closeList();
+    typing = false;
+    text = value;
+  }
 
   // Choosing in the list writes the names here, the way a Windows Open window does.
   $effect(() => {
@@ -41,8 +69,13 @@
     });
   });
 
+  /** In a Save window the name is selected without its extension, ready to be typed over. */
   export function focus() {
     field.focus();
+    if (pick.save && !typing) {
+      const dot = text.lastIndexOf(".");
+      field.setSelectionRange(0, dot > 0 ? dot : text.length);
+    }
   }
 
   function closeList() {
@@ -77,7 +110,9 @@
 
   function submit() {
     closeList();
-    if (typing && text.trim()) ontyped(text);
+    if (pick.save) {
+      if (text.trim()) ontyped(text);
+    } else if (typing && text.trim()) ontyped(text);
     else onopen();
   }
 
@@ -109,17 +144,17 @@
           {/each}
         </div>
       {/if}
-      <input id="pick-name" class="field-text pick-name" spellcheck="false" autocomplete="off" role="combobox" aria-expanded={matches.length > 0} aria-controls="pick-name" placeholder={pick.folders ? "Type a folder name or path" : "Type to find a file, or paste a path"} bind:this={field} bind:value={text} oninput={input} onkeydown={keydown} onblur={closeList} />
+      <input id="pick-name" class="field-text pick-name" spellcheck="false" autocomplete="off" role="combobox" aria-expanded={matches.length > 0} aria-controls="pick-name" placeholder={pick.folders ? "Type a folder name or path" : pick.save ? "Type a name for the file" : "Type to find a file, or paste a path"} bind:this={field} bind:value={text} oninput={input} onkeydown={keydown} onblur={closeList} />
     </div>
     {#if pick.types.length > 0 && !pick.folders}
-      <select class="field-text types" aria-label="File type" value={pick.type_index} onchange={(event) => onfilter(Number(event.currentTarget.value))}>
+      <select class="field-text types" aria-label={pick.save ? "Save as type" : "File type"} value={typeIndex} onchange={(event) => chooseType(Number(event.currentTarget.value))}>
         {#each pick.types as type, index (index)}<option value={index + 1}>{type.name} ({type.spec})</option>{/each}
       </select>
     {/if}
   </div>
   <div class="row end">
     {#if pick.title}<strong class="title" title={pick.title}>{pick.title}</strong>{/if}
-    <button class="action primary pick-open" disabled={!canOpen} onclick={submit}>{pick.folders ? "Select folder" : "Open"}</button>
+    <button class="action primary pick-open" disabled={!canOpen} onclick={submit}>{okLabel}</button>
     <button class="action pick-cancel" onclick={oncancel}>Cancel</button>
   </div>
   <!-- svelte-ignore a11y_no_static_element_interactions -->

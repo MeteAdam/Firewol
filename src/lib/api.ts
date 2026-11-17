@@ -27,8 +27,10 @@ import type {
   DefaultAppsView,
   PickMatch,
   PickResolved,
+  PickSaveTarget,
   MenuPlaces,
   ItemAttributesView,
+  RecycledView,
 } from "./contract";
 
 export type TerminalKind = "command_prompt" | "power_shell" | "windows_terminal" | "system_information";
@@ -36,6 +38,12 @@ export type AttributeName = "hidden" | "system" | "read_only" | "archive";
 
 export const api = {
   startup: () => invoke<Startup>("startup"),
+  folderAccessDenied: (path: string) => invoke<boolean>("folder_access_denied", { path }),
+  grantFolderAccess: (path: string) => invoke<void>("grant_folder_access", { path }),
+  recycleBinList: () => invoke<RecycledView[]>("recycle_bin_list"),
+  recycleBinRestore: (paths: string[]) => invoke<void>("recycle_bin_restore", { paths }),
+  recycleBinDelete: (paths: string[]) => invoke<void>("recycle_bin_delete", { paths }),
+  recycleBinEmpty: () => invoke<void>("recycle_bin_empty"),
   getSettings: () => invoke<SettingsView>("get_settings"),
   updateSettings: (patch: SettingsPatch) => invoke<SettingsView>("update_settings", { patch }),
   /** `null` (or an empty style) clears the folder's customization. */
@@ -57,7 +65,8 @@ export const api = {
   pickReady: () => invoke<void>("pick_ready"),
   pickMatches: (id: number, text: string) => invoke<PickMatch[]>("pick_matches", { id, text }),
   pickResolve: (base: string, text: string) => invoke<PickResolved>("pick_resolve", { base, text }),
-  finishPick: (paths: string[] | null) => invoke<void>("finish_pick", { paths }),
+  pickSaveTarget: (base: string, text: string, typeIndex: number) => invoke<PickSaveTarget>("pick_save_target", { base, text, typeIndex }),
+  finishPick: (paths: string[] | null, typeIndex?: number) => invoke<void>("finish_pick", { paths, typeIndex: typeIndex ?? null }),
   setPickFilter: (index: number) => invoke<void>("set_pick_filter", { index }),
   folderGroups: (id: number) => invoke<FolderGroup[]>("folder_groups", { id }),
   locateSelection: (id: number, items: ItemRef[]) => invoke<(number | null)[]>("locate_selection", { id, items }),
@@ -74,6 +83,8 @@ export const api = {
   paste: (into: ItemRef) => invoke<void>("paste", { into }),
   transfer: (items: ItemRef[], into: ItemRef, moveItems: boolean) =>
     invoke<void>("transfer", { items, into, moveItems }),
+  transferPaths: (paths: string[], into: ItemRef) => invoke<void>("transfer_paths", { paths, into }),
+  dragOut: (items: ItemRef[]) => invoke<void>("drag_out", { items }),
   rename: (item: ItemRef, name: string) => invoke<void>("rename", { item, name }),
   /** One batch: a single undo restores every item. */
   recycle: (items: ItemRef[]) => invoke<void>("recycle", { items }),

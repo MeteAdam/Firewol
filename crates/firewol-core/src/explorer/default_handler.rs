@@ -44,7 +44,9 @@ pub enum Launch {
     Folder(PathBuf),
     /// A program's Open window is waiting on this pipe for Firewol's answer.
     Pick(String),
-    /// Something only Explorer can show: Control Panel, the Recycle Bin, a library.
+    /// The Recycle Bin, which Firewol shows itself.
+    RecycleBin,
+    /// Something only Explorer can show: Control Panel, a library.
     HandOff(OsString),
 }
 
@@ -63,6 +65,9 @@ pub fn classify(mut arguments: impl Iterator<Item = OsString>) -> Launch {
     }
     if text.starts_with('-') {
         return Launch::Default;
+    }
+    if super::recycle_bin::is_recycle_bin(&text) {
+        return Launch::RecycleBin;
     }
     if text.starts_with("::") || text.to_lowercase().starts_with("shell:") {
         return Launch::HandOff(argument);
@@ -521,8 +526,9 @@ impl FolderHandler {
 }
 
 const OPEN_DIALOG_CLASS: &str = "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}";
-/// The Save class is only ever removed: the earlier test build registered it too.
-const DIALOG_CLASSES: [&str; 2] = [OPEN_DIALOG_CLASS, "{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}"];
+const SAVE_DIALOG_CLASS: &str = "{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}";
+/// Firewol stands in front of both of Windows' file windows.
+const DIALOG_CLASSES: [&str; 2] = [OPEN_DIALOG_CLASS, SAVE_DIALOG_CLASS];
 const PICKER_NAME: &str = "firewol-picker";
 const PICKER_BUILD_NAME: &str = "firewol_picker.dll";
 
@@ -586,20 +592,20 @@ pub fn confirm_picker(owner: HWND) -> bool {
         MessageBoxW(
             Some(owner),
             w!(
-                "Programs that open an Open window will load a small Firewol DLL and show Firewol \
-                 instead.\n\n\
-                 If Firewol cannot answer, the normal Windows window opens. Save windows stay as \
-                 they are. Windows or antivirus software may flag this technique.\n\n\
+                "Programs that open an Open or Save window will load a small Firewol DLL and show \
+                 Firewol instead.\n\n\
+                 If Firewol cannot answer, the normal Windows window opens. Windows or antivirus \
+                 software may flag this technique.\n\n\
                  You can turn this off in Settings, or run firewol-tauri.exe --restore-explorer."
             ),
-            w!("Open files through Firewol?"),
+            w!("Open and save files through Firewol?"),
             MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2,
         )
     };
     answer == IDOK
 }
 
-/// The per-user registration that puts Firewol in front of Windows' Open window.
+/// The per-user registration that puts Firewol in front of Windows' Open and Save windows.
 pub struct FileDialogs {
     root: String,
 }
@@ -635,18 +641,31 @@ impl FileDialogs {
             .map(PathBuf::from)
     }
 
+    /// An earlier version registered the Open window only; Update copy adds the Save window.
+    pub fn is_incomplete(&self) -> bool {
+        self.is_enabled()
+            && !self
+                .registered(SAVE_DIALOG_CLASS)
+                .is_some_and(|value| Self::is_ours(&value))
+    }
+
     /// Refuses to replace another program's registration.
     pub fn enable(&self, dll: &Path) -> Result<()> {
-        if let Some(value) = self.registered(OPEN_DIALOG_CLASS) {
-            ensure!(
-                Self::is_ours(&value),
-                "Another program already handles Open windows"
-            );
+        for class in DIALOG_CLASSES {
+            if let Some(value) = self.registered(class) {
+                ensure!(
+                    Self::is_ours(&value),
+                    "Another program already handles Windows' file windows"
+                );
+            }
         }
         let written = (|| {
-            let key = create_key(&self.server(OPEN_DIALOG_CLASS))?;
-            write_value(&key, PCWSTR::null(), &dll.display().to_string())?;
-            write_value(&key, w!("ThreadingModel"), "Apartment")
+            for class in DIALOG_CLASSES {
+                let key = create_key(&self.server(class))?;
+                write_value(&key, PCWSTR::null(), &dll.display().to_string())?;
+                write_value(&key, w!("ThreadingModel"), "Apartment")?;
+            }
+            Ok(())
         })();
         if written.is_err() {
             let _ = self.disable();
@@ -788,28 +807,36 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_registers_the_open_window_and_leaves_nothing() -> Result<()> {
+    fn the_picker_registers_both_file_windows_and_leaves_nothing() -> Result<()> {
         let fixture = Fixture::new("probe")?;
         let probe = FileDialogs {
             root: fixture.handler.root.clone(),
         };
         let dll = Path::new(r"C:\Apps\firewol-picker-ab12.dll");
+        // An earlier version registered the Open window only.
+        let open_only = create_key(&probe.server(OPEN_DIALOG_CLASS))?;
+        write_value(&open_only, PCWSTR::null(), &dll.display().to_string())?;
+        drop(open_only);
+        assert!(probe.is_enabled() && probe.is_incomplete());
         probe.enable(dll)?;
-        assert!(probe.is_enabled());
-        assert!(
-            probe.registered(DIALOG_CLASSES[1]).is_none(),
-            "Save windows are left alone"
-        );
-        let key = open_key(&probe.server(DIALOG_CLASSES[0])).context("the key")?;
-        assert_eq!(
-            read_value(&key, w!("ThreadingModel")).as_deref(),
-            Some("Apartment")
-        );
-        drop(key);
+        assert!(probe.is_enabled() && !probe.is_incomplete());
+        for class in DIALOG_CLASSES {
+            let key = open_key(&probe.server(class)).context("the key")?;
+            assert_eq!(
+                read_value(&key, PCWSTR::null()).as_deref(),
+                Some(r"C:\Apps\firewol-picker-ab12.dll")
+            );
+            assert_eq!(
+                read_value(&key, w!("ThreadingModel")).as_deref(),
+                Some("Apartment")
+            );
+        }
         probe.disable()?;
         assert!(!probe.is_enabled());
-        let class = format!(r"{}\CLSID\{}", probe.root, DIALOG_CLASSES[0]);
-        assert!(open_key(&class).is_none());
+        for class in DIALOG_CLASSES {
+            let class = format!(r"{}\CLSID\{class}", probe.root);
+            assert!(open_key(&class).is_none());
+        }
         Ok(())
     }
 
@@ -819,7 +846,8 @@ mod tests {
         let probe = FileDialogs {
             root: fixture.handler.root.clone(),
         };
-        let foreign = create_key(&probe.server(DIALOG_CLASSES[0]))?;
+        // Another program owning the Save window alone is enough to refuse.
+        let foreign = create_key(&probe.server(SAVE_DIALOG_CLASS))?;
         write_value(&foreign, PCWSTR::null(), r"C:\Other\dialog.dll")?;
         drop(foreign);
         assert!(
@@ -827,9 +855,10 @@ mod tests {
                 .enable(Path::new(r"C:\Apps\firewol-picker-ab12.dll"))
                 .is_err()
         );
+        assert!(probe.registered(OPEN_DIALOG_CLASS).is_none());
         probe.disable()?;
         assert_eq!(
-            probe.registered(DIALOG_CLASSES[0]).as_deref(),
+            probe.registered(SAVE_DIALOG_CLASS).as_deref(),
             Some(r"C:\Other\dialog.dll")
         );
         Ok(())
@@ -844,13 +873,20 @@ mod tests {
         let folder = classify(args(fixture.path().as_os_str()));
         assert!(matches!(folder, Launch::Folder(_)));
         for virtual_target in [
-            "::{645FF040-5081-101B-9F08-00AA002F954E}",
             "shell:AppsFolder",
+            "::{26EE0668-A00A-44D7-9371-BEB064C98683}",
         ] {
             assert_eq!(
                 classify(args(OsStr::new(virtual_target))),
                 Launch::HandOff(virtual_target.into())
             );
+        }
+        // The Recycle Bin opens in Firewol, however Windows names it.
+        for bin in [
+            "::{645FF040-5081-101B-9F08-00AA002F954E}",
+            "shell:RecycleBinFolder",
+        ] {
+            assert_eq!(classify(args(OsStr::new(bin))), Launch::RecycleBin);
         }
         let file = fixture.path().join("a.txt");
         fs::write(&file, b"x")?;

@@ -2,9 +2,21 @@
 import type { PickType } from "./PickType";
 
 /**
- * What a program asked of its Open window; this window answers it.
+ * What a program asked of its Open or Save window; this window answers it.
  */
-export type PickView = { folders: boolean, multi: boolean, title: string | null, file_name: string | null, types: Array<PickType>, 
+export type PickView = { folders: boolean, multi: boolean, 
+/**
+ * A Save window: the name is typed or taken from the list, and the file need not exist.
+ */
+save: boolean, 
+/**
+ * Asks before replacing a file that exists.
+ */
+overwrite_prompt: boolean, 
+/**
+ * The program's own text for the Open or Save button.
+ */
+ok_label: string | null, title: string | null, file_name: string | null, types: Array<PickType>, 
 /**
  * One-based, as the Windows dialog counts them.
  */

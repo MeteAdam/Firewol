@@ -39,6 +39,7 @@ use super::search::{
 use super::{Cancellation, SearchIndex, attributes, encode, resolve_directory};
 use crate::file_identity::{FileIdentity, identity, open_item};
 use crate::ntfs::{self, Records};
+pub(crate) use pipe::pinned_self;
 pub use pipe::remember_executable;
 use pipe::{CHECKPOINT, FAILED, Pipe, REFERENCES, RESET, Sender};
 

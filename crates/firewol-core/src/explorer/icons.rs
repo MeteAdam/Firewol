@@ -71,6 +71,9 @@ struct Worker {
     busy_since: Mutex<Option<Instant>>,
     generation: AtomicUsize,
     abandoned: AtomicUsize,
+    /// Bumped when every cached icon may be wrong, such as after a default app changed. A counter
+    /// rather than a message, so a full queue cannot lose it.
+    cleared: AtomicUsize,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -103,10 +106,17 @@ impl Worker {
         }
         let mut cache: VecDeque<(String, u32, Arc<Vec<u8>>)> = VecDeque::new();
         let mut bytes = 0;
+        let mut cleared = self.cleared.load(Relaxed);
         loop {
             let Ok(message) = locked(&self.receive).recv() else {
                 break;
             };
+            let now_cleared = self.cleared.load(Relaxed);
+            if now_cleared != cleared {
+                cleared = now_cleared;
+                cache.clear();
+                bytes = 0;
+            }
             let job = match message {
                 Message::Get(job) => job,
                 Message::Forget(key) => {
@@ -190,6 +200,7 @@ impl Icons {
             busy_since: Mutex::default(),
             generation: AtomicUsize::default(),
             abandoned: AtomicUsize::default(),
+            cleared: AtomicUsize::default(),
         });
         worker.spawn()?;
         Ok(Self {
@@ -255,6 +266,11 @@ impl Icons {
     /// Makes the next request read the changed icon again.
     pub fn forget(&self, key: String) {
         let _ = self.send.try_send(Message::Forget(key));
+    }
+
+    /// Makes every later request read its icon again, for example after a default app changed.
+    pub fn forget_all(&self) {
+        self.worker.cleared.fetch_add(1, Relaxed);
     }
 }
 
@@ -962,7 +978,134 @@ mod tests {
         let first = fetch();
         assert!(Arc::ptr_eq(&first, &fetch()));
         icons.forget(program.clone());
-        assert!(!Arc::ptr_eq(&first, &fetch()));
+        let second = fetch();
+        assert!(!Arc::ptr_eq(&first, &second));
+        icons.forget_all();
+        assert!(!Arc::ptr_eq(&second, &fetch()));
+        Ok(())
+    }
+
+    /// A throwaway file type under the user's classes, removed again however the test ends.
+    struct TestType {
+        extension: String,
+        program: String,
+    }
+
+    impl TestType {
+        fn classes() -> windows::Win32::System::Registry::HKEY {
+            windows::Win32::System::Registry::HKEY_CURRENT_USER
+        }
+
+        fn set(path: &str, value: &str) -> Result<()> {
+            use windows::Win32::System::Registry::{
+                HKEY, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
+                RegSetValueExW,
+            };
+            let mut key = HKEY::default();
+            unsafe {
+                RegCreateKeyExW(
+                    Self::classes(),
+                    &HSTRING::from(format!(r"Software\Classes\{path}")),
+                    None,
+                    None,
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_WRITE,
+                    None,
+                    &mut key,
+                    None,
+                )
+                .ok()?;
+            }
+            let data: Vec<u8> = value
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let written = unsafe { RegSetValueExW(key, PCWSTR::null(), None, REG_SZ, Some(&data)) };
+            unsafe {
+                let _ = RegCloseKey(key);
+            }
+            written.ok()?;
+            Ok(())
+        }
+
+        fn new() -> Result<Self> {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let extension = format!("fwtest{}x{stamp:x}", std::process::id());
+            let program = format!("FirewolTest.{extension}");
+            let made = Self { extension, program };
+            Self::set(&format!(".{}", made.extension), &made.program)?;
+            Ok(made)
+        }
+
+        fn use_icon(&self, index: u32) -> Result<()> {
+            let mut system = [0u16; 260];
+            let length = unsafe {
+                windows::Win32::System::SystemInformation::GetSystemDirectoryW(Some(&mut system))
+            } as usize;
+            let system = String::from_utf16_lossy(&system[..length]);
+            let library = format!(r"{system}\shell32.dll");
+            Self::set(
+                &format!(r"{}\DefaultIcon", self.program),
+                &format!("{library},{index}"),
+            )
+        }
+    }
+
+    impl Drop for TestType {
+        fn drop(&mut self) {
+            use windows::Win32::System::Registry::RegDeleteTreeW;
+            for path in [format!(".{}", self.extension), self.program.clone()] {
+                unsafe {
+                    let _ = RegDeleteTreeW(
+                        Self::classes(),
+                        &HSTRING::from(format!(r"Software\Classes\{path}")),
+                    );
+                }
+            }
+            announce_association_change_elsewhere();
+        }
+    }
+
+    /// Windows' Open with window announces a new default app from its own process; this plays it.
+    fn announce_association_change_elsewhere() {
+        let _ = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--ignored",
+                "--exact",
+                "explorer::icons::tests::announce_association_change",
+            ])
+            .output();
+    }
+
+    #[test]
+    #[ignore = "run by an_association_change_reaches_the_next_icon in a process of its own"]
+    fn announce_association_change() {
+        unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None) };
+    }
+
+    #[test]
+    fn an_association_change_reaches_the_next_icon() -> Result<()> {
+        let kind = TestType::new()?;
+        kind.use_icon(1)?;
+        announce_association_change_elsewhere();
+        let icons = Icons::start()?;
+        let fetch = |size| {
+            icons
+                .request(format!("ext:{}", kind.extension), size)
+                .unwrap()
+                .recv_timeout(TIMEOUT)
+                .unwrap()
+                .unwrap()
+        };
+        let (small, large) = (fetch(16), fetch(96));
+        kind.use_icon(15)?;
+        announce_association_change_elsewhere();
+        icons.forget_all();
+        assert_ne!(small.as_slice(), fetch(16).as_slice(), "16 px");
+        assert_ne!(large.as_slice(), fetch(96).as_slice(), "96 px");
         Ok(())
     }
 }

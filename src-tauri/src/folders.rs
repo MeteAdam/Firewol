@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,6 +46,8 @@ pub struct Folders {
     styles: OnceLock<StyleSource>,
     show_hidden: OnceLock<HiddenSource>,
     views: OnceLock<ViewSource>,
+    /// Kept here rather than read from the settings file, because every page asks for it.
+    mix_folders: AtomicBool,
     pub volumes: Arc<Volumes>,
     /// What each Open window lists, by the window that shows it.
     filters: Mutex<HashMap<String, ListFilter>>,
@@ -131,6 +133,19 @@ impl Folders {
             .ok()
             .and_then(|folder| self.saved_view(&folder))
             .is_some_and(|view| view.group)
+    }
+
+    /// Folders sort among files in every column; panes pick it up as they reload.
+    pub fn set_mix_folders(&self, mix: bool) {
+        self.mix_folders.store(mix, Ordering::Relaxed);
+    }
+
+    fn sort_of(&self, sort: SortView, group: bool) -> Sort {
+        Sort {
+            group,
+            mix_folders: self.mix_folders.load(Ordering::Relaxed),
+            ..sort_core(sort)
+        }
     }
 
     pub fn set_filter(&self, owner: &str, filter: ListFilter) {
@@ -292,10 +307,7 @@ impl Folders {
         let listing = Cancellation::default();
         let mut directory = self.directory(path, owner)?;
         directory.advance(PAGE_SIZE, &listing)?;
-        let sort = Sort {
-            group: self.grouped(directory.path()),
-            ..sort_core(sort)
-        };
+        let sort = self.sort_of(sort, self.grouped(directory.path()));
         directory.sort(sort, &listing)?;
         let sort_ms = directory.sort_ms();
         let first = directory.list_dir(page(0), &cancel)?;
@@ -336,10 +348,7 @@ impl Folders {
         let listing = Cancellation::default();
         let mut directory = self.directory(&folder.path, &folder.owner)?;
         directory.advance(PAGE_SIZE, &listing)?;
-        let sort = Sort {
-            group: self.grouped(directory.path()),
-            ..sort_core(sort)
-        };
+        let sort = self.sort_of(sort, self.grouped(directory.path()));
         directory.sort(sort, &listing)?;
         let sort_ms = directory.sort_ms();
         let first = directory.list_dir(page(0), &listing)?;
@@ -389,10 +398,7 @@ impl Folders {
     pub fn page(&self, id: u64, offset: u32, sort: SortView) -> Result<Page> {
         let folder = self.get(id)?;
         let styles = self.styles();
-        let sort = Sort {
-            group: lock(&folder.sort).group,
-            ..sort_core(sort)
-        };
+        let sort = self.sort_of(sort, lock(&folder.sort).group);
         *lock(&folder.sort) = sort;
         let (rows, sorted) = {
             let mut directory = lock(&folder.directory);
@@ -690,6 +696,7 @@ fn sort_core(sort: SortView) -> Sort {
         },
         descending: sort.descending,
         group: false,
+        mix_folders: false,
     }
 }
 

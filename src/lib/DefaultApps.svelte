@@ -42,10 +42,10 @@
     <button class="action" class:primary={!status.folders} disabled={busy} aria-pressed={status.folders} onclick={() => setFolders(!status!.folders)}>{status.folders ? "Turn off" : "Turn on"}</button>
   {/if}
 </div>
-<div class="card spaced" aria-label="Open windows">
+<div class="card spaced" aria-label="Open and Save windows">
   <div class="text">
-    <strong>Open windows in other programs</strong>
-    <span class="muted">When a program asks you to choose a file or folder, Firewol opens to answer it. If Firewol cannot, the normal Windows window opens instead. Save windows stay as they are.</span>
+    <strong>Open and Save windows in other programs</strong>
+    <span class="muted">When a program asks you to choose a file or folder, or where to save one, Firewol opens to answer it. If Firewol cannot, the normal Windows window opens instead.</span>
   </div>
   {#if status}
     <button class="action" class:primary={!status.file_dialogs} disabled={busy} aria-pressed={status.file_dialogs} onclick={() => setDialogs(!status!.file_dialogs)}>{status.file_dialogs ? "Turn off" : "Turn on"}</button>
@@ -64,7 +64,7 @@
   <li>The desktop and the taskbar, which Explorer itself draws.</li>
   <li>The File Explorer icon pinned to the taskbar.</li>
   <li>Virtual folders such as the Recycle Bin, Control Panel and This PC.</li>
-  <li>Save windows, 32-bit programs, and programs running as administrator.</li>
+  <li>File windows of 32-bit programs, of programs running as administrator or in a sandbox, and of programs that add their own controls to the window.</li>
 </ul>
 
 <h3>Where it runs from</h3>
